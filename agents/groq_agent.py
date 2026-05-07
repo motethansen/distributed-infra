@@ -31,7 +31,7 @@ async def run(prompt: str, model: str = "") -> dict:
         return {"error": "agent CLI not found — install Cursor agent CLI", "agent": "groq", "ok": False}
 
     api_key = os.getenv("CURSOR_API_KEY", "")
-    args = [cli, "-p", prompt]
+    args = [cli, "-p", prompt, "--trust"]
     if api_key:
         args += ["--api-key", api_key]
 
