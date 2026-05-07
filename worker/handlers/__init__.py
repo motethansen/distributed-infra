@@ -15,14 +15,25 @@ CAPABILITIES: list[str] = [
 
 async def dispatch(task: Task) -> dict:
     """Route a task to the correct handler."""
-    from worker.handlers.common import handle_git_pull, handle_run_script
+    from worker.handlers.common import (
+        handle_git_pull,
+        handle_lint,
+        handle_npm_build,
+        handle_run_script,
+        handle_test_run,
+    )
 
     if task.type == "git_pull":
         return await handle_git_pull(task)
     if task.type == "run_script":
         return await handle_run_script(task)
+    if task.type == "test_run":
+        return await handle_test_run(task)
+    if task.type == "lint":
+        return await handle_lint(task)
+    if task.type == "npm_build":
+        return await handle_npm_build(task)
 
-    # Machine-specific handlers loaded lazily
     if task.type == "android_build":
         from worker.handlers.android import handle_android_build
         return await handle_android_build(task)
