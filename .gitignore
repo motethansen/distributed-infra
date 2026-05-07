@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# Data (SQLite queue lives here, not in git)
+data/
+*.db
+*.db-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+logs/
+*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
