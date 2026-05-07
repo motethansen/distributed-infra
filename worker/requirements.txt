@@ -4,3 +4,9 @@ httpx>=0.27
 pydantic>=2.7
 python-dotenv>=1.0
 pyyaml>=6.0
+
+# Agent SDKs
+anthropic>=0.40
+google-genai>=1.0
+groq>=0.11
+openai>=1.50

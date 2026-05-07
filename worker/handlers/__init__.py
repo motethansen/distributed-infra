@@ -34,6 +34,10 @@ async def dispatch(task: Task) -> dict:
     if task.type == "npm_build":
         return await handle_npm_build(task)
 
+    if task.type == "agent_run":
+        from worker.handlers.agent import handle_agent_run
+        return await handle_agent_run(task)
+
     if task.type == "android_build":
         from worker.handlers.android import handle_android_build
         return await handle_android_build(task)
