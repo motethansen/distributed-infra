@@ -30,10 +30,7 @@ async def run(prompt: str, model: str = "") -> dict:
     if not cli:
         return {"error": "agent CLI not found — install Cursor agent CLI", "agent": "groq", "ok": False}
 
-    api_key = os.getenv("CURSOR_API_KEY", "")
     args = [cli, "-p", prompt, "--trust"]
-    if api_key:
-        args += ["--api-key", api_key]
 
     proc = await asyncio.create_subprocess_exec(
         *args,
