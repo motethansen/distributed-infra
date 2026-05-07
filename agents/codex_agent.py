@@ -49,9 +49,9 @@ async def _run_sdk(prompt: str, model: str, api_key: str) -> dict:
 
 
 async def _run_cli(prompt: str, cli_path: str) -> dict:
-    # `codex exec <prompt>` runs non-interactively
+    # `codex exec -m gpt-4o <prompt>` runs non-interactively with a stable model
     proc = await asyncio.create_subprocess_exec(
-        cli_path, "exec", prompt,
+        cli_path, "exec", "-m", "gpt-4o", prompt,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
