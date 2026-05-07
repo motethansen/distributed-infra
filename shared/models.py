@@ -27,6 +27,8 @@ class TaskType(str, Enum):
     test_run = "test_run"
     lint = "lint"
     run_script = "run_script"
+    # Agent
+    agent_run = "agent_run"
     # Human review
     human_action = "human_action"
     custom = "custom"
