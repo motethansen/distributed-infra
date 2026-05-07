@@ -1,0 +1,30 @@
+machines:
+  michaels-macbook-pro:
+    tailscale_ip: "100.97.176.37"
+    role: orchestrator
+    os: macos
+    capabilities: []
+    queue_port: 8000
+
+  mac-mini:
+    tailscale_ip: "100.76.214.54"
+    role: worker
+    os: macos
+    capabilities:
+      - ios_build
+      - xcode
+      - swift
+      - testflight
+    worker_port: 8001
+
+  michaelhansen-thinkpad-x13-gen-4:
+    tailscale_ip: "100.112.241.6"
+    role: worker
+    os: linux
+    capabilities:
+      - android_build
+      - gradle
+      - python_backend
+      - node_backend
+      - docker
+    worker_port: 8001
