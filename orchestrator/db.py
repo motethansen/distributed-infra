@@ -29,13 +29,12 @@ CREATE TABLE IF NOT EXISTS tasks (
 """
 
 
-async def get_db() -> aiosqlite.Connection:
-    os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.execute(CREATE_TABLE)
-    await db.commit()
-    return db
+def _db_path() -> str:
+    path = DB_PATH
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return path
 
 
 def _row_to_task(row: aiosqlite.Row) -> Task:
@@ -47,8 +46,15 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
     return Task(**d)
 
 
+async def _ensure_schema(db: aiosqlite.Connection) -> None:
+    await db.execute(CREATE_TABLE)
+    await db.commit()
+
+
 async def insert_task(task: Task) -> Task:
-    async with await get_db() as db:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
         await db.execute(
             """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
@@ -65,14 +71,18 @@ async def insert_task(task: Task) -> Task:
 
 
 async def get_task(task_id: str) -> Task | None:
-    async with await get_db() as db:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
         async with db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)) as cur:
             row = await cur.fetchone()
     return _row_to_task(row) if row else None
 
 
 async def list_tasks(status: str | None = None, limit: int = 100) -> list[Task]:
-    async with await get_db() as db:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
         if status:
             async with db.execute(
                 "SELECT * FROM tasks WHERE status=? ORDER BY priority DESC, created_at ASC LIMIT ?",
@@ -90,8 +100,12 @@ async def list_tasks(status: str | None = None, limit: int = 100) -> list[Task]:
 
 async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | None:
     """Atomically claim the highest-priority pending task the worker can handle."""
+    if not capabilities:
+        return None
     cap_placeholders = ",".join("?" * len(capabilities))
-    async with await get_db() as db:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
         async with db.execute(
             f"""SELECT * FROM tasks
                 WHERE status='pending' AND type IN ({cap_placeholders})
@@ -116,12 +130,15 @@ async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | N
 async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
     if not fields:
         return await get_task(task_id)
+    fields = dict(fields)
     fields["updated_at"] = datetime.utcnow().isoformat()
     if "result" in fields and fields["result"] is not None:
         fields["result"] = json.dumps(fields["result"])
     set_clause = ", ".join(f"{k}=?" for k in fields)
     values = list(fields.values()) + [task_id]
-    async with await get_db() as db:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
         await db.execute(f"UPDATE tasks SET {set_clause} WHERE id=?", values)
         await db.commit()
     return await get_task(task_id)
