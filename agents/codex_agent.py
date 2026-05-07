@@ -18,8 +18,12 @@ import sys
 async def run(prompt: str, model: str = "gpt-4o") -> dict:
     api_key = os.getenv("OPENAI_API_KEY", "")
 
-    # Try OpenAI Codex CLI first if installed
-    codex_cli = shutil.which("codex")
+    # Prefer the npm-installed codex (newer) over any system codex
+    codex_cli = (
+        os.path.expanduser("~/.npm-global/bin/codex")
+        if os.path.isfile(os.path.expanduser("~/.npm-global/bin/codex"))
+        else shutil.which("codex")
+    )
     if codex_cli and not api_key:
         return await _run_cli(prompt, codex_cli)
 
@@ -49,11 +53,13 @@ async def _run_sdk(prompt: str, model: str, api_key: str) -> dict:
 
 
 async def _run_cli(prompt: str, cli_path: str) -> dict:
-    # `codex exec <prompt>` — let CLI use its configured default model
+    # Must run from a git repo dir; use the repo root this file lives in
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     proc = await asyncio.create_subprocess_exec(
         cli_path, "exec", prompt,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=repo_root,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
