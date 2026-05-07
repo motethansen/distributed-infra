@@ -18,11 +18,17 @@ class TaskStatus(str, Enum):
 
 
 class TaskType(str, Enum):
+    # Build
     android_build = "android_build"
     ios_build = "ios_build"
-    run_script = "run_script"
+    npm_build = "npm_build"
+    # Dev workflow
     git_pull = "git_pull"
-    human_action = "human_action"   # created by worker, resolved by human
+    test_run = "test_run"
+    lint = "lint"
+    run_script = "run_script"
+    # Human review
+    human_action = "human_action"
     custom = "custom"
 
 
