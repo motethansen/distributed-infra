@@ -26,7 +26,7 @@ class Poller:
             try:
                 await self._poll_once()
             except Exception as exc:
-                log.warning("Poller error: %s", exc)
+                log.warning("Poller error: %s: %s", type(exc).__name__, exc)
             await asyncio.sleep(self.interval)
 
     async def _poll_once(self) -> None:
