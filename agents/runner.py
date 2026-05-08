@@ -32,13 +32,15 @@ def _load_agents() -> None:
     AGENTS["codex"] = codex_run
 
 
-async def run_agent(agent: str, prompt: str, model: str | None = None) -> dict:
+async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str | None = None) -> dict:
     _load_agents()
     if agent not in AGENTS:
         return {"error": f"Unknown agent: {agent}. Choose from: {list(AGENTS)}", "ok": False}
     kwargs = {"prompt": prompt}
     if model:
         kwargs["model"] = model
+    if cwd:
+        kwargs["cwd"] = cwd
     return await AGENTS[agent](**kwargs)
 
 
