@@ -50,7 +50,7 @@ PROMPT_STYLE = Style.from_dict({
 AGENTS = ["claude", "gemini", "codex", "groq"]
 
 COMMANDS = [
-    "run", "test", "assign", "queue", "review",
+    "run", "test", "assign", "queue", "review", "failures",
     "status", "skills", "resolve", "ssh", "help", "exit", "quit",
 ]
 
@@ -628,6 +628,44 @@ def cmd_review(args: list[str]) -> None:
         console.print()
 
 
+def cmd_failures(args: list[str]) -> None:
+    """failures  — show all failed tasks with error details."""
+    try:
+        with _client() as c:
+            resp = c.get("/tasks", params={"status": "failed"})
+            resp.raise_for_status()
+            tasks = resp.json()
+    except Exception as e:
+        console.print(f"[red]✗ {e}[/red]")
+        return
+
+    if not tasks:
+        console.print("\n  [green]✓ No failed tasks.[/green]\n")
+        return
+
+    console.print(f"\n  [bold red]{len(tasks)} failed task(s)[/bold red]\n")
+    for t in tasks:
+        llm    = (t.get("payload") or {}).get("agent", "-")
+        prompt = (t.get("payload") or {}).get("prompt", "")
+        notes  = t.get("notes", "") or ""
+        # Show only the first meaningful error line — skip long stack traces
+        error_line = next(
+            (ln.strip() for ln in notes.splitlines() if ln.strip() and not ln.strip().startswith("at ")),
+            notes[:120],
+        )
+        console.print(
+            f"  [bold]{t['id'][:8]}[/bold]"
+            f"  [cyan]{t.get('assigned_to', '?')}[/cyan]"
+            f"  [dim]{llm}[/dim]"
+        )
+        if prompt:
+            console.print(f"    prompt: [dim]{prompt[:100]}[/dim]")
+        if error_line:
+            console.print(f"    error:  [red]{error_line[:120]}[/red]")
+        console.print(f"    [dim]resolve {t['id'][:8]} pending   # re-queue  |  resolve {t['id'][:8]} done   # dismiss[/dim]")
+        console.print()
+
+
 def cmd_resolve(args: list[str]) -> None:
     """
     resolve <task-id> [done|failed|pending] [--notes=...]
@@ -726,6 +764,9 @@ def cmd_help() -> None:
       [bold]review[/bold]
           Show all tasks waiting for human action, with resolve hints.
 
+      [bold]failures[/bold]
+          Show all failed tasks with the error message and re-queue / dismiss hints.
+
       [bold]resolve[/bold] <task-id> [done|failed|pending] [--notes=reason]
           Mark a needs_human task as done, failed, or re-queued.
       [bold]resolve all[/bold]
@@ -793,15 +834,16 @@ def _print_banner() -> None:
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
 DISPATCH = {
-    "run":     cmd_run,
-    "test":    cmd_test,
-    "assign":  cmd_assign,
-    "queue":   cmd_queue,
-    "review":  cmd_review,
-    "status":  cmd_status,
-    "skills":  cmd_skills,
-    "resolve": cmd_resolve,
-    "ssh":     cmd_ssh,
+    "run":      cmd_run,
+    "test":     cmd_test,
+    "assign":   cmd_assign,
+    "queue":    cmd_queue,
+    "review":   cmd_review,
+    "failures": cmd_failures,
+    "status":   cmd_status,
+    "skills":   cmd_skills,
+    "resolve":  cmd_resolve,
+    "ssh":      cmd_ssh,
 }
 
 
