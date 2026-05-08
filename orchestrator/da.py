@@ -188,9 +188,13 @@ def _push_task(task_type: str, payload: dict, notes: str = "", priority: int = 5
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 def cmd_assign(args: list[str]) -> None:
-    """assign [description] [--machine=X] [--llm=Y] [--type=Z]"""
+    """assign [description] [--machine=X] [--agent=Y] [--type=Z]"""
     if not args:
-        console.print("[dim]Usage: assign <task description> [--machine=mac-mini] [--llm=claude] [--type=agent_run][/dim]")
+        console.print(
+            "[dim]Usage: assign <task description> [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
+            "  --agent accepts: claude, gemini, codex, groq\n"
+            "  --machine must match a name in config/machines.yaml[/dim]"
+        )
         return
 
     # Parse inline flags
@@ -205,7 +209,8 @@ def cmd_assign(args: list[str]) -> None:
 
     description = " ".join(words)
     explicit_machine = flags.get("machine", "")
-    explicit_llm     = flags.get("llm", "")
+    # Accept --agent or --llm (legacy)
+    explicit_llm     = flags.get("agent", flags.get("llm", ""))
     explicit_type    = flags.get("type", "")
 
     routing: dict = {}
@@ -226,7 +231,7 @@ def cmd_assign(args: list[str]) -> None:
             machines = list(_worker_machines().keys())
             console.print(f"  Machines: {', '.join(machines)}")
             explicit_machine = explicit_machine or console.input("  Machine: ").strip()
-            explicit_llm     = explicit_llm     or console.input("  LLM (claude/gemini/codex/groq): ").strip()
+            explicit_llm     = explicit_llm     or console.input("  Agent (claude/gemini/codex/groq): ").strip()
             explicit_type    = explicit_type    or console.input("  Task type (agent_run/run_script/…): ").strip()
             routing = {"machine": explicit_machine, "llm": explicit_llm, "task_type": explicit_type, "reason": "manual"}
         # Override with any explicit flags
@@ -242,9 +247,41 @@ def cmd_assign(args: list[str]) -> None:
     task_type = routing.get("task_type", "agent_run")
     reason    = routing.get("reason", "")
 
+    # ── Validate machine + agent combination ──────────────────────────────────
+    machines_cfg = _machines()
+    warnings: list[str] = []
+
+    if machine and machine not in machines_cfg:
+        valid = ", ".join(machines_cfg.keys())
+        console.print(f"[red]✗ Unknown machine '{machine}'. Valid: {valid}[/red]")
+        return
+
+    if machine:
+        mcfg = machines_cfg[machine]
+
+        # Check task type is in machine capabilities
+        caps = mcfg.get("capabilities", [])
+        if caps and task_type not in caps:
+            console.print(
+                f"[red]✗ Machine '{machine}' does not have capability '{task_type}'.[/red]\n"
+                f"  Its capabilities: {', '.join(caps)}"
+            )
+            return
+
+        # Warn if agent not listed for machine
+        agents_list = mcfg.get("agents", [])
+        if agents_list and llm not in agents_list:
+            warnings.append(
+                f"[yellow]⚠ Agent '{llm}' is not listed for '{machine}' "
+                f"(listed: {', '.join(agents_list)}). It may not be installed.[/yellow]"
+            )
+
+    for w in warnings:
+        console.print(f"  {w}")
+
     console.print(
-        f"\n  [bold cyan]Machine[/bold cyan]   {machine}\n"
-        f"  [bold cyan]LLM[/bold cyan]       {llm}\n"
+        f"\n  [bold cyan]Machine[/bold cyan]   {machine or '[dim]auto[/dim]'}\n"
+        f"  [bold cyan]Agent[/bold cyan]     {llm}\n"
         f"  [bold cyan]Task type[/bold cyan] {task_type}\n"
         f"  [bold cyan]Reason[/bold cyan]    [dim]{reason}[/dim]\n"
     )
@@ -295,20 +332,32 @@ def cmd_queue(args: list[str]) -> None:
     table.add_column("Type",     width=14)
     table.add_column("Status",   width=12)
     table.add_column("Machine",  width=16)
-    table.add_column("LLM",      width=10)
+    table.add_column("Agent",    width=10)
     table.add_column("Task / Notes")
 
     for t in tasks:
-        color  = STATUS_COLORS.get(t["status"], "white")
-        llm    = (t.get("payload") or {}).get("agent", "-")
-        prompt = (t.get("payload") or {}).get("prompt", "")
-        label  = (t.get("notes") or prompt or "")[:50]
+        color   = STATUS_COLORS.get(t["status"], "white")
+        payload = t.get("payload") or {}
+        agent   = payload.get("agent", "-")
+        prompt  = payload.get("prompt", "")
+        label   = (t.get("notes") or prompt or "")[:50]
+
+        # Show assigned_to if claimed/running, else show target from payload
+        assigned = t.get("assigned_to") or ""
+        target   = payload.get("_target_machine", "")
+        if assigned:
+            machine_col = assigned
+        elif target:
+            machine_col = f"[dim]→{target}[/dim]"  # pending, targeted
+        else:
+            machine_col = "[dim]any[/dim]"
+
         table.add_row(
             t["id"][:8],
             t["type"],
             f"[{color}]{t['status']}[/{color}]",
-            t.get("assigned_to") or "-",
-            llm,
+            machine_col,
+            agent,
             label,
         )
 
@@ -884,14 +933,17 @@ def cmd_help() -> None:
 
     [bold cyan]Queue  (send tasks to workers)[/bold cyan]
 
-      [bold]assign[/bold] <task description> [--machine=X] [--llm=Y] [--type=Z]
-          Push a task to a worker. If machine/llm/type are omitted, Claude
-          analyses the description and recommends the best routing.
+      [bold]assign[/bold] <task description> [--machine=X] [--agent=Y] [--type=Z]
+          Push a task to a worker. If flags are omitted, Claude recommends routing.
+          --agent: claude, gemini, codex, groq  (--llm=Y also accepted)
+          --machine must match a name in config/machines.yaml
+          Validates that the machine supports the task type and agent before queuing.
           Example: assign refactor the auth module for better error handling
-                   assign build the iOS app --machine=mac-mini --llm=gemini
+                   assign build the iOS app --machine=mac-mini --agent=gemini
 
       [bold]queue[/bold] [--status=pending|done|failed|in_progress|needs_human]
-          View queued tasks with machine and LLM destination columns.
+          View queued tasks. Pending tasks show target machine (→mac-mini) even
+          before they are claimed by a worker.
 
       [bold]review[/bold]
           Show all tasks waiting for human action, with resolve hints.
