@@ -629,10 +629,42 @@ def cmd_review(args: list[str]) -> None:
 
 
 def cmd_resolve(args: list[str]) -> None:
-    """resolve <task-id> [done|failed|pending] [--notes=...]"""
+    """
+    resolve <task-id> [done|failed|pending] [--notes=...]
+    resolve all                                              — mark every needs_human task as done
+    """
     if not args:
-        console.print("[dim]Usage: resolve <task-id> [done|failed|pending] [--notes=reason][/dim]")
+        console.print(
+            "[dim]Usage:\n"
+            "  resolve <task-id> [done|failed|pending] [--notes=reason]\n"
+            "  resolve all   — bulk-close all needs_human tasks[/dim]"
+        )
         return
+
+    # Bulk resolve
+    if args[0].lower() == "all":
+        action = args[1] if len(args) > 1 and not args[1].startswith("--") else "done"
+        try:
+            with _client() as c:
+                tasks = c.get("/tasks/needs-human").json()
+        except Exception as e:
+            console.print(f"  [red]✗ {e}[/red]")
+            return
+        if not tasks:
+            console.print("  [dim]No needs_human tasks to resolve.[/dim]")
+            return
+        console.print(f"\n  Resolving {len(tasks)} task(s) as [bold]{action}[/bold]…")
+        with _client() as c:
+            for t in tasks:
+                try:
+                    c.patch(f"/tasks/{t['id']}", json={"status": action}).raise_for_status()
+                    console.print(f"    [green]✓[/green] {t['id'][:8]}  {(t.get('payload') or {}).get('agent','-')}  {t.get('assigned_to','?')}")
+                except Exception as e:
+                    console.print(f"    [red]✗[/red] {t['id'][:8]}  {e}")
+        console.print()
+        return
+
+    # Single resolve
     task_id = args[0]
     action  = args[1] if len(args) > 1 and not args[1].startswith("--") else "done"
     notes   = ""
@@ -696,6 +728,8 @@ def cmd_help() -> None:
 
       [bold]resolve[/bold] <task-id> [done|failed|pending] [--notes=reason]
           Mark a needs_human task as done, failed, or re-queued.
+      [bold]resolve all[/bold]
+          Bulk-close every needs_human task as done.
 
     [bold cyan]Machines[/bold cyan]
 
@@ -792,13 +826,13 @@ def run_repl() -> None:
             console.print("\n  [dim]Goodbye.[/dim]\n")
             break
 
-        raw = raw.strip()
+        raw = raw.strip().lstrip("/")   # accept /command and command equally
         if not raw:
             continue
         if raw in ("exit", "quit"):
             console.print("\n  [dim]Goodbye.[/dim]\n")
             break
-        if raw == "help":
+        if raw in ("help", "?"):
             cmd_help()
             continue
 
