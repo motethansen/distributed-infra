@@ -56,6 +56,24 @@ skills:
 
   # ── Mobile ────────────────────────────────────────────────────────────────────
 
+  swift:
+    description: "Swift compiler and toolchain (bundled with Xcode on macOS)"
+    category: mobile
+    check: "swift --version"
+    install:
+      macos: "# Bundled with Xcode — install Xcode from the App Store"
+    task_types: [ios_build, run_script]
+    handler: worker/handlers/ios.py
+
+  testflight:
+    description: "Transporter CLI for uploading iOS builds to TestFlight / App Store Connect"
+    category: mobile
+    check: "xcrun altool --version || xcrun notarytool --version"
+    install:
+      macos: "# Bundled with Xcode command-line tools. Upload via: xcrun altool or Transporter.app"
+    task_types: [ios_build]
+    handler: worker/handlers/ios.py
+
   flutter:
     description: "Flutter SDK for building cross-platform mobile apps"
     category: mobile
@@ -93,6 +111,16 @@ skills:
     task_types: [android_build]
     handler: worker/handlers/android.py
 
+  gradle:
+    description: "Gradle build tool — required for Android app builds"
+    category: mobile
+    check: "gradle --version"
+    install:
+      macos: "brew install gradle"
+      linux: "sudo apt-get install -y gradle"
+    task_types: [android_build]
+    handler: worker/handlers/android.py
+
   # ── Backend / Node ────────────────────────────────────────────────────────────
 
   node:
@@ -113,6 +141,26 @@ skills:
       macos: "brew install python"
       linux: "sudo apt-get install -y python3 python3-pip"
     task_types: [run_script, test_run]
+    handler: worker/handlers/common.py
+
+  python-backend:
+    description: "Python backend stack — Python 3 + FastAPI/Django + pip (ThinkPad backend work)"
+    category: backend
+    check: "python3 -c 'import fastapi' 2>/dev/null || python3 -c 'import django' 2>/dev/null"
+    install:
+      macos: "brew install python && pip3 install fastapi uvicorn"
+      linux: "sudo apt-get install -y python3 python3-pip && pip3 install fastapi uvicorn"
+    task_types: [run_script, test_run]
+    handler: worker/handlers/common.py
+
+  node-backend:
+    description: "Node.js backend stack — Node + npm + common server frameworks (ThinkPad backend work)"
+    category: backend
+    check: "node --version && npm --version"
+    install:
+      macos: "brew install node"
+      linux: "sudo apt-get install -y nodejs npm"
+    task_types: [npm_build, run_script]
     handler: worker/handlers/common.py
 
   # ── Infrastructure ────────────────────────────────────────────────────────────
