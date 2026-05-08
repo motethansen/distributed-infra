@@ -35,7 +35,9 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 BASE_URL   = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET     = os.getenv("SECRET_KEY", "")
 HEADERS    = {"x-secret-key": SECRET}
-CONFIG     = Path(__file__).parent.parent / "config" / "machines.yaml"
+CONFIG        = Path(__file__).parent.parent / "config" / "machines.yaml"
+SKILLS_CONFIG = Path(__file__).parent.parent / "config" / "skills.yaml"
+HANDLERS_DIR  = Path(__file__).parent.parent / "worker" / "handlers"
 HIST_FILE    = Path.home() / ".da_history"
 AGENTS_RUNNER = Path(__file__).parent.parent / "agents" / "runner.py"
 VENV_PYTHON   = Path(__file__).parent.parent / ".venv" / "bin" / "python"
@@ -355,59 +357,12 @@ def cmd_status(args: list[str]) -> None:
 
 # ── Skills ────────────────────────────────────────────────────────────────────
 
-# Known installable skills: {skill_name: {os: install_command}}
-SKILL_INSTALL: dict[str, dict[str, str]] = {
-    "flutter": {
-        "macos":  "brew install --cask flutter",
-        "linux":  "sudo snap install flutter --classic",
-    },
-    "cocoapods": {
-        "macos":  "brew install cocoapods",
-    },
-    "node": {
-        "macos":  "brew install node",
-        "linux":  "sudo apt-get install -y nodejs npm",
-    },
-    "android-sdk": {
-        "linux":  "sudo apt-get install -y android-sdk",
-    },
-    "docker": {
-        "macos":  "brew install --cask docker",
-        "linux":  "sudo apt-get install -y docker.io && sudo usermod -aG docker $USER",
-    },
-    "claude": {
-        "macos":  "npm install -g @anthropic-ai/claude-code",
-        "linux":  "npm install -g @anthropic-ai/claude-code",
-    },
-    "gemini": {
-        "macos":  "npm install -g @google/gemini-cli",
-        "linux":  "npm install -g @google/gemini-cli",
-    },
-    "codex": {
-        "macos":  "npm install -g @openai/codex",
-        "linux":  "npm install -g @openai/codex",
-    },
-    "cursor-agent": {
-        "macos":  "# Install Cursor app → agent CLI is bundled",
-        "linux":  "# Install Cursor app → agent CLI is bundled",
-    },
-}
-
-# Quick checks: {skill_name: shell_command_that_exits_0_if_present}
-SKILL_CHECK: dict[str, str] = {
-    "flutter":      "flutter --version",
-    "cocoapods":    "pod --version",
-    "node":         "node --version",
-    "android-sdk":  "adb --version",
-    "docker":       "docker --version",
-    "claude":       "claude --version",
-    "gemini":       "gemini --version",
-    "codex":        "codex --version",
-    "cursor-agent": "agent --version",
-    "xcode":        "xcodebuild -version",
-    "python":       "python3 --version",
-    "git":          "git --version",
-}
+def _skills_registry() -> dict:
+    """Load skills from config/skills.yaml. Returns empty dict if file missing."""
+    if not SKILLS_CONFIG.exists():
+        return {}
+    with open(SKILLS_CONFIG) as f:
+        return yaml.safe_load(f).get("skills", {})
 
 
 def _ssh_check(ip: str, cmd: str) -> bool:
@@ -420,15 +375,18 @@ def _ssh_check(ip: str, cmd: str) -> bool:
 
 def cmd_skills(args: list[str]) -> None:
     """
-    skills                          — list all machines + declared capabilities
-    skills list <machine>           — check what's actually installed via SSH
-    skills install <machine> <skill>— install a skill on a machine via SSH
-    skills add <machine> <cap>      — add a capability to machines.yaml
+    skills                            — list declared capabilities per machine
+    skills available [--category=X]  — all registry skills + install status per machine
+    skills list <machine>             — SSH-check what's actually installed on a machine
+    skills install <machine> <skill>  — install a skill via SSH
+    skills add <machine> <cap>        — add capability to machines.yaml
+    skills create <name>              — scaffold a new skill handler + registry entry
     """
     machines = _machines()
 
+    # ── no sub-command: declared capabilities overview ──────────────────────────
     if not args:
-        # Show declared capabilities for all machines
+        registry = _skills_registry()
         table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
         table.add_column("Machine",      width=24)
         table.add_column("OS",           width=8)
@@ -439,64 +397,126 @@ def cmd_skills(args: list[str]) -> None:
         console.print()
         console.print(table)
         console.print(
-            "  [dim]Use 'skills list <machine>' to verify what's installed.[/dim]\n"
-            "  [dim]Use 'skills install <machine> <skill>' to install a skill.[/dim]\n"
-            f"  [dim]Known skills: {', '.join(sorted(SKILL_INSTALL))}[/dim]\n"
+            "  [dim]skills available              — browse the full skill registry[/dim]\n"
+            "  [dim]skills list <machine>         — verify what's installed via SSH[/dim]\n"
+            "  [dim]skills install <machine> <skill>[/dim]\n"
+            "  [dim]skills create <name>          — scaffold a new custom skill[/dim]\n"
+            f"  [dim]{len(registry)} skills in registry ({SKILLS_CONFIG.name})[/dim]\n"
         )
         return
 
-    sub = args[0]
+    sub = args[0].lower()
 
+    # ── skills available [--category=X] ─────────────────────────────────────────
+    if sub == "available":
+        registry = _skills_registry()
+        category_filter = ""
+        for a in args[1:]:
+            if a.startswith("--category="):
+                category_filter = a.split("=", 1)[1].lower()
+
+        workers = _worker_machines()
+        worker_names = list(workers.keys())
+
+        # Group by category
+        by_cat: dict[str, list[tuple[str, dict]]] = {}
+        for skill_name, skill in registry.items():
+            cat = skill.get("category", "custom")
+            if category_filter and cat.lower() != category_filter:
+                continue
+            by_cat.setdefault(cat, []).append((skill_name, skill))
+
+        if not by_cat:
+            console.print(f"\n  [dim]No skills found{' in category: ' + category_filter if category_filter else ''}.[/dim]\n")
+            return
+
+        # Build SSH check results (parallel per worker)
+        # We'll check lazily per skill row to avoid too many SSH calls upfront
+        console.print()
+        for cat, skills_in_cat in sorted(by_cat.items()):
+            console.print(f"  [bold]{cat.upper().replace('-', ' ')}[/bold]")
+            table = Table(box=box.SIMPLE, show_header=True, header_style="dim", padding=(0, 1))
+            table.add_column("Skill",        width=18, style="cyan")
+            for wname in worker_names:
+                table.add_column(wname[:14],  width=16)
+            table.add_column("Description")
+
+            for skill_name, skill in sorted(skills_in_cat):
+                check_cmd = skill.get("check", "")
+                row = [skill_name]
+                for wname, wcfg in workers.items():
+                    ip = wcfg.get("tailscale_ip", "")
+                    if check_cmd and ip:
+                        ok = _ssh_check(ip, check_cmd)
+                        row.append("[green]✓ installed[/green]" if ok else "[dim]✗ missing[/dim]")
+                    else:
+                        row.append("[dim]?[/dim]")
+                row.append(f"[dim]{skill.get('description', '')}[/dim]")
+                table.add_row(*row)
+            console.print(table)
+            console.print()
+        return
+
+    # ── skills list <machine> ────────────────────────────────────────────────────
     if sub == "list" and len(args) >= 2:
         name = args[1]
         if name not in machines:
             console.print(f"[red]✗ Unknown machine: {name}[/red]")
             return
+        registry = _skills_registry()
         ip = machines[name]["tailscale_ip"]
         console.print(f"\n  Checking skills on [cyan]{name}[/cyan] ({ip})…\n")
         table = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold")
-        table.add_column("Skill",    width=18)
-        table.add_column("Status",   width=10)
-        table.add_column("Check")
-        for skill, check_cmd in sorted(SKILL_CHECK.items()):
-            ok = _ssh_check(ip, check_cmd)
-            status = "[green]✓ installed[/green]" if ok else "[dim]✗ missing[/dim]"
-            table.add_row(skill, status, check_cmd)
+        table.add_column("Skill",       width=18)
+        table.add_column("Category",    width=14)
+        table.add_column("Status",      width=14)
+        table.add_column("Check command")
+        for skill_name, skill in sorted(registry.items()):
+            check_cmd = skill.get("check", "")
+            ok = _ssh_check(ip, check_cmd) if check_cmd else None
+            if ok is None:
+                status = "[dim]no check[/dim]"
+            else:
+                status = "[green]✓ installed[/green]" if ok else "[dim]✗ missing[/dim]"
+            table.add_row(skill_name, skill.get("category", "?"), status, check_cmd)
         console.print(table)
         console.print()
+        return
 
-    elif sub == "install" and len(args) >= 3:
+    # ── skills install <machine> <skill> ─────────────────────────────────────────
+    if sub == "install" and len(args) >= 3:
         name  = args[1]
-        skill = args[2]
+        skill_name = args[2]
         if name not in machines:
             console.print(f"[red]✗ Unknown machine: {name}[/red]")
             return
-        if skill not in SKILL_INSTALL:
-            console.print(f"[red]✗ Unknown skill: {skill}[/red]")
-            console.print(f"  Known skills: {', '.join(sorted(SKILL_INSTALL))}")
+        registry = _skills_registry()
+        if skill_name not in registry:
+            console.print(f"[red]✗ Unknown skill: {skill_name}[/red]")
+            console.print(f"  Known skills: {', '.join(sorted(registry))}")
             return
-        cfg  = machines[name]
-        os_  = cfg.get("os", "linux")
-        ip   = cfg["tailscale_ip"]
-        cmd  = SKILL_INSTALL[skill].get(os_)
+        skill = registry[skill_name]
+        cfg   = machines[name]
+        os_   = cfg.get("os", "linux")
+        ip    = cfg["tailscale_ip"]
+        cmd   = (skill.get("install") or {}).get(os_)
         if not cmd:
-            console.print(f"[red]✗ No install recipe for {skill} on {os_}[/red]")
+            console.print(f"[red]✗ No install recipe for '{skill_name}' on {os_}[/red]")
             return
         if cmd.startswith("#"):
             console.print(f"  [yellow]Manual step required:[/yellow] {cmd[2:].strip()}")
             return
-        console.print(f"\n  Installing [bold]{skill}[/bold] on [cyan]{name}[/cyan]…")
+        console.print(f"\n  Installing [bold]{skill_name}[/bold] on [cyan]{name}[/cyan]…")
         console.print(f"  [dim]$ {cmd}[/dim]\n")
-        result = subprocess.run(
-            ["ssh", "-t", ip, cmd],
-            timeout=300,
-        )
+        result = subprocess.run(["ssh", "-t", ip, cmd], timeout=300)
         if result.returncode == 0:
-            console.print(f"\n  [green]✓ {skill} installed on {name}[/green]\n")
+            console.print(f"\n  [green]✓ {skill_name} installed on {name}[/green]\n")
         else:
             console.print(f"\n  [red]✗ Install failed (exit {result.returncode})[/red]\n")
+        return
 
-    elif sub == "add" and len(args) >= 3:
+    # ── skills add <machine> <capability> ────────────────────────────────────────
+    if sub == "add" and len(args) >= 3:
         name = args[1]
         cap  = args[2]
         if name not in machines:
@@ -512,15 +532,97 @@ def cmd_skills(args: list[str]) -> None:
         with open(CONFIG, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
         console.print(f"  [green]✓ Added capability '{cap}' to {name}[/green]")
+        return
 
-    else:
-        console.print(
-            "[dim]Usage:\n"
-            "  skills                           list all machines + capabilities\n"
-            "  skills list <machine>            check what's installed via SSH\n"
-            "  skills install <machine> <skill> install a skill\n"
-            "  skills add <machine> <cap>       add capability to machines.yaml[/dim]"
+    # ── skills create <name> ─────────────────────────────────────────────────────
+    if sub == "create" and len(args) >= 2:
+        skill_name = args[1].lower().replace(" ", "_").replace("-", "_")
+        registry = _skills_registry()
+        if skill_name in registry:
+            console.print(f"  [yellow]Skill '{skill_name}' already exists in the registry.[/yellow]")
+            return
+
+        console.print(f"\n  [bold]Creating new skill:[/bold] [cyan]{skill_name}[/cyan]\n")
+
+        def _ask(prompt: str, default: str = "") -> str:
+            suffix = f" [{default}]" if default else ""
+            val = console.input(f"  {prompt}{suffix}: ").strip()
+            return val or default
+
+        description  = _ask("Description (one line)")
+        category     = _ask("Category", "custom")
+        check_cmd    = _ask("Check command (exits 0 if installed)", f"{skill_name} --version")
+        install_mac  = _ask("Install command (macos)", "")
+        install_linux = _ask("Install command (linux)", "")
+        task_type    = _ask("Task type this enables", "run_script")
+
+        # Scaffold handler file
+        handler_path = HANDLERS_DIR / f"{skill_name}.py"
+        handler_rel  = f"worker/handlers/{skill_name}.py"
+        if not handler_path.exists():
+            handler_path.write_text(
+                f'"""Handler for {skill_name} tasks."""\n'
+                f'from __future__ import annotations\n\n'
+                f'from shared.models import Task\n\n\n'
+                f'async def handle_{skill_name}(task: Task) -> dict:\n'
+                f'    """\n'
+                f'    payload:\n'
+                f'      # TODO: document expected payload keys\n'
+                f'    """\n'
+                f'    # TODO: implement handler\n'
+                f'    return {{"needs_human": True, "notes": "handle_{skill_name} not yet implemented"}}\n'
+            )
+            console.print(f"  [green]✓ Created handler:[/green] {handler_rel}")
+        else:
+            console.print(f"  [dim]Handler already exists: {handler_rel}[/dim]")
+
+        # Append to skills.yaml
+        with open(SKILLS_CONFIG) as f:
+            raw_yaml = f.read()
+
+        new_entry = (
+            f"\n  {skill_name}:\n"
+            f"    description: \"{description}\"\n"
+            f"    category: {category}\n"
+            f"    check: \"{check_cmd}\"\n"
+            f"    install:\n"
         )
+        if install_mac:
+            new_entry += f"      macos: \"{install_mac}\"\n"
+        if install_linux:
+            new_entry += f"      linux: \"{install_linux}\"\n"
+        new_entry += (
+            f"    task_types: [{task_type}]\n"
+            f"    handler: {handler_rel}\n"
+        )
+
+        with open(SKILLS_CONFIG, "a") as f:
+            f.write(new_entry)
+        console.print(f"  [green]✓ Registered in skills.yaml[/green]")
+
+        # Add dispatch stub hint
+        console.print(
+            f"\n  [bold]Next steps:[/bold]\n"
+            f"  1. Implement [cyan]{handler_rel}[/cyan]\n"
+            f"  2. Add to [cyan]worker/handlers/__init__.py[/cyan] dispatch:\n"
+            f"     [dim]if task.type == \"{task_type}\":\n"
+            f"         from worker.handlers.{skill_name} import handle_{skill_name}\n"
+            f"         return await handle_{skill_name}(task)[/dim]\n"
+            f"  3. Add the capability to machines.yaml:\n"
+            f"     [dim]skills add <machine> {task_type}[/dim]\n"
+        )
+        return
+
+    # ── unknown sub-command ──────────────────────────────────────────────────────
+    console.print(
+        "[dim]Usage:\n"
+        "  skills                             list declared capabilities\n"
+        "  skills available [--category=X]   browse the skill registry\n"
+        "  skills list <machine>              SSH-check installed skills\n"
+        "  skills install <machine> <skill>   install a skill via SSH\n"
+        "  skills add <machine> <cap>         register capability in machines.yaml\n"
+        "  skills create <name>               scaffold a new skill[/dim]"
+    )
 
 
 def cmd_run(args: list[str]) -> None:
@@ -784,13 +886,17 @@ def cmd_help() -> None:
 
       [bold]skills[/bold]
           List declared capabilities for all machines.
+      [bold]skills available[/bold] [--category=mobile|ai-agent|backend|infrastructure]
+          Browse the full skill registry with install status per machine (via SSH).
       [bold]skills list[/bold] <machine>
-          SSH in and check which tools are actually installed.
+          SSH in and check which tools are actually installed on a machine.
       [bold]skills install[/bold] <machine> <skill>
-          Install a skill on a machine via SSH.
-          Known skills: flutter, cocoapods, node, docker, claude, gemini, codex
+          Install a skill on a machine via SSH using the registry recipe.
       [bold]skills add[/bold] <machine> <capability>
           Register a new capability in machines.yaml.
+      [bold]skills create[/bold] <name>
+          Scaffold a new custom skill: handler file + registry entry.
+          Walks you through description, install commands, and task type.
 
       [bold]help[/bold]     Show this help.
       [bold]exit[/bold]     Quit.
