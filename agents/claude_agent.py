@@ -30,7 +30,7 @@ def _find_cli() -> str | None:
     return None
 
 
-async def run(prompt: str, model: str = "") -> dict:
+async def run(prompt: str, model: str = "", cwd: str | None = None) -> dict:
     cli = _find_cli()
     if not cli:
         return {
@@ -42,14 +42,17 @@ async def run(prompt: str, model: str = "") -> dict:
             "ok": False,
         }
 
-    args = [cli, "-p", prompt]
+    args = [cli, "-p", prompt, "--dangerously-skip-permissions"]
     if model:
         args += ["--model", model]
+
+    work_dir = os.path.expanduser(cwd) if cwd else None
 
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=work_dir,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
