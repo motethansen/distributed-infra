@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Cursor Agent — uses `agent -p` CLI (Cursor Agent CLI, CURSOR_API_KEY).
+Cursor Agent — uses `agent -p` CLI (Cursor Agent CLI).
+No API key needed — authenticates via `agent login` session.
 
 CLI usage:
   python agents/groq_agent.py "write a Python sort function"
@@ -14,12 +15,16 @@ import sys
 
 
 def _find_cli() -> str | None:
-    for p in [
+    candidates = [
         shutil.which("agent"),
         os.path.expanduser("~/.local/bin/agent"),
+        os.path.expanduser("~/.npm-global/bin/agent"),
+        os.path.expanduser("~/.npm/bin/agent"),
         "/usr/local/bin/agent",
         "/opt/homebrew/bin/agent",
-    ]:
+        "/usr/bin/agent",
+    ]
+    for p in candidates:
         if p and os.path.isfile(p):
             return p
     return None
@@ -28,7 +33,13 @@ def _find_cli() -> str | None:
 async def run(prompt: str, model: str = "") -> dict:
     cli = _find_cli()
     if not cli:
-        return {"error": "agent CLI not found — install Cursor agent CLI", "agent": "groq", "ok": False}
+        return {
+            "error": (
+                "Cursor agent CLI not found. Install Cursor app, then: agent login"
+            ),
+            "agent": "groq",
+            "ok": False,
+        }
 
     args = [cli, "-p", prompt, "--trust"]
 
@@ -41,12 +52,15 @@ async def run(prompt: str, model: str = "") -> dict:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "agent CLI timed out", "agent": "groq", "ok": False}
+        return {"error": "agent CLI timed out after 120s", "agent": "groq", "ok": False}
+
+    out = stdout.decode().strip()
+    err = stderr.decode().strip()
 
     if proc.returncode != 0:
-        return {"error": stderr.decode().strip(), "agent": "groq", "ok": False}
+        return {"error": err or out, "agent": "groq", "ok": False}
 
-    return {"agent": "groq", "model": model or "cursor-agent", "response": stdout.decode().strip(), "ok": True}
+    return {"agent": "groq", "model": model or "cursor-agent", "response": out, "ok": True}
 
 
 if __name__ == "__main__":
