@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd plist for auto-starting the orchestrator at login.
+
+  Setup:
+    1. Copy this file:
+         cp scripts/com.techstartups.orchestrator.plist.example \
+            ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
+    2. Fill in YOUR_USERNAME and YOUR_SECRET_KEY below.
+    3. Load it:
+         launchctl load ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
+
+  Generate a secret key:
+    openssl rand -hex 32
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.techstartups.orchestrator</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/uvicorn</string>
+        <string>orchestrator.main:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8000</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MACHINE_NAME</key>
+        <string>macbook-pro</string>
+        <key>MACHINE_ROLE</key>
+        <string>orchestrator</string>
+        <key>QUEUE_DB_PATH</key>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/data/queue.db</string>
+        <key>SECRET_KEY</key>
+        <string>YOUR_SECRET_KEY</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/orchestrator.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/orchestrator.err</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
