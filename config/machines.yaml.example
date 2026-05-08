@@ -1,0 +1,53 @@
+machines:
+  macbook-pro:
+    tailscale_ip: "YOUR_MACBOOK_TAILSCALE_IP"   # e.g. 100.x.x.x from `tailscale ip -4`
+    role: orchestrator
+    os: macos
+    capabilities: []
+    queue_port: 8000
+
+  mac-mini:
+    tailscale_ip: "YOUR_MACMINI_TAILSCALE_IP"
+    role: worker
+    os: macos
+    capabilities:
+      - ios_build
+      - xcode
+      - swift
+      - testflight
+      - flutter
+      - cocoapods
+      - agent_run
+      - run_script
+      - git_pull
+      - test_run
+      - lint
+    agents:
+      - claude
+      - gemini
+      - codex
+      - cursor-agent
+    worker_port: 8001
+
+  thinkpad-x1:
+    tailscale_ip: "YOUR_THINKPAD_TAILSCALE_IP"
+    role: worker
+    os: linux
+    capabilities:
+      - android_build
+      - gradle
+      - python_backend
+      - node_backend
+      - docker
+      - agent_run
+      - run_script
+      - git_pull
+      - test_run
+      - lint
+      - npm_build
+    agents:
+      - claude
+      - gemini
+      - codex
+      - cursor-agent
+    worker_port: 8001
