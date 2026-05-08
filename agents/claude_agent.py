@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Claude agent — uses `claude -p` CLI (Claude Code, covered by subscription).
+No API key needed — authenticates via `claude login` session.
 
 CLI usage:
   python agents/claude_agent.py "write a hello world in Python"
@@ -14,12 +15,16 @@ import sys
 
 
 def _find_cli() -> str | None:
-    for p in [
+    candidates = [
         shutil.which("claude"),
         os.path.expanduser("~/.local/bin/claude"),
+        os.path.expanduser("~/.npm-global/bin/claude"),
+        os.path.expanduser("~/.npm/bin/claude"),
         "/usr/local/bin/claude",
         "/opt/homebrew/bin/claude",
-    ]:
+        "/usr/bin/claude",
+    ]
+    for p in candidates:
         if p and os.path.isfile(p):
             return p
     return None
@@ -28,7 +33,14 @@ def _find_cli() -> str | None:
 async def run(prompt: str, model: str = "") -> dict:
     cli = _find_cli()
     if not cli:
-        return {"error": "claude CLI not found — run: npm install -g @anthropic-ai/claude-code", "agent": "claude", "ok": False}
+        return {
+            "error": (
+                "claude CLI not found. Install: npm install -g @anthropic-ai/claude-code  "
+                "then login: claude login"
+            ),
+            "agent": "claude",
+            "ok": False,
+        }
 
     args = [cli, "-p", prompt]
     if model:
@@ -43,12 +55,15 @@ async def run(prompt: str, model: str = "") -> dict:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "claude CLI timed out", "agent": "claude", "ok": False}
+        return {"error": "claude CLI timed out after 120s", "agent": "claude", "ok": False}
+
+    out = stdout.decode().strip()
+    err = stderr.decode().strip()
 
     if proc.returncode != 0:
-        return {"error": stderr.decode().strip(), "agent": "claude", "ok": False}
+        return {"error": err or out, "agent": "claude", "ok": False}
 
-    return {"agent": "claude", "model": model or "claude-default", "response": stdout.decode().strip(), "ok": True}
+    return {"agent": "claude", "model": model or "claude-default", "response": out, "ok": True}
 
 
 if __name__ == "__main__":

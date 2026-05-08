@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Gemini agent — uses `gemini -p` CLI (Google Gemini CLI).
+No API key needed — authenticates via `gemini login` session.
 
 CLI usage:
   python agents/gemini_agent.py "explain async/await in Python"
-  python agents/gemini_agent.py "review this code" --model gemini-2.5-flash
 """
 from __future__ import annotations
 
@@ -15,12 +15,16 @@ import sys
 
 
 def _find_cli() -> str | None:
-    for p in [
+    candidates = [
         shutil.which("gemini"),
-        "/opt/homebrew/bin/gemini",
+        os.path.expanduser("~/.local/bin/gemini"),
+        os.path.expanduser("~/.npm-global/bin/gemini"),
+        os.path.expanduser("~/.npm/bin/gemini"),
         "/usr/local/bin/gemini",
+        "/opt/homebrew/bin/gemini",
         "/usr/bin/gemini",
-    ]:
+    ]
+    for p in candidates:
         if p and os.path.isfile(p):
             return p
     return None
@@ -29,7 +33,14 @@ def _find_cli() -> str | None:
 async def run(prompt: str, model: str = "") -> dict:
     cli = _find_cli()
     if not cli:
-        return {"error": "gemini CLI not found — install from https://github.com/google-gemini/gemini-cli", "agent": "gemini", "ok": False}
+        return {
+            "error": (
+                "gemini CLI not found. Install: npm install -g @google/gemini-cli  "
+                "then login: gemini login"
+            ),
+            "agent": "gemini",
+            "ok": False,
+        }
 
     args = [cli, "-p", prompt]
     if model:
@@ -44,12 +55,15 @@ async def run(prompt: str, model: str = "") -> dict:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "gemini CLI timed out", "agent": "gemini", "ok": False}
+        return {"error": "gemini CLI timed out after 120s", "agent": "gemini", "ok": False}
+
+    out = stdout.decode().strip()
+    err = stderr.decode().strip()
 
     if proc.returncode != 0:
-        return {"error": stderr.decode().strip(), "agent": "gemini", "ok": False}
+        return {"error": err or out, "agent": "gemini", "ok": False}
 
-    return {"agent": "gemini", "model": model or "gemini-default", "response": stdout.decode().strip(), "ok": True}
+    return {"agent": "gemini", "model": model or "gemini-default", "response": out, "ok": True}
 
 
 if __name__ == "__main__":
