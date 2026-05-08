@@ -87,7 +87,18 @@ def _worker_health(name: str, cfg: dict) -> tuple[bool, int | None]:
 
 
 def _queue_stats() -> dict[str, dict]:
-    """Returns per-machine stats derived from the task queue."""
+    """Returns per-machine stats derived from the task queue.
+
+    Maps historical machine names (aliases) back to their canonical name so
+    renamed machines don't lose their stats history.
+    """
+    # Build alias → canonical name map from machines.yaml
+    alias_map: dict[str, str] = {}
+    for name, cfg in _machines().items():
+        alias_map[name] = name
+        for alias in cfg.get("aliases", []):
+            alias_map[alias] = name
+
     stats: dict[str, dict] = {}
     try:
         with _client() as c:
@@ -96,7 +107,8 @@ def _queue_stats() -> dict[str, dict]:
         return stats
 
     for t in tasks:
-        machine = t.get("assigned_to") or "unassigned"
+        raw_machine = t.get("assigned_to") or "unassigned"
+        machine = alias_map.get(raw_machine, raw_machine)  # resolve alias → canonical
         if machine not in stats:
             stats[machine] = {"done": 0, "failed": 0, "in_progress": 0, "llm_counts": {}}
         s = t.get("status", "")
@@ -106,7 +118,6 @@ def _queue_stats() -> dict[str, dict]:
             stats[machine]["failed"] += 1
         elif s in ("claimed", "in_progress"):
             stats[machine]["in_progress"] += 1
-        # track LLM usage
         llm = (t.get("payload") or {}).get("agent")
         if llm:
             lc = stats[machine]["llm_counts"]
@@ -805,12 +816,31 @@ def cmd_resolve(args: list[str]) -> None:
         return
 
     # Single resolve
-    task_id = args[0]
+    prefix  = args[0]
     action  = args[1] if len(args) > 1 and not args[1].startswith("--") else "done"
     notes   = ""
     for a in args:
         if a.startswith("--notes="):
             notes = a.split("=", 1)[1]
+
+    # Resolve full UUID from prefix (queue shows truncated 8-char IDs)
+    task_id = prefix
+    if len(prefix) < 32:
+        try:
+            with _client() as c:
+                all_tasks = c.get("/tasks", params={"limit": 500}).json()
+            matches = [t["id"] for t in all_tasks if t["id"].startswith(prefix)]
+            if not matches:
+                console.print(f"  [red]✗ No task found with prefix '{prefix}'[/red]")
+                return
+            if len(matches) > 1:
+                console.print(f"  [red]✗ Ambiguous prefix '{prefix}' matches {len(matches)} tasks — use more characters[/red]")
+                return
+            task_id = matches[0]
+        except Exception as e:
+            console.print(f"  [red]✗ Could not look up task: {e}[/red]")
+            return
+
     try:
         with _client() as c:
             r = c.patch(f"/tasks/{task_id}", json={"status": action, "notes": notes or None})
