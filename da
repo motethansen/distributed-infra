@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# da — Distributed Agents interactive CLI launcher
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+source .venv/bin/activate
+exec python orchestrator/da.py "$@"

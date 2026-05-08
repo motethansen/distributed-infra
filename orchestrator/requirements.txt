@@ -1,4 +1,5 @@
 fastapi>=0.111
+prompt_toolkit>=3.0
 uvicorn[standard]>=0.29
 aiosqlite>=0.20
 pydantic>=2.7
