@@ -1,6 +1,6 @@
-# I Built a Distributed AI Agent Stack Across Three Machines — Here's What I Learned
+# I Built a Distributed AI Agent Stack Across Three Machines — And Then Taught It New Skills
 
-*What happens when you stop treating AI agents as a single-machine tool and start treating them as a network?*
+*What happens when you stop treating AI agents as a single-machine tool, start treating them as a network — and give that network the ability to learn new capabilities on demand.*
 
 ---
 
@@ -8,17 +8,22 @@ Most developers run one AI agent at a time. One machine, one model, one conversa
 
 That realisation turned into a weekend project that became something I now use every day. A distributed agent stack where my MacBook Pro orchestrates tasks, my ThinkPad Ubuntu handles Android and backend work, and my Mac Mini Intel handles iOS and Xcode builds — all connected over Tailscale, all running Claude, Gemini, Codex, and Cursor Agent as worker processes.
 
-Here's how it works, what surprised me, and why I think this is closer to how AI-assisted development should look.
+This post covers two things:
+
+1. How the stack works and the two modes of operation that make it practical
+2. How to add new capabilities to the system — the skills registry and why it matters
 
 ---
 
-## The Setup
+## Part One: The Stack
+
+### The Setup
 
 Three machines, one mesh VPN:
 
 | Machine | Role | Specialisation |
 |---|---|---|
-| MacBook Pro (M-series) | Orchestrator | Task queue, CLI, coordination |
+| MacBook Pro (M-series) | Orchestrator | Task queue, `da` CLI, coordination |
 | ThinkPad X1 (Ubuntu) | Worker | Android builds, backend dev, general coding |
 | Mac Mini Intel | Worker | iOS/Xcode builds, Swift, Flutter iOS |
 
@@ -30,147 +35,397 @@ That last state — `needs_human` — is the one I'm most proud of. An agent tha
 
 ---
 
-## Many Agents, Many Modes
+### Two Modes of Working
 
-One of the most interesting design decisions was how to handle the agents themselves. Every major AI coding tool now ships a CLI — Claude Code, Gemini CLI, OpenAI Codex, Cursor Agent — and all of them can run headlessly via a single flag:
+The most useful design decision was exposing two distinct modes from a single interactive CLI: run a task locally on your MacBook right now, or push it to the queue and let a worker handle it in the background.
 
 ```
-claude -p "your prompt here"
-gemini -p "your prompt here"
-agent -p "your prompt here" --trust
-codex exec "your prompt here"
+╭──────────────────────────────────────────────────────────────────╮
+│  Distributed Agents                                              │
+│  michaels-macbook-pro  ·  mac-mini  ·  thinkpad-x1              │
+│  2/2 workers online                                              │
+╰──────────────────────────────────────────────────────────────────╯
+
+  Type help for commands, exit to quit.
+
+da ›
 ```
 
-The distributed stack wraps each one. But more importantly, it opens up two distinct modes of working:
+**Local** — run on this machine, right now:
 
-**Run locally on the MacBook** — no queue, instant response, great for interactive tasks where you want to stay in flow:
-
-```bash
-da › run claude explain the Riverpod keepAlive pattern
+```
+da › run claude explain this Riverpod provider pattern
 da › run gemini summarise the last 10 commits
-da › test                    # smoke-test all four agents
+da › test                   # smoke-test all four agents
+da › test codex             # test one agent
 ```
 
-**Push to a worker** — the task lands in the queue, the right machine picks it up, and you get the result without occupying your primary machine:
+Local runs are synchronous — output streams directly to your terminal. Best for quick questions, code explanations, or anything where you want an immediate answer without context-switching.
 
-```bash
-da › assign build the iOS app and run flutter analyze
-      → Claude suggests: mac-mini / gemini
-      → Confirm? Y  →  queued
+**Queued** — send to a worker, pick it up when it's done:
+
+```
+da › assign review the auth module for security issues
+     → Asking Claude for routing recommendation…
+     → Suggested: ThinkPad / claude  (reasoning: code review, no build required)
+     → Confirm? Y
+     → ✓ Task queued  a3f29c1d  →  thinkpad / claude
+
+da › queue
+da › review       # tasks waiting for human action
 ```
 
-The choice between them is natural: quick questions stay local, heavy or hardware-specific work goes to workers. You never have to think about which machine has Xcode or the Android SDK — the capabilities are declared in config and the router handles it.
+Queued tasks are routed by Claude — it reads the description and matches it to the capabilities declared for each worker. You can override:
 
-The reason for four agents isn't redundancy. Each has a different character:
-
-- **Claude** is strongest at reasoning, code review, and longer context tasks
-- **Gemini** handles research-heavy tasks and large documents well
-- **Codex** (OpenAI's coding agent) is good for quick, targeted code generation
-- **Cursor Agent** integrates with project context when you want something workspace-aware
-
-You can also mix and match: run Claude locally for an immediate answer, then push a deeper version of the same question to Gemini on the ThinkPad while you get on with the next thing.
+```
+da › assign build the iOS app --machine=mac-mini --llm=gemini --type=ios_build
+```
 
 ---
 
-## What Tasks Look Like
+### Multiple Agents, Not Just Multiple Machines
 
-From the interactive CLI (`da`), you describe what you want:
+The four agents aren't interchangeable. They have different characters:
+
+- **Claude** — strongest at reasoning, code review, and longer context
+- **Gemini** — research-heavy tasks, large documents, broad context windows
+- **Codex** — quick, targeted code generation and edits
+- **Cursor Agent** — workspace-aware tasks that need deep project context
+
+Here's what it looks like in practice:
 
 ```
-da › assign review the Stripe webhook handler for edge cases
-     → Asking Claude for routing recommendation…
-     → Suggested: ThinkPad / claude (reasoning: code review, no build required)
-     → Confirm? Y
-     → ✓ Task queued  a3f29c1d  →  thinkpad / claude
+da › run claude what's the best approach to caching Riverpod providers?
+     # instant local answer while you keep working
+
+da › assign add keepAlive to the stable providers in membership_provider.dart
+     → mac-mini / gemini
+     # Gemini implements it on the Mac Mini in the background
+
+da › assign write tests for the new keepAlive behaviour
+     → thinkpad / codex
+     # Codex writes tests on the ThinkPad in parallel
 ```
 
-No flags, no JSON payloads. Claude reads the task description and decides which machine and which agent should handle it based on declared capabilities.
+Three agents, three machines, all working at the same time on related tasks. The results land in the queue when you're ready to review them.
 
-The queue view shows where everything is and who's working on it:
+You can also mix modes: `run claude` locally for an instant architecture opinion, then `assign` the implementation to a worker so your MacBook stays free.
+
+---
+
+### The Queue View
 
 ```
 da › queue
 
-  ID        Type        Status       Machine      LLM      Task
+  ID        Type        Status       Machine       LLM      Task
  ─────────────────────────────────────────────────────────────────────
-  a3f29c1d  agent_run   in_progress  thinkpad     claude   review Stripe...
-  f7b2a391  ios_build   done         mac-mini     -        flutter build ios
-  9c41d022  agent_run   pending      -            gemini   summarise changes
+  a3f29c1d  agent_run   in_progress  thinkpad      claude   review auth...
+  f7b2a391  ios_build   done         mac-mini      -        flutter build ios
+  9c41d022  agent_run   pending      -             gemini   summarise changes
 ```
 
 Tasks aren't limited to agent runs. The system handles:
 
 - `git_pull` — sync a repo on a remote machine
-- `android_build` — trigger a Gradle build on the ThinkPad
-- `ios_build` — trigger a Flutter/Xcode build on the Mac Mini
-- `run_script` — run an arbitrary shell script on the right machine
+- `android_build` — Gradle build on the ThinkPad (Android SDK + JDK 17)
+- `ios_build` — Flutter/Xcode build on the Mac Mini (Xcode + CocoaPods)
+- `run_script` — arbitrary shell scripts on the right machine
 - `test_run` / `lint` — CI-style checks distributed across the fleet
 - `human_action` — the agent is stuck and needs you
 
----
+```
+da › status
 
-## The Machines Actually Working Together
-
-Here's a real example of the stack doing something useful.
-
-I'm working on a Flutter app targeting both iOS and Android. I push four tasks from the MacBook:
-
-1. `git_pull` → all workers sync the repo
-2. `android_build` → ThinkPad compiles the APK (it has the Android SDK and JDK 17)
-3. `ios_build` → Mac Mini builds `Runner.app` (it has Xcode and CocoaPods)
-4. `agent_run` (claude) → ThinkPad reviews the diff and flags anything worth looking at
-
-All four run in parallel. The MacBook isn't doing any of the heavy lifting — it's just watching the queue. Ten minutes later I have build artifacts and a code review sitting in the results, and I haven't opened a single terminal on the remote machines.
+  Machine               Role         Online   Active   Done   Failed   Top LLM
+ ────────────────────────────────────────────────────────────────────────────────
+  michaels-macbook-pro  orchestrator ✓        -        -      -        -
+  mac-mini              worker       ✓        0        14     0        gemini (8)
+  thinkpad-x1           worker       ✓        0        22     2        claude (15)
+```
 
 ---
 
-## What I Had to Figure Out
+### What I Had to Figure Out
 
-A few things that aren't obvious:
+A few things that aren't obvious when you're setting this up:
 
-**Xcode 26 beta and missing frameworks.** The Mac Mini was running Xcode 26.3 (beta) on macOS 15, and `xcodebuild` was crashing because `DVTDownloads.framework` wasn't present. The fix was opening Xcode.app once to trigger component installation, then downloading the iOS 26.2 platform from Xcode → Settings → Platforms. Not automatable over SSH. Worth knowing before you rely on headless Xcode.
+**Xcode on a headless Mac.** The Mac Mini was running Xcode 26.3 (beta) on macOS 15, and `xcodebuild` was crashing because `DVTDownloads.framework` wasn't present. The fix was opening Xcode.app once to trigger component installation, then downloading the iOS platform from Xcode → Settings → Platforms. Not automatable over SSH. Worth knowing before you rely on headless builds.
 
-**SQLite and async.** The first version of the queue server had a subtle bug: it opened one aiosqlite connection and reused it across async calls. This caused "threads can only be started once" errors under load. Fix: open a fresh `async with aiosqlite.connect()` context per function call. Simple, but easy to get wrong.
+**SQLite and async.** The first version of the queue server had a subtle bug: it opened one `aiosqlite` connection and reused it across async calls. This caused "threads can only be started once" errors under load. Fix: open a fresh `async with aiosqlite.connect()` context per function call.
 
-**Codex needs to run from a git repo.** The newer version of Codex CLI only works when called from inside a git repository. The worker now sets `cwd` to the project root before invoking it.
+**Codex needs a git repo.** The newer version of Codex CLI only works when called from inside a git repository. The worker now sets `cwd` to the project root before invoking it.
 
-**The Cursor Agent doesn't need an API key.** It uses your logged-in session. Just `agent login` once per machine, no environment variables needed.
-
-**PATH matters more than you think in launchd.** macOS launchd doesn't inherit your shell PATH. Every directory your agents might live in — Homebrew, npm-global, .local/bin, /usr/sbin for system tools — has to be listed explicitly in the plist. Missing one will cause silent failures that are hard to debug.
+**PATH matters more than you think in launchd.** macOS launchd doesn't inherit your shell PATH. Every directory your agents might live in — Homebrew, npm-global, .local/bin, /usr/sbin for system tools — has to be listed explicitly in the plist. Missing one causes silent failures.
 
 ---
 
-## Auto-Start on Every Machine
+## Part Two: Teaching the Stack New Skills
 
-The workers start automatically at boot:
+So the stack is running. Claude routes tasks, workers execute them, the queue tracks everything. But what happens when you want to do something the system doesn't know about yet?
 
-- **macOS (MacBook + Mac Mini):** launchd plists in `~/Library/LaunchAgents/`
-- **Ubuntu (ThinkPad):** systemd user service (`~/.config/systemd/user/infra-worker.service`)
+That's where the skills system comes in.
 
-Once it's set up, the fleet is just always there. You open the `da` CLI and everything is already running.
+### What a "Skill" Is
 
----
+A skill has three layers:
 
-## What I'd Change
+1. **A registry entry** in `config/skills.yaml` — the source of truth. Describes the skill, how to install it, how to check if it's installed, and what task type it enables.
 
-The current setup is intentionally simple — SQLite is not a production message queue, and there's no retry logic beyond re-queuing manually. For a team, you'd want proper job persistence and dead-letter handling.
+2. **A task handler** in `worker/handlers/<name>.py` — the Python function that actually executes the work when a task of that type arrives.
 
-I'd also add task streaming. Right now you get the full output only when the task completes. For long agent runs, watching a stream would be more useful than polling.
+3. **A capability declaration** in `config/machines.yaml` — tells the orchestrator which machines can handle which task types.
 
-The most interesting extension is smarter agent selection. Right now you pick the agent explicitly or Claude routes based on capability matching. A better version would learn from history: which agent consistently produces the best results for which task types, and route accordingly. That starts to look less like infrastructure and more like an actual team.
-
----
-
-## The Bigger Point
-
-The real shift is psychological. When you have a distributed agent stack, you stop thinking about AI as a tool you use interactively and start thinking about it as infrastructure you delegate to. The MacBook becomes a control plane. The agents — local and remote, online and offline-capable — become a workforce.
-
-You can run Claude locally for a quick answer. You can push a harder problem to Gemini on a different machine. You can have Codex and Cursor Agent working in parallel on the ThinkPad while you're reading the iOS build logs from the Mac Mini. The agents aren't competing — they're complementary, and the infrastructure makes using all of them as natural as picking the right tool from a shelf.
-
-For solo development across multiple machines, it's made a real difference to how I work. The floor of what's feasible in a day has gone up, not because any individual agent is smarter, but because they're running in parallel on the right hardware.
-
-The stack is open — I'll share the repo once I've cleaned it up a bit. In the meantime, everything you need to build your own is in this post.
+When you add all three, the system gains a new capability end-to-end: Claude can route to it, workers can execute it, and the `skills` command can check and install it.
 
 ---
 
-*Questions or building something similar? Reply below.*
+### The Skills Registry
+
+`config/skills.yaml` is the central catalog — every known skill, its install recipe, and its check command:
+
+```yaml
+skills:
+
+  flutter:
+    description: "Flutter SDK for building cross-platform mobile apps"
+    category: mobile
+    check: "flutter --version"
+    install:
+      macos: "brew install --cask flutter"
+      linux: "sudo snap install flutter --classic"
+    task_types: [ios_build, android_build]
+    handler: worker/handlers/ios.py
+
+  claude:
+    description: "Claude Code CLI — Anthropic's AI coding agent"
+    category: ai-agent
+    check: "claude --version"
+    install:
+      macos: "npm install -g @anthropic-ai/claude-code"
+      linux: "npm install -g @anthropic-ai/claude-code"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+```
+
+The registry covers AI agents, mobile tools, backend runtimes, and infrastructure — 15 skills out of the box across four categories.
+
+From the `da` CLI:
+
+```
+da › skills available
+
+  AI AGENTS
+    claude        ✓ mac-mini  ✓ thinkpad   Claude Code CLI — Anthropic's AI coding agent
+    gemini        ✓ mac-mini  ✓ thinkpad   Gemini CLI — Google's AI coding agent
+    codex         ✓ mac-mini  ✓ thinkpad   OpenAI Codex CLI
+    cursor-agent  ✓ mac-mini  ✓ thinkpad   Cursor Agent CLI
+
+  MOBILE
+    flutter       ✓ mac-mini  ✓ thinkpad   Flutter SDK
+    cocoapods     ✓ mac-mini  ✗ thinkpad   CocoaPods dependency manager
+    xcode         ✓ mac-mini  ✗ thinkpad   Xcode — Apple's IDE
+    android-sdk   ✗ mac-mini  ✓ thinkpad   Android SDK and build tools
+
+  BACKEND
+    node          ✓ mac-mini  ✓ thinkpad   Node.js runtime and npm
+    python        ✓ mac-mini  ✓ thinkpad   Python 3 runtime
+
+  INFRASTRUCTURE
+    docker        ✓ mac-mini  ✓ thinkpad   Docker container runtime
+    git           ✓ mac-mini  ✓ thinkpad   Git version control
+```
+
+This view SSHs into each worker in real time and runs the check command to show what's actually installed vs. missing. You can filter by category:
+
+```
+da › skills available --category=mobile
+```
+
+To install a missing skill on a specific machine:
+
+```
+da › skills install thinkpad cocoapods
+  Installing cocoapods on thinkpad…
+  $ brew install cocoapods
+
+  ✓ cocoapods installed on thinkpad
+```
+
+---
+
+### Creating a New Skill
+
+This is where it gets interesting. Say you want to add a `deploy` skill — something that pushes a build to a server. The stack doesn't know about that yet.
+
+```
+da › skills create deploy
+```
+
+The CLI walks you through it:
+
+```
+  Creating new skill: deploy
+
+  Description (one line): Deploy a build artifact to a remote server
+  Category [custom]: infrastructure
+  Check command [deploy --version]: rsync --version
+  Install command (macos): brew install rsync
+  Install command (linux): sudo apt-get install -y rsync
+  Task type this enables [run_script]: deploy
+
+  ✓ Created handler: worker/handlers/deploy.py
+  ✓ Registered in skills.yaml
+
+  Next steps:
+  1. Implement worker/handlers/deploy.py
+  2. Add to worker/handlers/__init__.py dispatch:
+       if task.type == "deploy":
+           from worker.handlers.deploy import handle_deploy
+           return await handle_deploy(task)
+  3. Add the capability to machines.yaml:
+       skills add <machine> deploy
+```
+
+Two things just happened automatically:
+
+**A handler file was scaffolded** at `worker/handlers/deploy.py`:
+
+```python
+"""Handler for deploy tasks."""
+from __future__ import annotations
+
+from shared.models import Task
+
+
+async def handle_deploy(task: Task) -> dict:
+    """
+    payload:
+      # TODO: document expected payload keys
+    """
+    # TODO: implement handler
+    return {"needs_human": True, "notes": "handle_deploy not yet implemented"}
+```
+
+**The registry was updated** — `config/skills.yaml` now has a `deploy` entry with everything you just entered.
+
+Now you implement the handler. A real deploy skill might look like this:
+
+```python
+"""Handler for deploy tasks."""
+from __future__ import annotations
+
+import asyncio
+import shlex
+
+from shared.models import Task
+
+
+async def _run(cmd: str, cwd: str | None = None) -> tuple[int, str, str]:
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    stdout, stderr = await proc.communicate()
+    return proc.returncode, stdout.decode(), stderr.decode()
+
+
+async def handle_deploy(task: Task) -> dict:
+    """
+    payload:
+      artifact: str   — local path to the build artifact
+      target: str     — user@host:/path on the deploy server
+      timeout: int    — seconds (default 120)
+    """
+    artifact = task.payload.get("artifact", "")
+    target   = task.payload.get("target", "")
+    timeout  = int(task.payload.get("timeout", 120))
+
+    if not artifact or not target:
+        return {"needs_human": True, "notes": "artifact and target are required"}
+
+    cmd = f"rsync -avz --progress {shlex.quote(artifact)} {shlex.quote(target)}"
+
+    try:
+        rc, out, err = await asyncio.wait_for(_run(cmd), timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"needs_human": True, "notes": f"Deploy timed out after {timeout}s"}
+
+    if rc != 0:
+        return {"needs_human": True, "notes": f"rsync failed: {err[-500:]}"}
+
+    return {"status": "deployed", "target": target, "stdout": out[-1000:]}
+```
+
+Wire it into the dispatch in `worker/handlers/__init__.py`:
+
+```python
+if task.type == "deploy":
+    from worker.handlers.deploy import handle_deploy
+    return await handle_deploy(task)
+```
+
+Register it on the machines that can run it:
+
+```
+da › skills add thinkpad deploy
+  ✓ Added capability 'deploy' to thinkpad
+```
+
+And now:
+
+```
+da › assign deploy the Android APK to the staging server
+     → Asking Claude for routing recommendation…
+     → Suggested: ThinkPad / claude  (reasoning: deploy capability, artifact available)
+     → Confirm? Y
+     → ✓ Task queued  b7c14e2a  →  thinkpad / claude
+```
+
+The system knows how to route it, the worker knows how to execute it, and `skills available` will show its install status going forward.
+
+---
+
+### Auto-Discovery for Custom Handlers
+
+One more detail worth knowing: the worker dispatch includes auto-discovery for custom skill handlers. If you've created `worker/handlers/deploy.py` but haven't wired it into `__init__.py` yet, the dispatch will still find it — it looks for `handle_<task_type>` in a matching file.
+
+```python
+# Auto-discovery for custom skills
+handler_file = _HANDLERS_DIR / f"{task.type}.py"
+if handler_file.exists():
+    module = importlib.import_module(f"worker.handlers.{task.type}")
+    fn = getattr(module, f"handle_{task.type}", None)
+    if callable(fn):
+        return await fn(task)
+```
+
+This means scaffolding a handler with `skills create` and implementing it is enough to make it work — no manual dispatch wiring required. Explicit wiring is still recommended for built-in task types (faster, no import overhead), but for custom skills the auto-discovery is a useful shortcut.
+
+---
+
+## Lessons
+
+**Keep the queue simple.** SQLite is enough for a personal fleet. The async `aiosqlite` pattern works well — one new connection per function call, not reused across async contexts.
+
+**Agents that know their limits are more useful.** The `needs_human` task state is the most important design decision. It separates "distributed agents" from "distributed hallucinations." An agent that stops and waits when it's uncertain is worth far more than one that guesses.
+
+**The skills system makes the stack extensible without touching core code.** Adding a new capability means writing a handler, adding a YAML entry, and declaring the capability on the right machine. The orchestrator, queue, and routing all pick it up automatically.
+
+**The psychological shift matters.** When you have a distributed agent stack, you stop thinking about AI as a tool you use interactively and start thinking about it as infrastructure you delegate to. The agents aren't competing — they're complementary, and the infrastructure makes using all of them feel natural.
+
+---
+
+## What's Next
+
+**Smarter routing.** Right now Claude routes based on declared capabilities. A better version would learn from history — which agent consistently produces the best results for which task types — and route accordingly.
+
+**Task streaming.** Right now you get the full output only when a task completes. For long agent runs, a real-time stream would be more useful than polling.
+
+**Agent-to-agent delegation.** The natural next step is agents pushing sub-tasks to other agents. One agent delegates a subtask across the fleet — the system starts to look less like infrastructure and more like an actual team.
+
+---
+
+*The full implementation is roughly 1,200 lines of Python across the orchestrator, workers, agent modules, and skill handlers. Happy to share specifics on any part in the comments.*

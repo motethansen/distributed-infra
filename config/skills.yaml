@@ -1,0 +1,167 @@
+# Distributed Agents — Skills Registry
+#
+# Each skill entry defines:
+#   description  — one-line description shown in `skills available`
+#   category     — grouping: ai-agent | mobile | backend | infrastructure | custom
+#   check        — shell command that exits 0 if the skill is installed
+#   install      — install commands keyed by OS (macos / linux)
+#   task_types   — list of task_type values this skill enables
+#   handler      — path to the worker handler file (relative to project root)
+#
+# Skills you create with `skills create <name>` are appended here automatically.
+
+skills:
+
+  # ── AI Agents ─────────────────────────────────────────────────────────────────
+
+  claude:
+    description: "Claude Code CLI — Anthropic's AI coding agent"
+    category: ai-agent
+    check: "claude --version"
+    install:
+      macos: "npm install -g @anthropic-ai/claude-code"
+      linux: "npm install -g @anthropic-ai/claude-code"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+
+  gemini:
+    description: "Gemini CLI — Google's AI coding agent"
+    category: ai-agent
+    check: "gemini --version"
+    install:
+      macos: "npm install -g @google/gemini-cli"
+      linux: "npm install -g @google/gemini-cli"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+
+  codex:
+    description: "OpenAI Codex CLI — OpenAI's coding agent"
+    category: ai-agent
+    check: "codex --version"
+    install:
+      macos: "npm install -g @openai/codex"
+      linux: "npm install -g @openai/codex"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+
+  cursor-agent:
+    description: "Cursor Agent CLI — workspace-aware AI coding agent"
+    category: ai-agent
+    check: "agent --version"
+    install:
+      macos: "# Install Cursor app — agent CLI is bundled"
+      linux: "# Install Cursor app — agent CLI is bundled"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+
+  # ── Mobile ────────────────────────────────────────────────────────────────────
+
+  flutter:
+    description: "Flutter SDK for building cross-platform mobile apps"
+    category: mobile
+    check: "flutter --version"
+    install:
+      macos: "brew install --cask flutter"
+      linux: "sudo snap install flutter --classic"
+    task_types: [ios_build, android_build]
+    handler: worker/handlers/ios.py
+
+  cocoapods:
+    description: "CocoaPods dependency manager for iOS/Swift projects"
+    category: mobile
+    check: "pod --version"
+    install:
+      macos: "brew install cocoapods"
+    task_types: [ios_build]
+    handler: worker/handlers/ios.py
+
+  xcode:
+    description: "Xcode — Apple's IDE and build toolchain for iOS/macOS"
+    category: mobile
+    check: "xcodebuild -version"
+    install:
+      macos: "# Install Xcode from the App Store, then run: sudo xcodebuild -license accept && sudo xcodebuild -runFirstLaunch"
+    task_types: [ios_build]
+    handler: worker/handlers/ios.py
+
+  android-sdk:
+    description: "Android SDK and build tools for Android app compilation"
+    category: mobile
+    check: "adb --version"
+    install:
+      linux: "sudo apt-get install -y android-sdk"
+    task_types: [android_build]
+    handler: worker/handlers/android.py
+
+  # ── Backend / Node ────────────────────────────────────────────────────────────
+
+  node:
+    description: "Node.js runtime and npm for JavaScript/TypeScript projects"
+    category: backend
+    check: "node --version"
+    install:
+      macos: "brew install node"
+      linux: "sudo apt-get install -y nodejs npm"
+    task_types: [npm_build]
+    handler: worker/handlers/common.py
+
+  python:
+    description: "Python 3 runtime and pip"
+    category: backend
+    check: "python3 --version"
+    install:
+      macos: "brew install python"
+      linux: "sudo apt-get install -y python3 python3-pip"
+    task_types: [run_script, test_run]
+    handler: worker/handlers/common.py
+
+  # ── Infrastructure ────────────────────────────────────────────────────────────
+
+  docker:
+    description: "Docker container runtime"
+    category: infrastructure
+    check: "docker --version"
+    install:
+      macos: "brew install --cask docker"
+      linux: "sudo apt-get install -y docker.io && sudo usermod -aG docker $USER"
+    task_types: [run_script]
+    handler: worker/handlers/common.py
+
+  git:
+    description: "Git version control"
+    category: infrastructure
+    check: "git --version"
+    install:
+      macos: "brew install git"
+      linux: "sudo apt-get install -y git"
+    task_types: [git_pull]
+    handler: worker/handlers/common.py
+
+  ruff:
+    description: "Ruff — fast Python linter and formatter"
+    category: backend
+    check: "ruff --version"
+    install:
+      macos: "pip3 install ruff"
+      linux: "pip3 install ruff"
+    task_types: [lint]
+    handler: worker/handlers/common.py
+
+  ktlint:
+    description: "ktlint — Kotlin linter for Android projects"
+    category: mobile
+    check: "ktlint --version"
+    install:
+      macos: "brew install ktlint"
+      linux: "curl -sSLO https://github.com/pinterest/ktlint/releases/latest/download/ktlint && chmod +x ktlint && sudo mv ktlint /usr/local/bin/"
+    task_types: [lint]
+    handler: worker/handlers/common.py
+
+  swiftlint:
+    description: "SwiftLint — Swift style and conventions enforcer"
+    category: mobile
+    check: "swiftlint --version"
+    install:
+      macos: "brew install swiftlint"
+    task_types: [lint]
+    handler: worker/handlers/common.py
