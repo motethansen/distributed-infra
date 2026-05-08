@@ -15,6 +15,18 @@ machines:
       - xcode
       - swift
       - testflight
+      - flutter
+      - cocoapods
+      - agent_run
+      - run_script
+      - git_pull
+      - test_run
+      - lint
+    agents:
+      - claude
+      - gemini
+      - codex
+      - cursor-agent
     worker_port: 8001
 
   michaelhansen-thinkpad-x13-gen-4:
@@ -27,4 +39,15 @@ machines:
       - python_backend
       - node_backend
       - docker
+      - agent_run
+      - run_script
+      - git_pull
+      - test_run
+      - lint
+      - npm_build
+    agents:
+      - claude
+      - gemini
+      - codex
+      - cursor-agent
     worker_port: 8001
