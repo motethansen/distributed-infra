@@ -11,7 +11,7 @@ from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskUpdate
 from orchestrator import db
 
 SECRET_KEY = os.getenv("SECRET_KEY", "")
-MACHINE_NAME = os.getenv("MACHINE_NAME", "michaels-macbook-pro")
+MACHINE_NAME = os.getenv("MACHINE_NAME", "orchestrator")
 
 app = FastAPI(title="Distributed Infra Queue", version="0.1.0")
 
