@@ -99,7 +99,12 @@ async def list_tasks(status: str | None = None, limit: int = 100) -> list[Task]:
 
 
 async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | None:
-    """Atomically claim the highest-priority pending task the worker can handle."""
+    """Atomically claim the highest-priority pending task the worker can handle.
+
+    Respects _target_machine in the task payload — if set, only the named
+    machine may claim the task. Tasks without _target_machine are open to
+    any capable worker.
+    """
     if not capabilities:
         return None
     cap_placeholders = ",".join("?" * len(capabilities))
@@ -108,10 +113,16 @@ async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | N
         await _ensure_schema(db)
         async with db.execute(
             f"""SELECT * FROM tasks
-                WHERE status='pending' AND type IN ({cap_placeholders})
+                WHERE status='pending'
+                  AND type IN ({cap_placeholders})
+                  AND (
+                    json_extract(payload, '$._target_machine') IS NULL
+                    OR json_extract(payload, '$._target_machine') = ''
+                    OR json_extract(payload, '$._target_machine') = ?
+                  )
                 ORDER BY priority DESC, created_at ASC
                 LIMIT 1""",
-            capabilities,
+            (*capabilities, worker_name),
         ) as cur:
             row = await cur.fetchone()
         if not row:
