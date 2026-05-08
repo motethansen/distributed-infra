@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # da — Distributed Agents interactive CLI launcher
+# Resolves symlinks so `da` works from /usr/local/bin or anywhere on PATH.
 set -e
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
 cd "$SCRIPT_DIR"
 source .venv/bin/activate
 exec python orchestrator/da.py "$@"
