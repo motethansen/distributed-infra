@@ -52,10 +52,10 @@ async def run(prompt: str, model: str = "") -> dict:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "claude CLI timed out after 120s", "agent": "claude", "ok": False}
+        return {"error": "claude CLI timed out after 300s", "agent": "claude", "ok": False}
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()

@@ -42,7 +42,8 @@ async def run(prompt: str, model: str = "") -> dict:
             "ok": False,
         }
 
-    args = [cli, "-p", prompt]
+    # --yolo skips all interactive confirmations so Gemini runs fully headlessly
+    args = [cli, "--yolo", "-p", prompt]
     if model:
         args += ["--model", model]
 
@@ -52,10 +53,10 @@ async def run(prompt: str, model: str = "") -> dict:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "gemini CLI timed out after 120s", "agent": "gemini", "ok": False}
+        return {"error": "gemini CLI timed out after 300s", "agent": "gemini", "ok": False}
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
