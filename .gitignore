@@ -4,6 +4,10 @@
 .env.*
 !.env.example
 
+# machines.yaml contains real Tailscale IPs — use machines.yaml.example as template
+config/machines.yaml
+!config/machines.yaml.example
+
 # Data (SQLite queue lives here, not in git)
 data/
 *.db
