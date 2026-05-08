@@ -20,7 +20,7 @@ The system has three layers:
 - FastAPI server on port 8000
 - SQLite task queue (`aiosqlite`, async)
 - Interactive `da` CLI — the control plane for the whole fleet
-- Tailscale static IP: `100.97.176.37`
+- Tailscale static IP: assigned by Tailscale (run `tailscale ip -4`)
 
 **Workers (ThinkPad Ubuntu + Mac Mini Intel)**
 - FastAPI server on port 8001
@@ -122,9 +122,9 @@ On Ubuntu, a systemd user service handles auto-start:
 Description=Infra Worker
 
 [Service]
-WorkingDirectory=/home/michaelhansen/Projects/distributed-infra
-ExecStart=/home/michaelhansen/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
-Environment=PATH=/home/michaelhansen/.local/bin:/home/michaelhansen/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/home/your-username/Projects/distributed-infra
+ExecStart=/home/your-username/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
+Environment=PATH=/home/your-username/.local/bin:/home/your-username/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
 
 [Install]

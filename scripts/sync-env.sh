@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Copies .env from MacBook to all worker machines via Tailscale / SSH.
+# Copies .env from the orchestrator to all worker machines via Tailscale / SSH.
 # Run from the repo root: bash scripts/sync-env.sh
+#
+# Set these env vars to match your Tailscale IPs and remote usernames:
+#   THINKPAD_IP=100.x.x.x MACMINI_IP=100.x.x.x bash scripts/sync-env.sh
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 
-THINKPAD_IP="100.112.241.6"
-MACMINI_IP="100.76.214.54"
+# Read IPs from environment — must be set or script will error
+THINKPAD_IP="${THINKPAD_IP:?Set THINKPAD_IP to your ThinkPad Tailscale IP}"
+MACMINI_IP="${MACMINI_IP:?Set MACMINI_IP to your Mac Mini Tailscale IP}"
 
 # Detect remote username — default to local $USER unless overridden
 THINKPAD_USER="${THINKPAD_USER:-$USER}"
@@ -40,5 +44,5 @@ scp_to "$MACMINI_USER"  "$MACMINI_IP"  "Mac Mini (iOS)"
 echo ""
 echo "Done. Workers will pick up the new .env on next restart."
 echo ""
-echo "Tip: set THINKPAD_USER or MACMINI_USER env vars if your remote username differs."
-echo "  THINKPAD_USER=michael bash scripts/sync-env.sh"
+echo "Tip: override remote username if it differs from local:"
+echo "  THINKPAD_IP=100.x.x.x MACMINI_IP=100.x.x.x THINKPAD_USER=yourname bash scripts/sync-env.sh"

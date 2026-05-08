@@ -15,7 +15,7 @@ from worker.poller import Poller
 MACHINE_NAME = os.getenv("MACHINE_NAME", "unknown-worker")
 TAILSCALE_IP = os.getenv("TAILSCALE_IP", "")
 WORKER_PORT = int(os.getenv("WORKER_PORT", "8001"))
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://100.97.176.37:8000")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))
 HEADERS = {"x-secret-key": SECRET_KEY}

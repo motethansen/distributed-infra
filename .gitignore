@@ -30,6 +30,10 @@ logs/
 # macOS
 .DS_Store
 
+# launchd plists contain secrets (paths, keys) — use the .plist.example as template
+scripts/*.plist
+!scripts/*.plist.example
+
 # Editor
 .vscode/
 .idea/

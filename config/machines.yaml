@@ -1,13 +1,13 @@
 machines:
-  michaels-macbook-pro:
-    tailscale_ip: "100.97.176.37"
+  macbook-pro:
+    tailscale_ip: "YOUR_MACBOOK_TAILSCALE_IP"   # e.g. 100.x.x.x from `tailscale ip -4`
     role: orchestrator
     os: macos
     capabilities: []
     queue_port: 8000
 
   mac-mini:
-    tailscale_ip: "100.76.214.54"
+    tailscale_ip: "YOUR_MACMINI_TAILSCALE_IP"
     role: worker
     os: macos
     capabilities:
@@ -29,8 +29,8 @@ machines:
       - cursor-agent
     worker_port: 8001
 
-  michaelhansen-thinkpad-x13-gen-4:
-    tailscale_ip: "100.112.241.6"
+  thinkpad-x1:
+    tailscale_ip: "YOUR_THINKPAD_TAILSCALE_IP"
     role: worker
     os: linux
     capabilities:
