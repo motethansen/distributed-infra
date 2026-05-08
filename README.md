@@ -45,7 +45,7 @@ Declare your own machines in `config/machines.yaml`.
 ### 1. Clone on each machine
 
 ```bash
-git clone https://github.com/motethansen/distributed-infra.git
+git clone https://github.com/your-username/distributed-infra.git
 cd distributed-infra
 ```
 

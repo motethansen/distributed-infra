@@ -140,7 +140,7 @@ WantedBy=default.target
 ```
 ╭──────────────────────────────────────────────────────────────────╮
 │  Distributed Agents                                              │
-│  michaels-macbook-pro  ·  mac-mini  ·  thinkpad-x1              │
+│  macbook-pro  ·  mac-mini  ·  thinkpad-x1              │
 │  2/2 workers online                                              │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -156,7 +156,7 @@ da › status
 
   Machine               Role         Online   Active   Done   Failed   Top LLM
  ────────────────────────────────────────────────────────────────────────────────
-  michaels-macbook-pro  orchestrator ✓        -        -      -        -
+  macbook-pro  orchestrator ✓        -        -      -        -
   mac-mini              worker       ✓        0        14     0        gemini (8)
   thinkpad-x1           worker       ✓        0        22     2        claude (15)
 ```
