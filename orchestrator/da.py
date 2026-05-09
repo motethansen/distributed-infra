@@ -19,10 +19,11 @@ from pathlib import Path
 import httpx
 import yaml
 from dotenv import load_dotenv
-from prompt_toolkit import PromptSession
+from prompt_toolkit import PromptSession, prompt as pt_prompt
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
@@ -61,6 +62,49 @@ COMMANDS = [
 
 def _client() -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, headers=HEADERS, timeout=10)
+
+
+def _multiline_prompt(hint: str = "") -> str | None:
+    """
+    Open a multiline prompt using prompt_toolkit's native multiline mode.
+
+    - Paste freely — newlines are preserved exactly as typed/pasted.
+    - Submit:  Alt+Enter  (or  Esc  then  Enter  on terminals that don't
+               support Alt) — same as the Claude web interface.
+    - Also:    Ctrl+D  on a non-empty buffer submits.
+    - Cancel:  Ctrl+C  returns None without queuing anything.
+
+    This works because prompt_toolkit's multiline mode treats bare Enter as
+    a newline insertion, not a submit — so pasted blocks land intact.
+    """
+    kb = KeyBindings()
+
+    @kb.add("c-d")
+    def _ctrl_d_submit(event):
+        buf = event.current_buffer
+        if buf.text:          # only submit when there is something to send
+            buf.validate_and_handle()
+
+    label = hint or "Enter your prompt."
+    console.print(
+        f"\n  [dim]{label}[/dim]\n"
+        "  [dim][bold]Alt+Enter[/bold] (or [bold]Esc → Enter[/bold]) to submit"
+        " · [bold]Ctrl+D[/bold] to submit · [bold]Ctrl+C[/bold] to cancel[/dim]\n"
+    )
+
+    try:
+        text = pt_prompt(
+            "  › ",
+            multiline=True,
+            key_bindings=kb,
+            prompt_continuation="    ",
+        )
+        return text.strip() or None
+    except KeyboardInterrupt:
+        console.print("\n  [dim]Cancelled.[/dim]")
+        return None
+    except EOFError:
+        return None
 
 
 def _machines() -> dict:
@@ -188,13 +232,14 @@ def _push_task(task_type: str, payload: dict, notes: str = "", priority: int = 5
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 def cmd_assign(args: list[str]) -> None:
-    """assign [description] [--machine=X] [--agent=Y] [--type=Z]"""
+    """assign [description] [--machine=X] [--agent=Y] [--type=Z] [--file=path]"""
     if not args:
         console.print(
-            "[dim]Usage: assign <task description> [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
-            "  --agent accepts: claude, gemini, codex, groq\n"
-            "  --machine must match a name in config/machines.yaml\n"
-            "  Tip: omit the description to enter multi-line prompt mode.[/dim]"
+            "[dim]Usage: assign [description] [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
+            "  Omit description to open multiline paste mode — Alt+Enter (or Esc→Enter) to submit.\n"
+            "  --agent:   claude, gemini, codex, groq\n"
+            "  --machine: must match a name in config/machines.yaml\n"
+            "  --file:    load prompt from a file (e.g. --file=~/prompts/task.txt)[/dim]"
         )
         return
 
@@ -216,8 +261,6 @@ def cmd_assign(args: list[str]) -> None:
     prompt_file      = flags.get("file", "")
 
     # ── Load prompt from file (--file=path) ────────────────────────────────
-    # Best for long prompts — write to ~/prompts/task.txt, then:
-    #   assign --machine=mac-mini --agent=claude --type=agent_run --file=~/prompts/task.txt
     if prompt_file:
         fpath = Path(prompt_file).expanduser()
         if not fpath.exists():
@@ -227,7 +270,22 @@ def cmd_assign(args: list[str]) -> None:
         if not description:
             console.print(f"[red]✗ File is empty: {fpath}[/red]")
             return
-        console.print(f"  [dim]Loaded prompt from {fpath} ({len(description)} chars)[/dim]")
+        console.print(f"  [dim]Loaded {len(description)} chars from {fpath}[/dim]")
+
+    # ── Multi-line prompt mode ─────────────────────────────────────────────
+    # Triggered when no inline description was given (and no --file).
+    # Uses prompt_toolkit multiline so paste works exactly like Claude's UI.
+    if not description:
+        result = _multiline_prompt(
+            "Paste or type your task prompt."
+            + (" Flags: "
+               + ", ".join(f"--{k}={v}" for k, v in flags.items() if k != "file")
+               if flags else "")
+        )
+        if not result:
+            console.print("  [dim]Empty prompt — nothing to assign.[/dim]")
+            return
+        description = result
 
     routing: dict = {}
 
@@ -722,18 +780,11 @@ def cmd_run(args: list[str]) -> None:
     if len(args) > 1:
         prompt = " ".join(args[1:])
     else:
-        console.print(f"  [dim]Enter prompt (blank line to submit, Ctrl-C to cancel):[/dim]")
-        lines: list[str] = []
-        try:
-            while True:
-                line = input("  > ")
-                if line == "" and lines:
-                    break
-                lines.append(line)
-        except KeyboardInterrupt:
-            console.print("\n  [dim]Cancelled.[/dim]")
+        result = _multiline_prompt(f"Enter prompt for [bold]{agent}[/bold].")
+        if not result:
+            console.print("  [dim]Empty prompt — nothing to run.[/dim]")
             return
-        prompt = "\n".join(lines)
+        prompt = result
 
     if not prompt.strip():
         console.print("[dim]  Empty prompt — nothing to run.[/dim]")
@@ -957,7 +1008,7 @@ def cmd_help() -> None:
           Example: run claude write a hello world function in Python
 
       [bold]run[/bold] <agent>
-          Run an agent in multi-line prompt mode (blank line to submit).
+          Open multiline prompt mode — paste freely, Alt+Enter to submit.
 
       [bold]test[/bold] [agent]
           Smoke-test all 4 agents (or one) to confirm they work locally.
@@ -966,13 +1017,16 @@ def cmd_help() -> None:
 
     [bold cyan]Queue  (send tasks to workers)[/bold cyan]
 
-      [bold]assign[/bold] <task description> [--machine=X] [--agent=Y] [--type=Z]
+      [bold]assign[/bold] [description] [--machine=X] [--agent=Y] [--type=Z] [--file=path]
           Push a task to a worker. If flags are omitted, Claude recommends routing.
+          Omit the description to open multiline paste mode (Alt+Enter to submit).
           --agent: claude, gemini, codex, groq  (--llm=Y also accepted)
           --machine must match a name in config/machines.yaml
+          --file=~/prompts/task.txt  load prompt from a file
           Validates that the machine supports the task type and agent before queuing.
           Example: assign refactor the auth module for better error handling
-                   assign build the iOS app --machine=mac-mini --agent=gemini
+                   assign --machine=mac-mini --agent=claude --type=agent_run
+                   assign build the iOS app --machine=mac-mini --agent=gemini --file=~/prompts/ios.txt
 
       [bold]queue[/bold] [--status=pending|done|failed|in_progress|needs_human]
           View queued tasks. Pending tasks show target machine (→mac-mini) even
