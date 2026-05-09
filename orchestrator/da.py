@@ -775,17 +775,34 @@ def cmd_review(args: list[str]) -> None:
 
     console.print(f"\n  [bold magenta]{len(tasks)} task(s) need your review[/bold magenta]\n")
     for t in tasks:
-        llm    = (t.get("payload") or {}).get("agent", "-")
-        prompt = (t.get("payload") or {}).get("prompt", "")
+        payload = t.get("payload") or {}
+        agent   = payload.get("agent", "-")
+        prompt  = payload.get("prompt", "")
+        notes_raw = t.get("notes") or ""
+
+        # Split stored "notes | ACTION: action" back into two parts
+        action = ""
+        notes  = notes_raw
+        if " | ACTION: " in notes_raw:
+            notes, action = notes_raw.split(" | ACTION: ", 1)
+        elif notes_raw.startswith("ACTION: "):
+            action = notes_raw[len("ACTION: "):]
+            notes  = ""
+
         console.print(
             f"  [bold]{t['id'][:8]}[/bold]"
             f"  [cyan]{t.get('assigned_to', '?')}[/cyan]"
-            f"  [dim]{llm}[/dim]"
+            f"  [dim]{t['type']}  ·  {agent}[/dim]"
         )
-        if t.get("notes"):
-            console.print(f"    notes:  {t['notes']}")
+        if notes:
+            console.print(f"    [yellow]Issue:[/yellow]  {notes}")
+        if action:
+            console.print(f"    [bold red]Action:[/bold red] {action}")
         if prompt:
-            console.print(f"    prompt: {prompt[:120]}")
+            console.print(f"    [dim]Prompt: {prompt[:120]}[/dim]")
+        result = t.get("result") or {}
+        if result.get("stderr"):
+            console.print(f"    [dim]Stderr: {result['stderr'][:200]}[/dim]")
         console.print(f"    [dim]resolve {t['id'][:8]} done   # or: failed / pending[/dim]")
         console.print()
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Header, Query
@@ -109,10 +110,51 @@ async def fail_task(task_id: str, result: dict = {}, x_secret_key: str = Header(
 
 
 @app.post("/tasks/{task_id}/needs-human", response_model=Task)
-async def escalate_task(task_id: str, notes: str = "", x_secret_key: str = Header(default="")):
+async def escalate_task(
+    task_id: str,
+    notes: str = "",
+    action: str = "",
+    x_secret_key: str = Header(default=""),
+):
     """Worker escalates a task that requires human decision."""
     _check_auth(x_secret_key)
-    task = await db.update_task(task_id, {"status": TaskStatus.needs_human, "notes": notes})
+
+    # Combine notes + action into the stored notes field so it survives without
+    # a schema change.  Format: "<notes> | ACTION: <action>"
+    full_notes = notes
+    if action:
+        full_notes = f"{notes} | ACTION: {action}" if notes else f"ACTION: {action}"
+
+    task = await db.update_task(task_id, {"status": TaskStatus.needs_human, "notes": full_notes})
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+
+    # ── macOS notification on the orchestrator machine ───────────────────────
+    _notify(
+        title="⚠️ Task needs your attention",
+        subtitle=f"{task_id[:8]}  ·  {(task.payload or {}).get('type', task.type)}",
+        message=action or notes or "A task requires human action — run: da › review",
+    )
+
     return task
+
+
+def _notify(title: str, subtitle: str, message: str) -> None:
+    """Fire a macOS notification. Silently ignored on non-macOS hosts."""
+    try:
+        # Escape double quotes for AppleScript
+        def esc(s: str) -> str:
+            return s.replace("\\", "\\\\").replace('"', '\\"')[:200]
+
+        script = (
+            f'display notification "{esc(message)}" '
+            f'with title "{esc(title)}" '
+            f'subtitle "{esc(subtitle)}"'
+        )
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        pass  # not macOS
