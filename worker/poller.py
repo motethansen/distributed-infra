@@ -58,14 +58,16 @@ class Poller:
             try:
                 result = await dispatch(task)
                 if result.get("needs_human"):
-                    # Preserve stdout/stderr in the result field so the output
-                    # isn't lost — only notes goes to the needs-human endpoint.
+                    # Preserve stdout/stderr/action in result so nothing is lost.
                     output = {k: v for k, v in result.items() if k not in ("needs_human", "notes")}
                     if output:
                         await client.patch(f"/tasks/{task.id}", json={"result": output})
                     await client.post(
                         f"/tasks/{task.id}/needs-human",
-                        params={"notes": result.get("notes", "")},
+                        params={
+                            "notes": result.get("notes", ""),
+                            "action": result.get("action", ""),
+                        },
                     )
                 else:
                     await client.post(f"/tasks/{task.id}/complete", json=result)
