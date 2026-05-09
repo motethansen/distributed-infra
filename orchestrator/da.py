@@ -193,7 +193,8 @@ def cmd_assign(args: list[str]) -> None:
         console.print(
             "[dim]Usage: assign <task description> [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
             "  --agent accepts: claude, gemini, codex, groq\n"
-            "  --machine must match a name in config/machines.yaml[/dim]"
+            "  --machine must match a name in config/machines.yaml\n"
+            "  Tip: omit the description to enter multi-line prompt mode.[/dim]"
         )
         return
 
@@ -212,6 +213,28 @@ def cmd_assign(args: list[str]) -> None:
     # Accept --agent or --llm (legacy)
     explicit_llm     = flags.get("agent", flags.get("llm", ""))
     explicit_type    = flags.get("type", "")
+
+    # ── Multi-line prompt mode ─────────────────────────────────────────────
+    # Triggered when flags are set but no inline description is provided.
+    if not description and (explicit_machine or explicit_llm or explicit_type):
+        console.print(
+            "  [dim]Enter prompt below. Blank line to submit, Ctrl-C to cancel.[/dim]\n"
+            "  [dim]Tip: paste multi-line text freely — blank line confirms.[/dim]\n"
+        )
+        lines: list[str] = []
+        try:
+            while True:
+                line = input("  > ")
+                if line == "" and lines:
+                    break
+                lines.append(line)
+        except KeyboardInterrupt:
+            console.print("\n  [dim]Cancelled.[/dim]")
+            return
+        description = "\n".join(lines).strip()
+        if not description:
+            console.print("  [dim]Empty prompt — nothing to assign.[/dim]")
+            return
 
     routing: dict = {}
 
