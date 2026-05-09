@@ -86,11 +86,13 @@ def _detect_action(stdout: str, stderr: str, returncode: int) -> dict:
 
 
 async def _run(cmd: str, cwd: str | None = None) -> tuple[int, str, str]:
+    # Expand ~ so that cwd="~/Projects/foo" works from task payloads
+    expanded_cwd = os.path.expanduser(cwd) if cwd else None
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
+        cwd=expanded_cwd,
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode, stdout.decode(), stderr.decode()
