@@ -79,17 +79,20 @@ def _multiline_prompt(hint: str = "") -> str | None:
     """
     kb = KeyBindings()
 
-    @kb.add("c-d")
-    def _ctrl_d_submit(event):
+    def _submit(event):
         buf = event.current_buffer
-        if buf.text:          # only submit when there is something to send
+        if buf.text:
             buf.validate_and_handle()
+
+    kb.add("c-d")(_submit)   # Ctrl+D
+    kb.add("c-s")(_submit)   # Ctrl+S  (most intuitive — "send")
 
     label = hint or "Enter your prompt."
     console.print(
         f"\n  [dim]{label}[/dim]\n"
-        "  [dim][bold]Alt+Enter[/bold] (or [bold]Esc → Enter[/bold]) to submit"
-        " · [bold]Ctrl+D[/bold] to submit · [bold]Ctrl+C[/bold] to cancel[/dim]\n"
+        "  [dim]Submit: [bold]Ctrl+D[/bold] or [bold]Ctrl+S[/bold]"
+        " · also: [bold]Option+Enter[/bold] (macOS) or [bold]Esc → Enter[/bold]"
+        " · cancel: [bold]Ctrl+C[/bold][/dim]\n"
     )
 
     try:
