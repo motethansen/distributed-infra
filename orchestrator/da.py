@@ -213,28 +213,21 @@ def cmd_assign(args: list[str]) -> None:
     # Accept --agent or --llm (legacy)
     explicit_llm     = flags.get("agent", flags.get("llm", ""))
     explicit_type    = flags.get("type", "")
+    prompt_file      = flags.get("file", "")
 
-    # ── Multi-line prompt mode ─────────────────────────────────────────────
-    # Triggered when flags are set but no inline description is provided.
-    if not description and (explicit_machine or explicit_llm or explicit_type):
-        console.print(
-            "  [dim]Enter prompt below. Blank line to submit, Ctrl-C to cancel.[/dim]\n"
-            "  [dim]Tip: paste multi-line text freely — blank line confirms.[/dim]\n"
-        )
-        lines: list[str] = []
-        try:
-            while True:
-                line = input("  > ")
-                if line == "" and lines:
-                    break
-                lines.append(line)
-        except KeyboardInterrupt:
-            console.print("\n  [dim]Cancelled.[/dim]")
+    # ── Load prompt from file (--file=path) ────────────────────────────────
+    # Best for long prompts — write to ~/prompts/task.txt, then:
+    #   assign --machine=mac-mini --agent=claude --type=agent_run --file=~/prompts/task.txt
+    if prompt_file:
+        fpath = Path(prompt_file).expanduser()
+        if not fpath.exists():
+            console.print(f"[red]✗ File not found: {fpath}[/red]")
             return
-        description = "\n".join(lines).strip()
+        description = fpath.read_text().strip()
         if not description:
-            console.print("  [dim]Empty prompt — nothing to assign.[/dim]")
+            console.print(f"[red]✗ File is empty: {fpath}[/red]")
             return
+        console.print(f"  [dim]Loaded prompt from {fpath} ({len(description)} chars)[/dim]")
 
     routing: dict = {}
 
