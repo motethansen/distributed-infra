@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, Response
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WAHA_URL         = os.getenv("WAHA_URL", "http://localhost:3000")
+WAHA_API_KEY     = os.getenv("WAHA_API_KEY", "")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://100.97.176.37:8000")
 SECRET_KEY       = os.getenv("INFRA_SECRET_KEY", "")
 WAHA_SESSION     = "default"
@@ -40,13 +41,19 @@ def _headers() -> dict:
     return {"x-secret-key": SECRET_KEY, "Content-Type": "application/json"}
 
 
+def _waha_headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    if WAHA_API_KEY:
+        h["X-Api-Key"] = WAHA_API_KEY
+    return h
+
+
 async def _send_wa(chat_id: str, text: str) -> None:
     async with httpx.AsyncClient() as c:
-        await c.post(f"{WAHA_URL}/api/sendText", json={
-            "session": WAHA_SESSION,
-            "chatId":  chat_id,
-            "text":    text,
-        }, timeout=10)
+        await c.post(f"{WAHA_URL}/api/sendText",
+            headers=_waha_headers(),
+            json={"session": WAHA_SESSION, "chatId": chat_id, "text": text},
+            timeout=10)
 
 
 async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | None:

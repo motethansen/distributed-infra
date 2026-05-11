@@ -13,3 +13,4 @@ services:
       WHATSAPP_DEFAULT_ENGINE: "WEBJS"
       WAHA_DASHBOARD_USERNAME: "michaelhansen"
       WAHA_DASHBOARD_PASSWORD: "L9gnd8v3!"
+      WAHA_API_KEY: "9e449d34a07f439d92c2eb3cdf94748f"
