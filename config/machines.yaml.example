@@ -3,8 +3,15 @@ machines:
     tailscale_ip: "YOUR_MACBOOK_TAILSCALE_IP"   # e.g. 100.x.x.x from `tailscale ip -4`
     role: orchestrator
     os: macos
-    capabilities: []
+    # MBP can also act as a worker for things only it can run (iCloud-backed
+    # files, local Obsidian vault). Leave capabilities empty if you don't
+    # want a worker process here.
+    capabilities:
+      - assistant_run
+    agents:
+      - assistant
     queue_port: 8000
+    worker_port: 8001
 
   mac-mini:
     tailscale_ip: "YOUR_MACMINI_TAILSCALE_IP"
