@@ -11,3 +11,5 @@ services:
       WHATSAPP_HOOK_URL: "http://host.docker.internal:3001/webhook"
       WHATSAPP_HOOK_EVENTS: "message"
       WHATSAPP_DEFAULT_ENGINE: "WEBJS"
+      WAHA_DASHBOARD_USERNAME: "michaelhansen"
+      WAHA_DASHBOARD_PASSWORD: "L9gnd8v3!"
