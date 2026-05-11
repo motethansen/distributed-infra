@@ -223,11 +223,13 @@ app = FastAPI(lifespan=_lifespan)
 async def webhook(request: Request):
     data = await request.json()
 
-    if data.get("event") != "message":
+    if data.get("event") not in ("message", "message.any"):
         return Response(status_code=200)
 
     msg     = data.get("payload", {})
-    chat_id = msg.get("from", "")
+    key     = (msg.get("_data") or {}).get("key") or {}
+    # Prefer the real WhatsApp address (remoteJidAlt) when WhatsApp's LID addressing is used
+    chat_id = key.get("remoteJidAlt") or msg.get("from", "")
     body    = (msg.get("body") or "").strip()
     is_me   = msg.get("fromMe", False)
 
