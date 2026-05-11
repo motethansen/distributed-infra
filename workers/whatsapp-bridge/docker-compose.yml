@@ -10,7 +10,7 @@ services:
       # Send incoming messages to the bridge running on the Mac Mini host
       WHATSAPP_HOOK_URL: "http://host.docker.internal:3001/webhook"
       WHATSAPP_HOOK_EVENTS: "message"
-      WHATSAPP_DEFAULT_ENGINE: "WEBJS"
+      WHATSAPP_DEFAULT_ENGINE: "NOWEB"
       WAHA_DASHBOARD_USERNAME: "michaelhansen"
       WAHA_DASHBOARD_PASSWORD: "L9gnd8v3!"
       WAHA_API_KEY: "9e449d34a07f439d92c2eb3cdf94748f"
