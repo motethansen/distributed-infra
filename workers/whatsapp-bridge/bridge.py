@@ -32,6 +32,16 @@ TASK_TIMEOUT     = 360  # seconds before giving up
 # In-memory map: task_id → {chat_id, started_at}
 _pending: dict[str, dict] = {}
 
+# The numeric WhatsApp ID of the user (just the digits, no @suffix). Loaded
+# from Waha at startup via _ensure_waha_config — anything outside this self-chat
+# is ignored, so the bridge never responds in conversations with other people.
+_self_number: str = ""
+
+
+def _digits(jid: str) -> str:
+    """Strip @s.whatsapp.net / @c.us / @lid suffixes from a JID."""
+    return jid.split("@", 1)[0] if jid else ""
+
 # Prefixes the bridge uses in its own replies — never treat these as commands.
 # Waha echoes the bridge's outbound messages back via webhook (fromMe=true),
 # so without this filter every reply would loop back as an "unknown" command.
@@ -208,6 +218,14 @@ def _parse(text: str) -> tuple[str, dict]:
             return "run", {"agent": parts[0].lower(), "prompt": parts[1]}
         return "run", {"agent": "claude", "prompt": body}
 
+    # assist <subcommand> [args]  →  assistant_run on macbook-pro
+    if re.match(r"^/?assist(\s+|$)", t, re.IGNORECASE):
+        body  = re.sub(r"^/?assist\s*", "", t, flags=re.IGNORECASE).strip()
+        parts = body.split(None, 1) if body else []
+        sub   = parts[0].lower() if parts else ""
+        args  = parts[1] if len(parts) == 2 else ""
+        return "assist", {"subcommand": sub, "args": args}
+
     return "unknown", {"text": t}
 
 
@@ -259,12 +277,15 @@ WAHA_WEBHOOK_EVENTS = ["message.any"]
 
 
 async def _ensure_waha_config() -> None:
-    """Make sure the Waha session has the webhook + events the bridge expects.
+    """Make sure the Waha session has the webhook + events the bridge expects,
+    and cache the user's own number so we only respond in the self-chat.
 
-    Without this, deleting waha-sessions/ (or any Waha session reset) would
-    silently disable command replies until someone manually PUTs the config.
-    Idempotent: if the config already matches, this is a no-op.
+    Without the webhook PUT, deleting waha-sessions/ would silently disable
+    replies. Without the self-number cache the bridge can't tell a self-chat
+    message from an outgoing message to another contact.
+    Idempotent: silent no-op when both are already correct.
     """
+    global _self_number
     async with httpx.AsyncClient() as c:
         try:
             r = await c.get(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
@@ -276,7 +297,13 @@ async def _ensure_waha_config() -> None:
             print(f"[waha-config] GET session returned {r.status_code}; skipping", flush=True)
             return
 
-        cfg = (r.json() or {}).get("config") or {}
+        session = r.json() or {}
+        me      = session.get("me") or {}
+        _self_number = _digits(me.get("id", ""))
+        if _self_number:
+            print(f"[waha-config] self-chat scope locked to {_self_number}", flush=True)
+
+        cfg = session.get("config") or {}
         webhooks = cfg.get("webhooks") or []
         wanted = {"url": WAHA_WEBHOOK_URL, "events": WAHA_WEBHOOK_EVENTS}
         already = any(
@@ -320,8 +347,12 @@ async def webhook(request: Request):
     body    = (msg.get("body") or "").strip()
     is_me   = msg.get("fromMe", False)
 
-    # Only process messages sent by the user from their own phone (self-chat)
+    # Hard scope: only process messages the user sent IN THEIR OWN SELF-CHAT.
+    # Without this, every message the user sends to anyone (fromMe=true) would
+    # be parsed as a command and replied to — wrecking real conversations.
     if not is_me:
+        return Response(status_code=200)
+    if not _self_number or _digits(chat_id) != _self_number:
         return Response(status_code=200)
 
     # Ignore the bridge's own replies (they always start with a known emoji/prefix)
@@ -397,6 +428,24 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "assist":
+        sub  = kwargs["subcommand"]
+        args = kwargs["args"]
+        if sub not in ("today", "sync", "status", "plan"):
+            await _send_wa(chat_id,
+                "❌ Usage: assist <today|sync|status|plan [today|week]>")
+            return Response(status_code=200)
+
+        payload = {"subcommand": sub, "args": args, "_target_machine": "macbook-pro"}
+        notes   = f"assist {sub}{(' ' + args) if args else ''}"
+        task_id = await _create_task("assistant_run", payload, notes=notes[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ {notes}  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "help":
         await _send_wa(chat_id, (
             "Commands:\n"
@@ -405,11 +454,13 @@ async def webhook(request: Request):
             "  review — tasks needing input\n"
             "  failures — failed tasks\n"
             "  run <agent> <prompt>\n"
+            "  assist <today|sync|status|plan [today|week]>\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n\n"
             "Examples:\n"
+            "  assist today\n"
+            "  assist plan week\n"
             "  run claude explain Riverpod\n"
-            "  assign refactor auth --machine=thinkpad --agent=claude\n"
-            "  assign build iOS release --machine=mac-mini --type=ios_build"
+            "  assign refactor auth --machine=thinkpad --agent=claude"
         ))
 
     else:
