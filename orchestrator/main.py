@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
+import yaml
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 
@@ -13,6 +16,10 @@ from orchestrator import db
 
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 MACHINE_NAME = os.getenv("MACHINE_NAME", "orchestrator")
+
+_MACHINES_CONFIG = Path(__file__).parent.parent / "config" / "machines.yaml"
+_ONLINE_WINDOW_SECS = 30  # worker is "online" if it polled within this window
+_last_seen: dict[str, float] = {}  # worker_name → unix ts of last claim poll
 
 app = FastAPI(title="Distributed Infra Queue", version="0.1.0")
 
@@ -85,10 +92,56 @@ async def update_task(task_id: str, body: TaskUpdate, x_secret_key: str = Header
 async def claim_task(body: ClaimRequest, x_secret_key: str = Header(default="")):
     """Worker calls this to atomically claim the next available task."""
     _check_auth(x_secret_key)
+    _last_seen[body.worker_name] = time.time()
     task = await db.claim_next_task(body.worker_name, body.capabilities)
     if not task:
         return JSONResponse(status_code=204, content=None)
     return task
+
+
+# ── Machine roster ───────────────────────────────────────────────────────────
+
+def _load_machines() -> dict:
+    with open(_MACHINES_CONFIG) as f:
+        return yaml.safe_load(f).get("machines", {})
+
+
+@app.get("/machines")
+async def list_machines(x_secret_key: str = Header(default="")):
+    """Roster from machines.yaml + liveness derived from worker claim polls.
+
+    The orchestrator row is always online (you can only reach this endpoint
+    when it is). Workers are online if they polled within _ONLINE_WINDOW_SECS.
+    """
+    _check_auth(x_secret_key)
+    machines = _load_machines()
+    now = time.time()
+
+    out = []
+    for name, cfg in machines.items():
+        # Workers may register under any alias; take the freshest timestamp.
+        last_ts = _last_seen.get(name)
+        for alias in cfg.get("aliases", []) or []:
+            alt = _last_seen.get(alias)
+            if alt and (last_ts is None or alt > last_ts):
+                last_ts = alt
+
+        role = cfg.get("role", "worker")
+        online = True if role == "orchestrator" else (
+            last_ts is not None and (now - last_ts) < _ONLINE_WINDOW_SECS
+        )
+
+        out.append({
+            "name": name,
+            "role": role,
+            "tailscale_ip": cfg.get("tailscale_ip"),
+            "capabilities": cfg.get("capabilities", []) or [],
+            "agents": cfg.get("agents", []) or [],
+            "aliases": cfg.get("aliases", []) or [],
+            "online": online,
+            "last_seen_ago_secs": int(now - last_ts) if last_ts else None,
+        })
+    return out
 
 
 @app.post("/tasks/{task_id}/complete", response_model=Task)
