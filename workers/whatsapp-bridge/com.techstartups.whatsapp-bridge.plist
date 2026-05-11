@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Setup:
+    1. Create a venv in this folder:   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    2. Replace every YOUR_USERNAME / YOUR_SECRET_KEY_HERE / YOUR_WAHA_API_KEY below.
+       (Match INFRA_SECRET_KEY to the rest of the fleet, WAHA_API_KEY to docker-compose.yml.)
+    3. Copy to ~/Library/LaunchAgents/, then:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.whatsapp-bridge.plist
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -8,8 +16,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>python3</string>
+    <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/workers/whatsapp-bridge/.venv/bin/python</string>
     <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/workers/whatsapp-bridge/bridge.py</string>
   </array>
 
@@ -24,6 +31,8 @@
     <string>YOUR_SECRET_KEY_HERE</string>
     <key>WAHA_URL</key>
     <string>http://localhost:3000</string>
+    <key>WAHA_API_KEY</key>
+    <string>YOUR_WAHA_API_KEY</string>
     <key>BRIDGE_PORT</key>
     <string>3001</string>
   </dict>
@@ -32,6 +41,8 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
 
   <key>StandardOutPath</key>
   <string>/tmp/whatsapp-bridge.log</string>
