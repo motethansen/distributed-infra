@@ -7,9 +7,11 @@ services:
     volumes:
       - ./waha-sessions:/app/.sessions
     environment:
-      # Send incoming messages to the bridge running on the Mac Mini host
+      # Send messages (incl. those sent from the linked phone) to the bridge on the Mac Mini host.
+      # `message.any` covers both incoming and your own outgoing messages, which is what we want
+      # for self-chat commands — the linked phone's sends appear with fromMe=true.
       WHATSAPP_HOOK_URL: "http://host.docker.internal:3001/webhook"
-      WHATSAPP_HOOK_EVENTS: "message"
+      WHATSAPP_HOOK_EVENTS: "message.any"
       WHATSAPP_DEFAULT_ENGINE: "NOWEB"
       WAHA_DASHBOARD_USERNAME: "michaelhansen"
       WAHA_DASHBOARD_PASSWORD: "L9gnd8v3!"
