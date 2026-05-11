@@ -87,6 +87,16 @@ async def _list_tasks(status: str | None = None) -> list[dict]:
         return r.json() if r.status_code == 200 else []
 
 
+async def _list_machines() -> list[dict]:
+    async with httpx.AsyncClient() as c:
+        try:
+            r = await c.get(f"{ORCHESTRATOR_URL}/machines",
+                headers=_headers(), timeout=10)
+        except httpx.HTTPError:
+            return []
+    return r.json() if r.status_code == 200 else []
+
+
 # ── Formatters ────────────────────────────────────────────────────────────────
 def _fmt_queue(tasks: list[dict]) -> str:
     if not tasks:
@@ -104,27 +114,53 @@ def _fmt_queue(tasks: list[dict]) -> str:
     return "📋 Queue:\n" + "\n".join(lines)
 
 
-def _fmt_status(tasks: list[dict]) -> str:
-    machines: dict[str, dict] = {}
+def _fmt_age(secs: int | None) -> str:
+    if secs is None:
+        return "never seen"
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def _fmt_status(machines: list[dict], tasks: list[dict]) -> str:
+    if not machines:
+        return "🔴 Could not reach orchestrator."
+
+    # Resolve worker aliases (historical names in task DB) back to canonical name
+    alias_map: dict[str, str] = {}
+    for m in machines:
+        alias_map[m["name"]] = m["name"]
+        for a in m.get("aliases", []):
+            alias_map[a] = m["name"]
+
+    stats: dict[str, dict] = {}
     for t in tasks:
-        m = t.get("assigned_to") or "unassigned"
-        if m not in machines:
-            machines[m] = {"active": 0, "done": 0, "failed": 0}
+        raw = t.get("assigned_to") or "unassigned"
+        name = alias_map.get(raw, raw)
+        if name not in stats:
+            stats[name] = {"active": 0, "done": 0, "failed": 0}
         s = t.get("status", "")
         if s in ("claimed", "in_progress"):
-            machines[m]["active"] += 1
+            stats[name]["active"] += 1
         elif s == "done":
-            machines[m]["done"] += 1
+            stats[name]["done"] += 1
         elif s == "failed":
-            machines[m]["failed"] += 1
+            stats[name]["failed"] += 1
 
-    if not machines:
-        return "🟢 No tasks recorded yet."
     lines = []
-    for name, counts in machines.items():
+    for m in machines:
+        name   = m["name"]
+        role   = m.get("role", "worker")
+        online = m.get("online", False)
+        st     = stats.get(name, {"active": 0, "done": 0, "failed": 0})
+        icon   = "🟢" if online else "🔴"
+        suffix = "" if online else f"  (last seen {_fmt_age(m.get('last_seen_ago_secs'))})"
         lines.append(
-            f"{'🟢' if counts['active'] else '⚪'} {name}  "
-            f"active:{counts['active']}  done:{counts['done']}  failed:{counts['failed']}"
+            f"{icon} {name} [{role}]  active:{st['active']}  done:{st['done']}  failed:{st['failed']}{suffix}"
         )
     return "Machines:\n" + "\n".join(lines)
 
@@ -247,8 +283,9 @@ async def webhook(request: Request):
     cmd, kwargs = _parse(body)
 
     if cmd == "status":
-        tasks  = await _list_tasks()
-        await _send_wa(chat_id, _fmt_status(tasks))
+        machines = await _list_machines()
+        tasks    = await _list_tasks()
+        await _send_wa(chat_id, _fmt_status(machines, tasks))
 
     elif cmd == "queue":
         tasks = await _list_tasks()
