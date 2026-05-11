@@ -1,0 +1,13 @@
+services:
+  waha:
+    image: devlikeapro/waha
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./waha-sessions:/app/.sessions
+    environment:
+      # Send incoming messages to the bridge running on the Mac Mini host
+      WHATSAPP_HOOK_URL: "http://host.docker.internal:3001/webhook"
+      WHATSAPP_HOOK_EVENTS: "message"
+      WHATSAPP_DEFAULT_ENGINE: "WEBJS"
