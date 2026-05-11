@@ -32,8 +32,13 @@ TASK_TIMEOUT     = 360  # seconds before giving up
 # In-memory map: task_id → {chat_id, started_at}
 _pending: dict[str, dict] = {}
 
-# Emoji prefixes the bridge uses in replies — never treat these as commands
-_REPLY_PREFIXES = ("✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "👀", "📋", "⏱", "Commands:")
+# Prefixes the bridge uses in its own replies — never treat these as commands.
+# Waha echoes the bridge's outbound messages back via webhook (fromMe=true),
+# so without this filter every reply would loop back as an "unknown" command.
+_REPLY_PREFIXES = (
+    "✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "⚪", "👀", "📋", "⏱", "⚙",
+    "Commands:", "Machines:", "Needs review:", "Failed:",
+)
 
 
 # ── Queue client ──────────────────────────────────────────────────────────────
@@ -245,9 +250,55 @@ async def _poll_loop() -> None:
                 _pending.pop(task_id, None)
 
 
+# ── Waha session config ──────────────────────────────────────────────────────
+# The webhook URL the bridge expects Waha to call. Container talks to the host
+# via host.docker.internal, so this URL is relative to Waha's container — not
+# the bridge's process.
+WAHA_WEBHOOK_URL    = f"http://host.docker.internal:{int(os.getenv('BRIDGE_PORT', '3001'))}/webhook"
+WAHA_WEBHOOK_EVENTS = ["message.any"]
+
+
+async def _ensure_waha_config() -> None:
+    """Make sure the Waha session has the webhook + events the bridge expects.
+
+    Without this, deleting waha-sessions/ (or any Waha session reset) would
+    silently disable command replies until someone manually PUTs the config.
+    Idempotent: if the config already matches, this is a no-op.
+    """
+    async with httpx.AsyncClient() as c:
+        try:
+            r = await c.get(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
+                headers=_waha_headers(), timeout=5)
+        except httpx.HTTPError as e:
+            print(f"[waha-config] could not reach Waha: {e}", flush=True)
+            return
+        if r.status_code != 200:
+            print(f"[waha-config] GET session returned {r.status_code}; skipping", flush=True)
+            return
+
+        cfg = (r.json() or {}).get("config") or {}
+        webhooks = cfg.get("webhooks") or []
+        wanted = {"url": WAHA_WEBHOOK_URL, "events": WAHA_WEBHOOK_EVENTS}
+        already = any(
+            w.get("url") == wanted["url"] and set(w.get("events") or []) >= set(wanted["events"])
+            for w in webhooks
+        )
+        if already:
+            return
+
+        body = {"config": {"webhooks": [wanted]}}
+        try:
+            pr = await c.put(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
+                headers=_waha_headers(), json=body, timeout=10)
+            print(f"[waha-config] PUT webhook config → {pr.status_code}", flush=True)
+        except httpx.HTTPError as e:
+            print(f"[waha-config] PUT failed: {e}", flush=True)
+
+
 # ── App lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    await _ensure_waha_config()
     asyncio.create_task(_poll_loop())
     yield
 
