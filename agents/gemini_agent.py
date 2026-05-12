@@ -30,7 +30,10 @@ def _find_cli() -> str | None:
     return None
 
 
-async def run(prompt: str, model: str = "") -> dict:
+DEFAULT_TIMEOUT_SECS = int(os.environ.get("GEMINI_AGENT_TIMEOUT_SECS", "1800"))
+
+
+async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None) -> dict:
     cli = _find_cli()
     if not cli:
         return {
@@ -47,16 +50,20 @@ async def run(prompt: str, model: str = "") -> dict:
     if model:
         args += ["--model", model]
 
+    work_dir = os.path.expanduser(cwd) if cwd else None
+    effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECS
+
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=work_dir,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": "gemini CLI timed out after 300s", "agent": "gemini", "ok": False}
+        return {"error": f"gemini CLI timed out after {effective_timeout}s", "agent": "gemini", "ok": False}
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
