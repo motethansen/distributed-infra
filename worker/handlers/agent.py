@@ -16,12 +16,13 @@ async def handle_agent_run(task: Task) -> dict:
     prompt = task.payload.get("prompt", "")
     model = task.payload.get("model")
     cwd   = task.payload.get("cwd")
+    timeout = task.payload.get("timeout")
 
     if not agent or not prompt:
         return {"needs_human": True, "notes": "agent and prompt are required in payload"}
 
     from agents.runner import run_agent
-    result = await run_agent(agent=agent, prompt=prompt, model=model, cwd=cwd)
+    result = await run_agent(agent=agent, prompt=prompt, model=model, cwd=cwd, timeout=timeout)
 
     if not result.get("ok"):
         return {
