@@ -32,6 +32,23 @@ def _find_cli() -> str | None:
 
 DEFAULT_TIMEOUT_SECS = int(os.environ.get("CLAUDE_AGENT_TIMEOUT_SECS", "1800"))
 
+# Cost policy: default to Sonnet (coding/dev planning); allow per-call override to
+# Haiku (testing / mechanical work). Opus is blocked entirely — too expensive for
+# our dispatch volume. Override the default with CLAUDE_AGENT_DEFAULT_MODEL.
+DEFAULT_MODEL = os.environ.get("CLAUDE_AGENT_DEFAULT_MODEL", "sonnet")
+BLOCKED_MODEL_SUBSTRINGS = ("opus",)
+
+
+def _resolve_model(requested: str) -> str | None:
+    """Pick the effective model for a call. Returns the alias to pass to claude
+    --model, or None if Opus was requested (caller should treat as error)."""
+    chosen = (requested or DEFAULT_MODEL or "").strip().lower()
+    if not chosen:
+        return ""  # let claude CLI use its own default
+    if any(blocked in chosen for blocked in BLOCKED_MODEL_SUBSTRINGS):
+        return None
+    return chosen
+
 
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None) -> dict:
     cli = _find_cli()
@@ -45,9 +62,17 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
             "ok": False,
         }
 
+    effective_model = _resolve_model(model)
+    if effective_model is None:
+        return {
+            "error": f"opus blocked by cost policy (requested model={model!r}); use 'sonnet' or 'haiku'",
+            "agent": "claude",
+            "ok": False,
+        }
+
     args = [cli, "-p", prompt, "--dangerously-skip-permissions"]
-    if model:
-        args += ["--model", model]
+    if effective_model:
+        args += ["--model", effective_model]
 
     work_dir = os.path.expanduser(cwd) if cwd else None
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECS
@@ -70,7 +95,7 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     if proc.returncode != 0:
         return {"error": err or out, "agent": "claude", "ok": False}
 
-    return {"agent": "claude", "model": model or "claude-default", "response": out, "ok": True}
+    return {"agent": "claude", "model": effective_model or "claude-default", "response": out, "ok": True}
 
 
 if __name__ == "__main__":
