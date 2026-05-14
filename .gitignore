@@ -14,7 +14,7 @@ data/
 *.db-journal
 
 # Waha session credentials — persisted by the WhatsApp bridge container
-workers/whatsapp-bridge/waha-sessions/
+services/whatsapp-bridge/waha-sessions/
 
 # Python
 __pycache__/

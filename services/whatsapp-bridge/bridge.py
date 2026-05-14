@@ -28,6 +28,7 @@ SECRET_KEY       = os.getenv("INFRA_SECRET_KEY", "")
 WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
+HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
 
 # In-memory map: task_id → {chat_id, started_at}
 _pending: dict[str, dict] = {}
@@ -195,6 +196,9 @@ def _parse(text: str) -> tuple[str, dict]:
         return "failures", {}
     if tl in ("help", "/help", "?", "h"):
         return "help", {}
+    m = re.match(r"^/?help\s+(.+)", t, re.IGNORECASE)
+    if m:
+        return "help_ai", {"question": m.group(1).strip()}
 
     # assign <description> [--machine=X] [--agent=Y] [--type=Z]
     if re.match(r"^/?assign\s+", t, re.IGNORECASE):
@@ -446,6 +450,53 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "help_ai":
+        question = kwargs["question"]
+        machines = await _list_machines()
+        machines_summary = "\n".join(
+            f"  {m['name']}: caps={m.get('capabilities', [])} agents={m.get('agents', [])}"
+            for m in machines
+        ) or "  (unavailable)"
+
+        prompt = (
+            "You are a CLI assistant for `da`, a distributed AI agent task queue "
+            "that runs across a private Tailscale network.\n"
+            "The user is asking from WhatsApp. Reply in plain text only — no markdown, "
+            "no asterisks, no bullet symbols, no headers. Keep it under 250 words.\n"
+            "If they ask how to write a command, show the exact syntax they can send "
+            "as a WhatsApp message. If they ask for an assign command, write the full "
+            "command so they can copy-paste it.\n\n"
+            "WhatsApp command syntax:\n"
+            "  run <agent> <prompt>  — run on mac-mini immediately\n"
+            "  assign <description> [--machine=X] [--agent=Y] [--type=Z]\n"
+            "    task types: agent_run, run_script, git_pull, ios_build,\n"
+            "                android_build, npm_build, test_run, lint, assistant_run\n"
+            "    agents: claude, gemini, codex, groq\n"
+            "  assist <today|sync|status|plan [today|week]>  — AI assistant\n"
+            "  queue / status / review / failures\n"
+            "  help <question>  — ask about commands\n\n"
+            "Agent tasks: include everything in the prompt — the agent cannot ask "
+            "follow-up questions. Add a file path if output should be saved, e.g. "
+            "\"save to ~/Articles/my-post.md\".\n\n"
+            f"Current fleet:\n{machines_summary}\n\n"
+            f"User question: {question}"
+        )
+
+        payload = {
+            "agent": "claude",
+            "prompt": prompt,
+            "_target_machine": HELP_MACHINE,
+        }
+        task_id = await _create_task("agent_run", payload, notes=f"help: {question[:60]}")
+        if task_id:
+            _pending[task_id] = {
+                "chat_id": chat_id,
+                "started_at": datetime.now(timezone.utc).timestamp(),
+            }
+            await _send_wa(chat_id, f"⏳ Asking Claude…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "help":
         await _send_wa(chat_id, (
             "Commands:\n"
@@ -455,12 +506,14 @@ async def webhook(request: Request):
             "  failures — failed tasks\n"
             "  run <agent> <prompt>\n"
             "  assist <today|sync|status|plan [today|week]>\n"
-            "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n\n"
+            "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
+            "  help <question> — ask Claude anything about commands\n\n"
             "Examples:\n"
             "  assist today\n"
             "  assist plan week\n"
             "  run claude explain Riverpod\n"
-            "  assign refactor auth --machine=thinkpad --agent=claude"
+            "  assign refactor auth --machine=thinkpad-x1 --agent=claude\n"
+            "  help how do I start a new project on thinkpad?"
         ))
 
     else:
