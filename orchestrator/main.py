@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskUpdate
@@ -145,7 +145,7 @@ async def list_machines(x_secret_key: str = Header(default="")):
 
 
 @app.post("/tasks/{task_id}/complete", response_model=Task)
-async def complete_task(task_id: str, result: dict = {}, x_secret_key: str = Header(default="")):
+async def complete_task(task_id: str, result: dict = Body(default_factory=dict), x_secret_key: str = Header(default="")):
     _check_auth(x_secret_key)
     task = await db.update_task(task_id, {"status": TaskStatus.done, "result": result})
     if not task:
@@ -154,7 +154,7 @@ async def complete_task(task_id: str, result: dict = {}, x_secret_key: str = Hea
 
 
 @app.post("/tasks/{task_id}/fail", response_model=Task)
-async def fail_task(task_id: str, result: dict = {}, x_secret_key: str = Header(default="")):
+async def fail_task(task_id: str, result: dict = Body(default_factory=dict), x_secret_key: str = Header(default="")):
     _check_auth(x_secret_key)
     task = await db.update_task(task_id, {"status": TaskStatus.failed, "result": result})
     if not task:

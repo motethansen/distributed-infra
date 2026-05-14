@@ -1070,11 +1070,107 @@ def cmd_help() -> None:
           Scaffold a new custom skill: handler file + registry entry.
           Walks you through description, install commands, and task type.
 
-      [bold]help[/bold]     Show this help.
-      [bold]exit[/bold]     Quit.
+      [bold]help[/bold]           Show this reference.
+      [bold]help[/bold] <question>  Ask Claude anything about da commands and syntax.
+      [bold]exit[/bold]            Quit.
     """)
     console.print()
     console.print(help_text)
+
+
+def cmd_help_ai(args: list[str]) -> None:
+    """Answer a natural-language question about da using Claude."""
+    if not args:
+        cmd_help()
+        return
+
+    question = " ".join(args)
+
+    # Load machine names + capabilities so Claude can reference them by name.
+    try:
+        machines_cfg = _machines()
+        machines_summary = "\n".join(
+            f"  {name}: capabilities={cfg.get('capabilities', [])} agents={cfg.get('agents', [])}"
+            for name, cfg in machines_cfg.items()
+        )
+    except Exception:
+        machines_summary = "  (machines.yaml not loaded)"
+
+    prompt = textwrap.dedent(f"""\
+        You are a CLI assistant for `da`, a distributed AI agent task queue that runs
+        across a private Tailscale network. Answer the user's question concisely.
+        If they ask how to write a command, show the exact syntax they can paste at the
+        `da ›` prompt. If they ask for an assign prompt, write the full assign command.
+
+        ## Command reference
+
+        run <agent> <prompt>          — run agent directly on MacBook (no queue)
+        run <agent>                   — open multiline prompt mode (Alt+Enter to submit)
+        test [agent]                  — smoke-test all agents or one
+
+        assign <description> [--machine=X] [--agent=Y] [--type=Z] [--file=path]
+            Task types: agent_run, run_script, git_pull, ios_build, android_build,
+                        npm_build, test_run, lint, assistant_run
+            Agents: claude, gemini, codex, groq
+            --file=~/path  load prompt from a file instead of typing it
+            Omit flags to let Claude auto-route; you confirm before queuing.
+
+        queue [--status=pending|done|failed|in_progress|needs_human]
+        review                        — tasks waiting for human action
+        failures                      — failed tasks with error + re-queue hints
+        resolve <id|all> [done|failed|pending] [--notes=reason]
+
+        status                        — health, active tasks, stats per machine
+        ssh <machine>                 — open SSH session to a worker
+
+        skills                        — declared capabilities per machine
+        skills available [--category=mobile|ai-agent|backend|infrastructure]
+        skills list <machine>
+        skills install <machine> <skill>
+        skills add <machine> <capability>
+        skills create <name>          — scaffold a new handler + registry entry
+
+        ## Current fleet
+        {machines_summary}
+
+        ## Agent payload fields (for assign / agent_run)
+        - agent: claude | gemini | codex | groq
+        - prompt: the task description (self-contained — agent can't ask follow-ups)
+        - cwd: working directory on the worker, e.g. ~/Projects/my-app
+        - model: optional model override
+
+        ## User question
+        {question}
+    """)
+
+    console.print()
+    with console.status("[dim]Asking Claude…[/dim]", spinner="dots"):
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            console.print("  [red]✗ claude CLI not found — is it installed and in PATH?[/red]")
+            return
+        except subprocess.TimeoutExpired:
+            console.print("  [red]✗ Claude timed out[/red]")
+            return
+
+    if result.returncode != 0:
+        console.print(f"  [red]✗ Claude error:[/red] {result.stderr.strip()[:300]}")
+        return
+
+    answer = result.stdout.strip()
+    console.print(Panel(
+        answer,
+        title="[bold cyan]da help[/bold cyan]",
+        border_style="cyan",
+        padding=(1, 2),
+    ))
+    console.print()
 
 
 # ── Banner ────────────────────────────────────────────────────────────────────
@@ -1082,8 +1178,6 @@ def cmd_help() -> None:
 def _print_banner() -> None:
     machines = _machines()
     workers  = {k: v for k, v in machines.items() if v.get("role") == "worker"}
-    online   = sum(1 for cfg in workers.values() if _worker_health(cfg["tailscale_ip"] if False else "", cfg)[0]
-                   ) if False else "?"
 
     # Quick ping count
     online_count = 0
@@ -1122,6 +1216,7 @@ DISPATCH = {
     "skills":   cmd_skills,
     "resolve":  cmd_resolve,
     "ssh":      cmd_ssh,
+    "help":     cmd_help_ai,
 }
 
 

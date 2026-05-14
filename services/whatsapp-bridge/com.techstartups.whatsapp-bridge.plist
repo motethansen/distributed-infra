@@ -16,12 +16,12 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/workers/whatsapp-bridge/.venv/bin/python</string>
-    <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/workers/whatsapp-bridge/bridge.py</string>
+    <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/services/whatsapp-bridge/.venv/bin/python</string>
+    <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/services/whatsapp-bridge/bridge.py</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/workers/whatsapp-bridge</string>
+  <string>/Users/YOUR_USERNAME/Projects/github/techstartups/distributed-infra/services/whatsapp-bridge</string>
 
   <key>EnvironmentVariables</key>
   <dict>
