@@ -50,11 +50,11 @@ PROMPT_STYLE = Style.from_dict({
     "rprompt":   "#555555",
 })
 
-AGENTS = ["claude", "gemini", "codex", "groq"]
+AGENTS = ["claude", "gemini", "codex"]
 
 COMMANDS = [
     "run", "test", "assign", "queue", "review", "failures",
-    "status", "skills", "resolve", "ssh", "help", "exit", "quit",
+    "status", "skills", "resolve", "ssh", "assistant", "help", "exit", "quit",
 ]
 
 
@@ -191,8 +191,8 @@ def _claude_route(description: str) -> dict:
         "Given the available worker machines and a task description, "
         "respond with ONLY a JSON object (no markdown, no explanation) with keys: "
         '"machine" (exact machine name from the list), '
-        '"llm" (one of: claude, gemini, codex, groq), '
-        '"task_type" (one of: android_build, ios_build, npm_build, git_pull, test_run, lint, run_script, agent_run, custom), '
+        '"llm" (one of: claude, gemini, codex), '
+        '"task_type" (one of: android_build, ios_build, npm_build, git_pull, test_run, lint, run_script, agent_run, assistant_query, custom), '
         '"reason" (one short sentence). '
         f"\n\nWorker machines:\n{machine_summary}"
         f"\n\nTask: {description}"
@@ -240,7 +240,7 @@ def cmd_assign(args: list[str]) -> None:
         console.print(
             "[dim]Usage: assign [description] [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
             "  Omit description to open multiline paste mode — Alt+Enter (or Esc→Enter) to submit.\n"
-            "  --agent:   claude, gemini, codex, groq\n"
+            "  --agent:   claude, gemini, codex\n"
             "  --machine: must match a name in config/machines.yaml\n"
             "  --file:    load prompt from a file (e.g. --file=~/prompts/task.txt)[/dim]"
         )
@@ -308,7 +308,7 @@ def cmd_assign(args: list[str]) -> None:
             machines = list(_worker_machines().keys())
             console.print(f"  Machines: {', '.join(machines)}")
             explicit_machine = explicit_machine or console.input("  Machine: ").strip()
-            explicit_llm     = explicit_llm     or console.input("  Agent (claude/gemini/codex/groq): ").strip()
+            explicit_llm     = explicit_llm     or console.input("  Agent (claude/gemini/codex): ").strip()
             explicit_type    = explicit_type    or console.input("  Task type (agent_run/run_script/…): ").strip()
             routing = {"machine": explicit_machine, "llm": explicit_llm, "task_type": explicit_type, "reason": "manual"}
         # Override with any explicit flags
@@ -1002,28 +1002,181 @@ def cmd_ssh(args: list[str]) -> None:
     os.execvp("ssh", ["ssh", ip])
 
 
+def cmd_assistant(args: list[str]) -> None:
+    """
+    assistant <query> [params...]  — query the ai_agent_assistant API directly.
+
+    Queries:
+      tasks                        — show open Obsidian tasks
+      tasks --subdirs=Projects     — tasks in a specific vault folder
+      notes [--subdir=Daily]       — list notes (optionally in a subdirectory)
+      note --path=Daily/2026-06-19.md  — read a specific note
+      dashboard [--section=today-plan] — read Dashboard.md sections
+      plan [--mode=today|week]     — generate a fresh plan (calls LLM)
+      status                       — assistant config summary
+      llm                          — LLM provider availability
+    """
+    import os as _os
+
+    if not args:
+        console.print(
+            "[dim]Usage: assistant <query> [--key=value ...]\n"
+            "  Queries: tasks, notes, note, dashboard, plan, status, llm\n"
+            "  Example: assistant tasks\n"
+            "           assistant plan --mode=week\n"
+            "           assistant note --path=Daily/2026-06-19.md\n"
+            "           assistant dashboard --section=today-plan[/dim]"
+        )
+        return
+
+    query = args[0].lower()
+    params: dict[str, str] = {}
+    for a in args[1:]:
+        if a.startswith("--") and "=" in a:
+            k, v = a[2:].split("=", 1)
+            params[k] = v
+
+    base_url = _os.getenv("ASSISTANT_API_URL", "http://100.97.176.37:7890")
+    api_key  = _os.getenv("ASSISTANT_API_KEY", "")
+    headers  = {"x-api-key": api_key} if api_key else {}
+
+    _GET_ENDPOINTS = {
+        "tasks": "/tasks", "notes": "/notes", "note": "/note",
+        "dashboard": "/dashboard", "status": "/status", "llm": "/llm",
+    }
+    _POST_ENDPOINTS = {"plan": "/plan"}
+
+    if query not in {**_GET_ENDPOINTS, **_POST_ENDPOINTS}:
+        console.print(
+            f"[red]✗ Unknown query '{query}'[/red]  "
+            f"Choose: {', '.join(sorted({**_GET_ENDPOINTS, **_POST_ENDPOINTS}))}"
+        )
+        return
+
+    import httpx
+    try:
+        with httpx.Client(base_url=base_url, timeout=60) as client:
+            if query in _POST_ENDPOINTS:
+                resp = client.post(_POST_ENDPOINTS[query], headers=headers, params=params)
+            else:
+                resp = client.get(_GET_ENDPOINTS[query], headers=headers, params=params)
+    except httpx.ConnectError:
+        console.print(
+            f"[red]✗ Cannot reach assistant API at {base_url}[/red]\n"
+            "  Start it on the MacBook:  python main.py --api\n"
+            "  (in ~/Projects/github/ai_agent_assistant/)"
+        )
+        return
+
+    if resp.status_code != 200:
+        console.print(f"[red]✗ API error {resp.status_code}:[/red] {resp.text[:300]}")
+        return
+
+    data = resp.json()
+
+    # Pretty-print based on query type
+    if query == "tasks":
+        tasks = data.get("tasks", [])
+        console.print(f"\n  [bold]{data.get('count', 0)} open tasks[/bold]\n")
+        from rich.table import Table
+        from rich import box as rbox
+        table = Table(box=rbox.SIMPLE_HEAD, show_header=True, header_style="bold")
+        table.add_column("Priority", width=10)
+        table.add_column("Due",      width=12)
+        table.add_column("Task")
+        table.add_column("File", width=30)
+        for t in tasks[:40]:
+            pri   = t.get("priority") or "-"
+            due   = str(t.get("due_date") or "-")
+            text  = t.get("text", "")[:60]
+            fpath = t.get("file", "")[:30]
+            table.add_row(pri, due, text, fpath)
+        console.print(table)
+
+    elif query == "plan":
+        plan = data.get("plan", "")
+        from rich.panel import Panel as RPanel
+        mode = data.get("mode", "")
+        console.print(RPanel(
+            plan,
+            title=f"[bold cyan]{mode.capitalize()} Plan[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        ))
+
+    elif query == "dashboard":
+        if "section" in data:
+            console.print(f"\n  [bold]{data['section']}[/bold]\n")
+            console.print(data.get("content") or "[dim](empty)[/dim]")
+        else:
+            for sec, content in (data.get("sections") or {}).items():
+                console.print(f"\n  [bold cyan]{sec}[/bold cyan]")
+                console.print(content or "[dim](empty)[/dim]")
+
+    elif query == "note":
+        from rich.panel import Panel as RPanel
+        console.print(RPanel(
+            data.get("content", ""),
+            title=f"[dim]{data.get('path', '')}[/dim]",
+            border_style="dim",
+        ))
+
+    elif query == "llm":
+        providers = data.get("providers", [])
+        from rich.table import Table
+        from rich import box as rbox
+        table = Table(box=rbox.SIMPLE_HEAD, show_header=True, header_style="bold")
+        table.add_column("Provider", width=16)
+        table.add_column("Available", width=10)
+        table.add_column("Model",     width=30)
+        table.add_column("Used for")
+        for p in providers:
+            avail = "[green]✓[/green]" if p.get("available") else "[red]✗[/red]"
+            roles = ", ".join(p.get("configured_for", [])) or "-"
+            table.add_row(p.get("provider", "?"), avail, p.get("model", "-"), roles)
+        console.print()
+        console.print(table)
+
+    else:
+        import json
+        console.print()
+        console.print(json.dumps(data, indent=2, default=str))
+
+    console.print()
+
+
 def cmd_help() -> None:
     help_text = textwrap.dedent("""\
     [bold cyan]Local agents  (run on this MacBook, no queue)[/bold cyan]
 
       [bold]run[/bold] <agent> <prompt>
-          Run an agent directly here. Agents: claude, gemini, codex, groq
+          Run an agent directly here. Agents: claude, gemini, codex
           Example: run claude write a hello world function in Python
 
       [bold]run[/bold] <agent>
           Open multiline prompt mode — paste freely, Alt+Enter to submit.
 
       [bold]test[/bold] [agent]
-          Smoke-test all 4 agents (or one) to confirm they work locally.
-          Example: test          → tests claude, gemini, codex, groq
+          Smoke-test all 3 agents (or one) to confirm they work locally.
+          Example: test          → tests claude, gemini, codex
                    test gemini   → tests gemini only
+
+    [bold cyan]AI Agent Assistant[/bold cyan]
+
+      [bold]assistant[/bold] <query> [--key=value ...]
+          Query the ai_agent_assistant API directly (must be running: python main.py --api).
+          Queries: tasks, notes, note, dashboard, plan, status, llm
+          Example: assistant tasks
+                   assistant plan --mode=week
+                   assistant note --path=Daily/2026-06-19.md
+                   assistant dashboard --section=today-plan
 
     [bold cyan]Queue  (send tasks to workers)[/bold cyan]
 
       [bold]assign[/bold] [description] [--machine=X] [--agent=Y] [--type=Z] [--file=path]
           Push a task to a worker. If flags are omitted, Claude recommends routing.
           Omit the description to open multiline paste mode (Alt+Enter to submit).
-          --agent: claude, gemini, codex, groq  (--llm=Y also accepted)
+          --agent: claude, gemini, codex  (--llm=Y also accepted)
           --machine must match a name in config/machines.yaml
           --file=~/prompts/task.txt  load prompt from a file
           Validates that the machine supports the task type and agent before queuing.
@@ -1108,10 +1261,14 @@ def cmd_help_ai(args: list[str]) -> None:
         run <agent>                   — open multiline prompt mode (Alt+Enter to submit)
         test [agent]                  — smoke-test all agents or one
 
+        assistant <query> [--key=value ...]
+            Direct query to the assistant API. Queries: tasks, notes, note, dashboard, plan, status, llm
+            Example: assistant tasks / assistant plan --mode=week
+
         assign <description> [--machine=X] [--agent=Y] [--type=Z] [--file=path]
             Task types: agent_run, run_script, git_pull, ios_build, android_build,
-                        npm_build, test_run, lint, assistant_run
-            Agents: claude, gemini, codex, groq
+                        npm_build, test_run, lint, assistant_run, assistant_query
+            Agents: claude, gemini, codex
             --file=~/path  load prompt from a file instead of typing it
             Omit flags to let Claude auto-route; you confirm before queuing.
 
@@ -1134,7 +1291,7 @@ def cmd_help_ai(args: list[str]) -> None:
         {machines_summary}
 
         ## Agent payload fields (for assign / agent_run)
-        - agent: claude | gemini | codex | groq
+        - agent: claude | gemini | codex
         - prompt: the task description (self-contained — agent can't ask follow-ups)
         - cwd: working directory on the worker, e.g. ~/Projects/my-app
         - model: optional model override
@@ -1206,17 +1363,18 @@ def _print_banner() -> None:
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
 DISPATCH = {
-    "run":      cmd_run,
-    "test":     cmd_test,
-    "assign":   cmd_assign,
-    "queue":    cmd_queue,
-    "review":   cmd_review,
-    "failures": cmd_failures,
-    "status":   cmd_status,
-    "skills":   cmd_skills,
-    "resolve":  cmd_resolve,
-    "ssh":      cmd_ssh,
-    "help":     cmd_help_ai,
+    "run":       cmd_run,
+    "test":      cmd_test,
+    "assign":    cmd_assign,
+    "queue":     cmd_queue,
+    "review":    cmd_review,
+    "failures":  cmd_failures,
+    "status":    cmd_status,
+    "skills":    cmd_skills,
+    "resolve":   cmd_resolve,
+    "ssh":       cmd_ssh,
+    "assistant": cmd_assistant,
+    "help":      cmd_help_ai,
 }
 
 

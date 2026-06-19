@@ -44,16 +44,6 @@ skills:
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 
-  cursor-agent:
-    description: "Cursor Agent CLI — workspace-aware AI coding agent"
-    category: ai-agent
-    check: "agent --version"
-    install:
-      macos: "# Install Cursor app — agent CLI is bundled"
-      linux: "# Install Cursor app — agent CLI is bundled"
-    task_types: [agent_run]
-    handler: worker/handlers/agent.py
-
   # ── Mobile ────────────────────────────────────────────────────────────────────
 
   swift:
