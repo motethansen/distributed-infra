@@ -218,7 +218,7 @@ def _parse(text: str) -> tuple[str, dict]:
     if re.match(r"^/?run\s+", t, re.IGNORECASE):
         body  = re.sub(r"^/?run\s+", "", t, flags=re.IGNORECASE)
         parts = body.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() in ("claude", "gemini", "codex", "groq"):
+        if len(parts) == 2 and parts[0].lower() in ("claude", "gemini", "codex"):
             return "run", {"agent": parts[0].lower(), "prompt": parts[1]}
         return "run", {"agent": "claude", "prompt": body}
 
@@ -471,7 +471,7 @@ async def webhook(request: Request):
             "  assign <description> [--machine=X] [--agent=Y] [--type=Z]\n"
             "    task types: agent_run, run_script, git_pull, ios_build,\n"
             "                android_build, npm_build, test_run, lint, assistant_run\n"
-            "    agents: claude, gemini, codex, groq\n"
+            "    agents: claude, gemini, codex\n"
             "  assist <today|sync|status|plan [today|week]>  — AI assistant\n"
             "  queue / status / review / failures\n"
             "  help <question>  — ask about commands\n\n"
