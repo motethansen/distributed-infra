@@ -14,7 +14,12 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Callable, Coroutine
+
+# Ensure repo root is on sys.path so `from agents.x import` works when this
+# script is invoked directly (python agents/runner.py) rather than as a module.
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 AGENTS: dict[str, Callable] = {}
