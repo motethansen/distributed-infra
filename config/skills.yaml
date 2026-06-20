@@ -35,12 +35,22 @@ skills:
     handler: worker/handlers/agent.py
 
   codex:
-    description: "OpenAI Codex CLI — OpenAI's coding agent"
+    description: "OpenAI Codex CLI — OpenAI's coding agent (requires Node.js + OPENAI_API_KEY)"
     category: ai-agent
     check: "codex --version"
     install:
-      macos: "npm install -g @openai/codex"
-      linux: "npm install -g @openai/codex"
+      macos: "npm install -g @openai/codex && echo 'Set OPENAI_API_KEY in worker plist'"
+      linux: "npm install -g @openai/codex && echo 'Set OPENAI_API_KEY in worker .env'"
+    task_types: [agent_run]
+    handler: worker/handlers/agent.py
+
+  groq:
+    description: "Groq API — fast LLM inference via Groq LPU (requires GROQ_API_KEY)"
+    category: ai-agent
+    check: "python3 -c 'import httpx' && test -n \"$GROQ_API_KEY\""
+    install:
+      macos: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker plist'"
+      linux: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker .env'"
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 

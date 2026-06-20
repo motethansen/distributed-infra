@@ -15,6 +15,19 @@ import shutil
 import sys
 
 
+def _find_node() -> str | None:
+    candidates = [
+        shutil.which("node"),
+        "/usr/local/bin/node",
+        "/usr/bin/node",
+        "/opt/homebrew/bin/node",
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return None
+
+
 def _find_cli() -> str | None:
     candidates = [
         shutil.which("codex"),
@@ -46,16 +59,26 @@ async def run(prompt: str, model: str = "") -> dict:
     # Codex must run from inside a git repo
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-    # --full-auto skips interactive approval prompts so it can run headlessly
-    args = [cli, "--approval-mode", "full-auto", "-q", prompt]
+    # codex is a Node.js script; find node explicitly so it works in subprocess
+    # environments where PATH may not include the node directory.
+    node = _find_node()
+    cmd = [node, cli] if node else [cli]
+
+    # --full-auto: headless mode (no interactive approval prompts)
+    args = cmd + ["--full-auto", prompt]
     if model:
         args += ["--model", model]
+
+    # Ensure node directories are in PATH for child processes
+    env = os.environ.copy()
+    env["PATH"] = "/usr/local/bin:/usr/bin:/opt/homebrew/bin:" + env.get("PATH", "")
 
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=repo_root,
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
