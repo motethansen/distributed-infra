@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Auto-start the WAHA WhatsApp session on boot.
+
+  WAHA Core does not auto-start saved sessions when the container restarts, so
+  this agent runs scripts/start-waha-session.sh at login and re-checks every
+  5 minutes. The script is idempotent (a no-op once the session is WORKING) and
+  reads the WAHA API key from the running container, so no secrets live here.
+
+  Setup (Mac Mini, where WAHA runs):
+    1. Replace YOUR_USERNAME below with your real path.
+    2. cp scripts/com.techstartups.waha-session.plist.example \
+         ~/Library/LaunchAgents/com.techstartups.waha-session.plist
+    3. launchctl load ~/Library/LaunchAgents/com.techstartups.waha-session.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.techstartups.waha-session</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/start-waha-session.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge</string>
+
+  <!-- Run once at login, then re-check periodically (the script is idempotent). -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/waha-session.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/waha-session.err</string>
+</dict>
+</plist>

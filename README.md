@@ -121,6 +121,16 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now infra-worker
 ```
 
+**WhatsApp session (WAHA — Mac Mini)**
+WAHA Core does not auto-start its saved session when the container restarts. Install the helper agent so the session starts on boot:
+```bash
+cp scripts/com.techstartups.waha-session.plist.example \
+   ~/Library/LaunchAgents/com.techstartups.waha-session.plist
+# Edit YOUR_USERNAME to point at your checkout, then:
+launchctl load ~/Library/LaunchAgents/com.techstartups.waha-session.plist
+```
+See **Troubleshooting → "WhatsApp (WAHA) session is STOPPED after a restart"** for details.
+
 ---
 
 ## CLI Reference
@@ -511,6 +521,13 @@ The worker's HTTP connection broke mid-task. Mark it manually:
 da › resolve <task-id> failed --notes="orphaned after restart"
 ```
 Then `resolve <id> pending` to retry.
+
+**WhatsApp (WAHA) session is `STOPPED` after a restart / reboot**
+WAHA **Core** does not auto-start saved sessions when the container restarts — `WHATSAPP_RESTART_ALL_SESSIONS` is a WAHA **Plus**-only feature. The auth credentials are persisted (in `services/whatsapp-bridge/waha-sessions/`), so no QR re-scan is needed, but the session returns as `STOPPED` until something calls `POST /api/sessions/default/start`. Start and verify it with the helper script:
+```bash
+scripts/start-waha-session.sh    # waits for WAHA, starts the session if not WORKING; idempotent
+```
+To automate this on boot, install `scripts/com.techstartups.waha-session.plist.example` as a launchd agent (see the **Auto-start at boot** section).
 
 ---
 
