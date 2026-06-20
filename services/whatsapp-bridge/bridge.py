@@ -356,6 +356,14 @@ async def webhook(request: Request):
     # be parsed as a command and replied to — wrecking real conversations.
     if not is_me:
         return Response(status_code=200)
+
+    # Self-heal: the bridge may have started before the WhatsApp session was
+    # linked, leaving _self_number empty — which silently drops every self
+    # message. Re-read me.id from Waha as soon as a message arrives (the session
+    # must be WORKING for that to happen), instead of requiring a manual restart.
+    if not _self_number:
+        await _ensure_waha_config()
+
     if not _self_number or _digits(chat_id) != _self_number:
         return Response(status_code=200)
 
