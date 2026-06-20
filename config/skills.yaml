@@ -54,6 +54,36 @@ skills:
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 
+  content:
+    description: "Content agent — Claude-backed long-form writing (articles for Medium/Substack)"
+    category: ai-agent
+    check: "claude --version"
+    install:
+      macos: "npm install -g @anthropic-ai/claude-code"
+      linux: "npm install -g @anthropic-ai/claude-code"
+    task_types: [write_article]
+    handler: worker/handlers/write_article.py
+
+  social:
+    description: "Social agent — Groq-backed short posts for LinkedIn and X/Twitter"
+    category: ai-agent
+    check: "python3 -c 'import httpx' && test -n \"$GROQ_API_KEY\""
+    install:
+      macos: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker plist'"
+      linux: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker .env'"
+    task_types: [write_post]
+    handler: worker/handlers/write_post.py
+
+  code-review:
+    description: "Code review agent — Claude reviews a local repo for bugs, security, quality"
+    category: ai-agent
+    check: "claude --version"
+    install:
+      macos: "npm install -g @anthropic-ai/claude-code"
+      linux: "npm install -g @anthropic-ai/claude-code"
+    task_types: [code_review]
+    handler: worker/handlers/code_review.py
+
   # ── Mobile ────────────────────────────────────────────────────────────────────
 
   swift:
