@@ -457,7 +457,7 @@ async def webhook(request: Request):
             _pending[task_id] = {"chat_id": chat_id,
                                   "started_at": datetime.now(timezone.utc).timestamp()}
             await _send_wa(chat_id,
-                f"⏳ Writing article  [{task_id[:8]}]\n"{prompt[:60]}"\nI'll send the draft when ready.")
+                f"⏳ Writing article  [{task_id[:8]}]\n\"{prompt[:60]}\"\nI'll send the draft when ready.")
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
