@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Gemini agent — uses `gemini -p` CLI (Google Gemini CLI).
-No API key needed — authenticates via `gemini login` session.
+Antigravity agent — uses `agy -p` CLI (Google Antigravity CLI).
+No API key needed — authenticates via `agy login` session.
 
 CLI usage:
-  python agents/gemini_agent.py "explain async/await in Python"
+  python agents/agy_agent.py "explain async/await in Python"
 """
 from __future__ import annotations
 
@@ -16,13 +16,11 @@ import sys
 
 def _find_cli() -> str | None:
     candidates = [
-        shutil.which("gemini"),
-        os.path.expanduser("~/.local/bin/gemini"),
-        os.path.expanduser("~/.npm-global/bin/gemini"),
-        os.path.expanduser("~/.npm/bin/gemini"),
-        "/usr/local/bin/gemini",
-        "/opt/homebrew/bin/gemini",
-        "/usr/bin/gemini",
+        shutil.which("agy"),
+        os.path.expanduser("~/.local/bin/agy"),
+        "/usr/local/bin/agy",
+        "/opt/homebrew/bin/agy",
+        "/usr/bin/agy",
     ]
     for p in candidates:
         if p and os.path.isfile(p):
@@ -30,7 +28,7 @@ def _find_cli() -> str | None:
     return None
 
 
-DEFAULT_TIMEOUT_SECS = int(os.environ.get("GEMINI_AGENT_TIMEOUT_SECS", "1800"))
+DEFAULT_TIMEOUT_SECS = int(os.environ.get("AGY_AGENT_TIMEOUT_SECS", "1800"))
 
 
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None) -> dict:
@@ -38,15 +36,15 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     if not cli:
         return {
             "error": (
-                "gemini CLI not found. Install: npm install -g @google/gemini-cli  "
-                "then login: gemini login"
+                "agy CLI not found. Install: brew install --cask antigravity-cli  "
+                "then login: agy login"
             ),
-            "agent": "gemini",
+            "agent": "agy",
             "ok": False,
         }
 
-    # --yolo skips all interactive confirmations so Gemini runs fully headlessly
-    args = [cli, "--yolo", "-p", prompt]
+    # --dangerously-skip-permissions skips interactive confirmations so agy runs headlessly
+    args = [cli, "--dangerously-skip-permissions", "-p", prompt]
     if model:
         args += ["--model", model]
 
@@ -63,15 +61,15 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        return {"error": f"gemini CLI timed out after {effective_timeout}s", "agent": "gemini", "ok": False}
+        return {"error": f"agy CLI timed out after {effective_timeout}s", "agent": "agy", "ok": False}
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
 
     if proc.returncode != 0:
-        return {"error": err or out, "agent": "gemini", "ok": False}
+        return {"error": err or out, "agent": "agy", "ok": False}
 
-    return {"agent": "gemini", "model": model or "gemini-default", "response": out, "ok": True}
+    return {"agent": "agy", "model": model or "agy-default", "response": out, "ok": True}
 
 
 if __name__ == "__main__":

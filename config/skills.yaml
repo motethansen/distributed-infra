@@ -24,13 +24,13 @@ skills:
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 
-  gemini:
-    description: "Gemini CLI — Google's AI coding agent"
+  agy:
+    description: "Antigravity CLI (agy) — Google's AI coding agent"
     category: ai-agent
-    check: "gemini --version"
+    check: "agy --version"
     install:
-      macos: "npm install -g @google/gemini-cli"
-      linux: "npm install -g @google/gemini-cli"
+      macos: "brew install --cask antigravity-cli"
+      linux: "# Download from https://antigravity.google/cli then: agy login"
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 

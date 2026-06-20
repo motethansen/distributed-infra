@@ -4,7 +4,7 @@ Unified agent runner — launch any agent from the CLI or task queue.
 
 CLI usage:
   python agents/runner.py --agent claude  --prompt "hello"
-  python agents/runner.py --agent gemini  --prompt "explain decorators"
+  python agents/runner.py --agent agy     --prompt "explain decorators"
   python agents/runner.py --agent codex   --prompt "fix this bug"
   python agents/runner.py --test          # smoke-test all available agents
 """
@@ -27,10 +27,10 @@ AGENTS: dict[str, Callable] = {}
 
 def _load_agents() -> None:
     from agents.claude_agent import run as claude_run
-    from agents.gemini_agent import run as gemini_run
+    from agents.agy_agent import run as agy_run
     from agents.codex_agent import run as codex_run
     AGENTS["claude"] = claude_run
-    AGENTS["gemini"] = gemini_run
+    AGENTS["agy"] = agy_run
     AGENTS["codex"] = codex_run
 
 
@@ -67,7 +67,7 @@ async def _smoke_test() -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Distributed infra agent runner")
-    parser.add_argument("--agent", choices=["claude", "gemini", "codex"])
+    parser.add_argument("--agent", choices=["claude", "agy", "codex"])
     parser.add_argument("--prompt", default="")
     parser.add_argument("--model", default=None)
     parser.add_argument("--test", action="store_true", help="Smoke-test all agents")
