@@ -1,4 +1,4 @@
-"""Agent task handler — runs claude/gemini/codex from the task queue."""
+"""Agent task handler — runs claude/agy/codex from the task queue."""
 from __future__ import annotations
 
 from shared.models import Task
@@ -7,7 +7,7 @@ from shared.models import Task
 async def handle_agent_run(task: Task) -> dict:
     """
     payload:
-      agent: str    — claude | gemini | codex
+      agent: str    — claude | agy | codex
       prompt: str   — the prompt to send
       model: str    — optional model override
       cwd: str      — working directory for the agent (e.g. ~/Projects/motethansen-site)

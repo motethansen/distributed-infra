@@ -50,7 +50,7 @@ PROMPT_STYLE = Style.from_dict({
     "rprompt":   "#555555",
 })
 
-AGENTS = ["claude", "gemini", "codex"]
+AGENTS = ["claude", "agy", "codex"]
 
 COMMANDS = [
     "run", "test", "assign", "queue", "review", "failures",
@@ -191,7 +191,7 @@ def _claude_route(description: str) -> dict:
         "Given the available worker machines and a task description, "
         "respond with ONLY a JSON object (no markdown, no explanation) with keys: "
         '"machine" (exact machine name from the list), '
-        '"llm" (one of: claude, gemini, codex), '
+        '"llm" (one of: claude, agy, codex), '
         '"task_type" (one of: android_build, ios_build, npm_build, git_pull, test_run, lint, run_script, agent_run, assistant_query, custom), '
         '"reason" (one short sentence). '
         f"\n\nWorker machines:\n{machine_summary}"
@@ -240,7 +240,7 @@ def cmd_assign(args: list[str]) -> None:
         console.print(
             "[dim]Usage: assign [description] [--machine=mac-mini] [--agent=claude] [--type=agent_run]\n"
             "  Omit description to open multiline paste mode — Alt+Enter (or Esc→Enter) to submit.\n"
-            "  --agent:   claude, gemini, codex\n"
+            "  --agent:   claude, agy, codex\n"
             "  --machine: must match a name in config/machines.yaml\n"
             "  --file:    load prompt from a file (e.g. --file=~/prompts/task.txt)[/dim]"
         )
@@ -308,7 +308,7 @@ def cmd_assign(args: list[str]) -> None:
             machines = list(_worker_machines().keys())
             console.print(f"  Machines: {', '.join(machines)}")
             explicit_machine = explicit_machine or console.input("  Machine: ").strip()
-            explicit_llm     = explicit_llm     or console.input("  Agent (claude/gemini/codex): ").strip()
+            explicit_llm     = explicit_llm     or console.input("  Agent (claude/agy/codex): ").strip()
             explicit_type    = explicit_type    or console.input("  Task type (agent_run/run_script/…): ").strip()
             routing = {"machine": explicit_machine, "llm": explicit_llm, "task_type": explicit_type, "reason": "manual"}
         # Override with any explicit flags
@@ -1150,7 +1150,7 @@ def cmd_help() -> None:
     [bold cyan]Local agents  (run on this MacBook, no queue)[/bold cyan]
 
       [bold]run[/bold] <agent> <prompt>
-          Run an agent directly here. Agents: claude, gemini, codex
+          Run an agent directly here. Agents: claude, agy, codex
           Example: run claude write a hello world function in Python
 
       [bold]run[/bold] <agent>
@@ -1158,8 +1158,8 @@ def cmd_help() -> None:
 
       [bold]test[/bold] [agent]
           Smoke-test all 3 agents (or one) to confirm they work locally.
-          Example: test          → tests claude, gemini, codex
-                   test gemini   → tests gemini only
+          Example: test          → tests claude, agy, codex
+                   test agy   → tests agy only
 
     [bold cyan]AI Agent Assistant[/bold cyan]
 
@@ -1176,13 +1176,13 @@ def cmd_help() -> None:
       [bold]assign[/bold] [description] [--machine=X] [--agent=Y] [--type=Z] [--file=path]
           Push a task to a worker. If flags are omitted, Claude recommends routing.
           Omit the description to open multiline paste mode (Alt+Enter to submit).
-          --agent: claude, gemini, codex  (--llm=Y also accepted)
+          --agent: claude, agy, codex  (--llm=Y also accepted)
           --machine must match a name in config/machines.yaml
           --file=~/prompts/task.txt  load prompt from a file
           Validates that the machine supports the task type and agent before queuing.
           Example: assign refactor the auth module for better error handling
                    assign --machine=mac-mini --agent=claude --type=agent_run
-                   assign build the iOS app --machine=mac-mini --agent=gemini --file=~/prompts/ios.txt
+                   assign build the iOS app --machine=mac-mini --agent=agy --file=~/prompts/ios.txt
 
       [bold]queue[/bold] [--status=pending|done|failed|in_progress|needs_human]
           View queued tasks. Pending tasks show target machine (→mac-mini) even
@@ -1268,7 +1268,7 @@ def cmd_help_ai(args: list[str]) -> None:
         assign <description> [--machine=X] [--agent=Y] [--type=Z] [--file=path]
             Task types: agent_run, run_script, git_pull, ios_build, android_build,
                         npm_build, test_run, lint, assistant_run, assistant_query
-            Agents: claude, gemini, codex
+            Agents: claude, agy, codex
             --file=~/path  load prompt from a file instead of typing it
             Omit flags to let Claude auto-route; you confirm before queuing.
 
@@ -1291,7 +1291,7 @@ def cmd_help_ai(args: list[str]) -> None:
         {machines_summary}
 
         ## Agent payload fields (for assign / agent_run)
-        - agent: claude | gemini | codex
+        - agent: claude | agy | codex
         - prompt: the task description (self-contained — agent can't ask follow-ups)
         - cwd: working directory on the worker, e.g. ~/Projects/my-app
         - model: optional model override
