@@ -31,6 +31,10 @@ class TaskType(str, Enum):
     agent_run = "agent_run"
     assistant_run = "assistant_run"
     assistant_query = "assistant_query"
+    # Content
+    write_article = "write_article"
+    write_post = "write_post"
+    code_review = "code_review"
     # Human review
     human_action = "human_action"
     custom = "custom"

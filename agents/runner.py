@@ -30,10 +30,14 @@ def _load_agents() -> None:
     from agents.agy_agent import run as agy_run
     from agents.codex_agent import run as codex_run
     from agents.groq_agent import run as groq_run
+    from agents.content_agent import run as content_run
+    from agents.social_agent import run as social_run
     AGENTS["claude"] = claude_run
     AGENTS["agy"] = agy_run
     AGENTS["codex"] = codex_run
     AGENTS["groq"] = groq_run
+    AGENTS["content"] = content_run
+    AGENTS["social"] = social_run
 
 
 async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str | None = None, timeout: int | None = None) -> dict:
@@ -69,7 +73,7 @@ async def _smoke_test() -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Distributed infra agent runner")
-    parser.add_argument("--agent", choices=["claude", "agy", "codex", "groq"])
+    parser.add_argument("--agent", choices=["claude", "agy", "codex", "groq", "content", "social"])
     parser.add_argument("--prompt", default="")
     parser.add_argument("--model", default=None)
     parser.add_argument("--test", action="store_true", help="Smoke-test all agents")

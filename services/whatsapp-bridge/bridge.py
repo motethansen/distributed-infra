@@ -214,11 +214,32 @@ def _parse(text: str) -> tuple[str, dict]:
             "type":        ttype.group(1)   if ttype   else "agent_run",
         }
 
+    # write article: <topic>  →  write_article task on mac-mini (content_agent / Claude)
+    m = re.match(r"^!?write\s+article:\s*(.+)", t, re.IGNORECASE)
+    if m:
+        return "write_article", {"prompt": m.group(1).strip()}
+
+    # write post: <topic> [--format=twitter]  →  write_post task on mac-mini (social_agent / Groq)
+    m = re.match(r"^!?write\s+post:\s*(.+)", t, re.IGNORECASE)
+    if m:
+        body   = m.group(1).strip()
+        fmt    = re.search(r"--format=(\S+)", body)
+        prompt = re.sub(r"--format=\S+", "", body).strip()
+        return "write_post", {"prompt": prompt, "format": fmt.group(1) if fmt else "linkedin"}
+
+    # code review: <path>  →  code_review task on mac-mini
+    m = re.match(r"^!?code\s+review:\s*(.+)", t, re.IGNORECASE)
+    if m:
+        body  = m.group(1).strip()
+        focus = re.search(r"--focus=(\S+)", body)
+        target = re.sub(r"--focus=\S+", "", body).strip()
+        return "code_review", {"target": target, "focus": focus.group(1) if focus else ""}
+
     # run <agent> <prompt>  →  agent_run on mac-mini
     if re.match(r"^/?run\s+", t, re.IGNORECASE):
         body  = re.sub(r"^/?run\s+", "", t, flags=re.IGNORECASE)
         parts = body.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() in ("claude", "agy", "codex", "groq"):
+        if len(parts) == 2 and parts[0].lower() in ("claude", "agy", "codex", "groq", "content", "social"):
             return "run", {"agent": parts[0].lower(), "prompt": parts[1]}
         return "run", {"agent": "claude", "prompt": body}
 
@@ -428,6 +449,44 @@ async def webhook(request: Request):
             await _send_wa(chat_id,
                 "❌ Could not reach the queue.\nIs the orchestrator running on MacBook?")
 
+    elif cmd == "write_article":
+        prompt = kwargs["prompt"]
+        payload = {"prompt": prompt, "_target_machine": "mac-mini"}
+        task_id = await _create_task("write_article", payload, notes=f"article: {prompt[:70]}")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id,
+                f"⏳ Writing article  [{task_id[:8]}]\n"{prompt[:60]}"\nI'll send the draft when ready.")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
+    elif cmd == "write_post":
+        prompt = kwargs["prompt"]
+        fmt    = kwargs.get("format", "linkedin")
+        payload = {"prompt": prompt, "format": fmt, "_target_machine": "mac-mini"}
+        task_id = await _create_task("write_post", payload, notes=f"post/{fmt}: {prompt[:65]}")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Writing {fmt} post  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
+    elif cmd == "code_review":
+        target = kwargs["target"]
+        focus  = kwargs.get("focus", "")
+        payload = {"target": target, "focus": focus, "_target_machine": "mac-mini"}
+        notes  = f"review: {target}" + (f" focus={focus}" if focus else "")
+        task_id = await _create_task("code_review", payload, notes=notes[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id,
+                f"⏳ Code review  [{task_id[:8]}]\nTarget: {target}\nI'll send findings when done.")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "run":
         agent  = kwargs["agent"]
         prompt = kwargs["prompt"]
@@ -475,11 +534,15 @@ async def webhook(request: Request):
             "as a WhatsApp message. If they ask for an assign command, write the full "
             "command so they can copy-paste it.\n\n"
             "WhatsApp command syntax:\n"
+            "  write article: <topic>  — long-form draft saved to ~/Articles/\n"
+            "  write post: <topic> [--format=twitter]  — LinkedIn or X post (Groq)\n"
+            "  code review: <path> [--focus=security]  — repo code review\n"
             "  run <agent> <prompt>  — run on mac-mini immediately\n"
             "  assign <description> [--machine=X] [--agent=Y] [--type=Z]\n"
-            "    task types: agent_run, run_script, git_pull, ios_build,\n"
-            "                android_build, npm_build, test_run, lint, assistant_run\n"
-            "    agents: claude, agy, codex, groq\n"
+            "    task types: agent_run, write_article, write_post, code_review,\n"
+            "                run_script, git_pull, ios_build, android_build,\n"
+            "                npm_build, test_run, lint, assistant_run\n"
+            "    agents: claude, agy, codex, groq, content, social\n"
             "  assist <today|sync|status|plan [today|week]>  — AI assistant\n"
             "  queue / status / review / failures\n"
             "  help <question>  — ask about commands\n\n"
@@ -512,16 +575,20 @@ async def webhook(request: Request):
             "  queue — active tasks\n"
             "  review — tasks needing input\n"
             "  failures — failed tasks\n"
-            "  run <agent> <prompt>\n"
+            "  write article: <topic> — long-form draft (Claude)\n"
+            "  write post: <topic> [--format=twitter] — social post (Groq)\n"
+            "  code review: <path> [--focus=security] — repo review\n"
+            "  run <agent> <prompt> — agent_run on mac-mini\n"
             "  assist <today|sync|status|plan [today|week]>\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
-            "  help <question> — ask Claude anything about commands\n\n"
+            "  help <question> — ask Claude about commands\n\n"
             "Examples:\n"
-            "  assist today\n"
-            "  assist plan week\n"
+            "  write article: How distributed AI agents change indie dev\n"
+            "  write post: 3 lessons from running 4 agents in parallel\n"
+            "  write post: building in public --format=twitter\n"
+            "  code review: ~/Projects/simtrader --focus=security\n"
             "  run claude explain Riverpod\n"
-            "  assign refactor auth --machine=thinkpad-x1 --agent=claude\n"
-            "  help how do I start a new project on thinkpad?"
+            "  assist today"
         ))
 
     else:
