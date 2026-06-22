@@ -96,6 +96,25 @@ def _live_session(chat_id: str, now: float) -> dict | None:
     return s
 
 
+# Idempotency: Waha can deliver the same message more than once (a global
+# docker-compose webhook + the session webhook, or `message` + `message.any`),
+# which would make every reply fire twice. Track recently-seen message ids.
+_SEEN_TTL = 300  # seconds to remember a message id
+_seen_msgs: dict[str, float] = {}
+
+
+def _is_duplicate(msg_id: str, now: float) -> bool:
+    """True if this message id was already handled recently; records it otherwise."""
+    if not msg_id:
+        return False
+    for k in [k for k, ts in _seen_msgs.items() if now - ts > _SEEN_TTL]:
+        _seen_msgs.pop(k, None)
+    if msg_id in _seen_msgs:
+        return True
+    _seen_msgs[msg_id] = now
+    return False
+
+
 # ── Queue client ──────────────────────────────────────────────────────────────
 def _headers() -> dict:
     return {"x-secret-key": SECRET_KEY, "Content-Type": "application/json"}
@@ -450,8 +469,14 @@ async def webhook(request: Request):
     if not body:
         return Response(status_code=200)
 
-    cmd, kwargs = _parse(body)
     now = datetime.now(timezone.utc).timestamp()
+
+    # Skip duplicate deliveries of the same WhatsApp message (Waha is at-least-once).
+    msg_id = msg.get("id") or (key.get("id") if isinstance(key, dict) else "")
+    if _is_duplicate(msg_id, now):
+        return Response(status_code=200)
+
+    cmd, kwargs = _parse(body)
 
     if cmd == "status":
         machines = await _list_machines()
