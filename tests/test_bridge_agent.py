@@ -250,3 +250,17 @@ def test_extract_artifacts_punctuation_boundaries(tmp_path):
     p.write_bytes(b"data")
     # path wrapped in parens / followed by a comma must still resolve cleanly
     assert bridge._extract_artifacts(f"Output ({p}), enjoy") == [str(p)]
+
+
+def test_human_size():
+    assert bridge._human_size(512) == "512B"
+    assert bridge._human_size(2048) == "2.0KB"
+    assert bridge._human_size(5 * 1024 * 1024) == "5.0MB"
+
+
+def test_artifacts_note_lists_paths_and_sizes(tmp_path):
+    p = tmp_path / "out.pdf"
+    p.write_bytes(b"x" * 2048)
+    note = bridge._artifacts_note([str(p)])
+    assert note.startswith("📎")          # prefixed so the bridge ignores its echo
+    assert str(p) in note and "2.0KB" in note

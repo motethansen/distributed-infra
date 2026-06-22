@@ -12,9 +12,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import mimetypes
 import os
 import re
 import uuid
@@ -51,7 +49,7 @@ def _digits(jid: str) -> str:
 # Waha echoes the bridge's outbound messages back via webhook (fromMe=true),
 # so without this filter every reply would loop back as an "unknown" command.
 _REPLY_PREFIXES = (
-    "✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "⚪", "👀", "📋", "⏱", "⚙", "▸",
+    "✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "⚪", "👀", "📋", "⏱", "⚙", "▸", "📎",
     "Commands:", "Machines:", "Needs review:", "Failed:",
 )
 
@@ -213,14 +211,16 @@ async def _send_long(chat_id: str, text: str, limit: int = MAX_MSG_CHARS) -> Non
 
 
 # ── Artifact return ─────────────────────────────────────────────────────────
-# When an agent writes a file and names its path in the reply, send the file back.
-# Bridge + worker share the Mac Mini filesystem, so the bridge can read it directly.
-_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
-# files we'll auto-return (media/docs/archives) — deliberately excludes source code
-_ARTIFACT_EXTS = _IMAGE_EXTS | {"pdf", "csv", "xlsx", "docx", "pptx", "zip",
-                                "mp3", "mp4", "wav", "m4a", "mov"}
-MAX_ARTIFACTS = int(os.getenv("MAX_ARTIFACTS", "4"))
-MAX_ARTIFACT_BYTES = int(os.getenv("MAX_ARTIFACT_BYTES", str(16 * 1024 * 1024)))  # 16 MB
+# When an agent writes a file and names its path in the reply, surface it.
+# NOTE: the free WAHA NOWEB engine can't send files in chat (sendImage/sendFile
+# are Plus-only → HTTP 422), so we report the validated path + size as text. The
+# file lives on the Mac Mini (bridge + worker share the filesystem); retrieve it
+# there, or upgrade WAHA Plus to deliver the binary in-chat.
+_ARTIFACT_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "svg",
+                  "pdf", "csv", "xlsx", "docx", "pptx", "zip",
+                  "mp3", "mp4", "wav", "m4a", "mov"}
+MAX_ARTIFACTS = int(os.getenv("MAX_ARTIFACTS", "5"))
+MAX_ARTIFACT_BYTES = int(os.getenv("MAX_ARTIFACT_BYTES", str(64 * 1024 * 1024)))  # 64 MB
 # absolute or home-relative paths ending in a file extension
 _PATH_RE = re.compile(r"(?:/|~/)[^\s'\"()<>]+\.([A-Za-z0-9]{1,5})")
 
@@ -246,26 +246,23 @@ def _extract_artifacts(text: str) -> list[str]:
     return out
 
 
-async def _send_artifact(chat_id: str, path: str) -> bool:
-    """Send one local file via Waha (image → sendImage, else sendFile). No caption,
-    so the echoed media message has an empty body and the bridge ignores it."""
-    try:
-        with open(path, "rb") as f:
-            data = base64.b64encode(f.read()).decode()
-    except OSError:
-        return False
-    ext = path.rsplit(".", 1)[-1].lower()
-    endpoint = "sendImage" if ext in _IMAGE_EXTS else "sendFile"
-    body = {"session": WAHA_SESSION, "chatId": chat_id,
-            "file": {"mimetype": mimetypes.guess_type(path)[0] or "application/octet-stream",
-                     "filename": os.path.basename(path), "data": data}}
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.post(f"{WAHA_URL}/api/{endpoint}", headers=_waha_headers(),
-                             json=body, timeout=60)
-        return r.status_code in (200, 201)
-    except httpx.HTTPError:
-        return False
+def _human_size(num: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if num < 1024:
+            return f"{num:.0f}{unit}" if unit == "B" else f"{num:.1f}{unit}"
+        num /= 1024
+    return f"{num:.1f}TB"
+
+
+def _artifacts_note(paths: list[str]) -> str:
+    """Text summary of created files (free WAHA can't attach binaries)."""
+    lines = []
+    for p in paths:
+        try:
+            lines.append(f"• {p} ({_human_size(os.path.getsize(p))})")
+        except OSError:
+            lines.append(f"• {p}")
+    return "📎 File(s) created on mac-mini:\n" + "\n".join(lines)
 
 
 async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | None:
@@ -487,12 +484,14 @@ async def _poll_loop() -> None:
                 # full answer, chunked across messages if long
                 await _send_long(meta["chat_id"],
                     f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
-                # return any files the agent produced and named in its reply
+                # surface any files the agent produced and named in its reply
                 artifacts = (result.get("artifacts")
                              if isinstance(result.get("artifacts"), list)
                              else _extract_artifacts(response_text))
-                for art in artifacts[:MAX_ARTIFACTS]:
-                    await _send_artifact(meta["chat_id"], os.path.expanduser(str(art)))
+                artifacts = [os.path.expanduser(str(a)) for a in artifacts[:MAX_ARTIFACTS]]
+                artifacts = [a for a in artifacts if os.path.isfile(a)]
+                if artifacts:
+                    await _send_wa(meta["chat_id"], _artifacts_note(artifacts))
                 _pending.pop(task_id, None)
 
             elif status == "failed":
@@ -836,29 +835,47 @@ async def webhook(request: Request):
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
     elif cmd == "help":
-        await _send_wa(chat_id, (
-            "Commands:\n"
-            "  status — machine health\n"
-            "  queue — active tasks\n"
-            "  review — tasks needing input\n"
-            "  failures — failed tasks\n"
-            "  write article: <topic> — long-form draft (Claude)\n"
-            "  write post: <topic> [--format=twitter] — social post (Groq)\n"
-            "  code review: <path> [--focus=security] — repo review\n"
-            "  agent <llm> <prompt> — launch a CLI agent (claude, code, agy, codex…)\n"
-            "    ↳ after `agent claude …` just reply to continue; send `end` to stop\n"
-            "  run <agent> <prompt> — agent_run on mac-mini\n"
+        await _send_long(chat_id, (
+            "📋 Commands — send any of these to yourself\n"
+            "\n"
+            "🤖 RUN AN AI AGENT\n"
+            "  agent <llm> <prompt>\n"
+            "  LLMs you can use:\n"
+            "   • claude (or code) — Claude Code · multi-turn ✓\n"
+            "   • agy — Google Antigravity · one-shot\n"
+            "   • codex (or gpt) — OpenAI Codex · one-shot\n"
+            "   • groq, content, social\n"
+            "  Multi-turn (claude only): after `agent claude …`, just reply normally\n"
+            "  to continue the same conversation. Send `end` (or `reset`) to stop.\n"
+            "  A session also expires after ~30 min idle, and survives a bridge restart.\n"
+            "  • Long answers arrive as several ▸(k/n) messages.\n"
+            "  • If the agent saves a file and names its path, you get a 📎 note\n"
+            "    (the file stays on mac-mini; in-chat file delivery needs WAHA Plus).\n"
+            "  • One-shot agents can't ask follow-ups — put everything in the prompt.\n"
+            "\n"
+            "✍️ CONTENT\n"
+            "  write article: <topic>            — long-form draft (Claude)\n"
+            "  write post: <topic> [--format=twitter]  — social post (Groq)\n"
+            "  code review: <path> [--focus=security]  — repo review\n"
+            "\n"
+            "🗓 ASSISTANT (on MacBook)\n"
             "  assist <today|sync|status|plan [today|week]>\n"
+            "\n"
+            "🖥 FLEET\n"
+            "  status · queue · review · failures\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
-            "  help <question> — ask Claude about commands\n\n"
-            "Examples:\n"
-            "  write article: How distributed AI agents change indie dev\n"
-            "  write post: 3 lessons from running 4 agents in parallel\n"
-            "  write post: building in public --format=twitter\n"
-            "  code review: ~/Projects/simtrader --focus=security\n"
-            "  run claude explain Riverpod\n"
-            "  agent claude help me start a new writing project\n"
+            "  run <agent> <prompt>              — low-level agent_run on mac-mini\n"
+            "\n"
+            "❓ HELP\n"
+            "  help              — this list\n"
+            "  help <question>   — ask Claude how to phrase a command\n"
+            "\n"
+            "Examples\n"
+            "  agent claude help me start a new writing project; ask me questions\n"
+            "  agent codex explain this error then suggest a fix: <paste>\n"
             "  agent agy review my task list and suggest today's activities\n"
+            "  write article: How distributed AI agents change indie dev\n"
+            "  code review: ~/Projects/simtrader --focus=security\n"
             "  assist today"
         ))
 
