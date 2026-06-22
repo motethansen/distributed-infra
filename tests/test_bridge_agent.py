@@ -129,3 +129,23 @@ def test_live_session_returns_active_then_expires():
 def test_live_session_unknown_chat():
     bridge._sessions.clear()
     assert bridge._live_session("nobody@c.us", 123.0) is None
+
+
+# ── Idempotency (duplicate webhook delivery) ─────────────────────────────────
+def test_duplicate_message_id_detected_once():
+    bridge._seen_msgs.clear()
+    assert bridge._is_duplicate("msg-abc", 100.0) is False  # first delivery
+    assert bridge._is_duplicate("msg-abc", 100.5) is True   # second delivery → skip
+
+
+def test_duplicate_empty_id_never_blocks():
+    bridge._seen_msgs.clear()
+    assert bridge._is_duplicate("", 100.0) is False
+    assert bridge._is_duplicate("", 100.0) is False
+
+
+def test_duplicate_expires_after_ttl():
+    bridge._seen_msgs.clear()
+    bridge._is_duplicate("msg-x", 100.0)
+    # after TTL the id is forgotten → treated as fresh again
+    assert bridge._is_duplicate("msg-x", 100.0 + bridge._SEEN_TTL + 1) is False
