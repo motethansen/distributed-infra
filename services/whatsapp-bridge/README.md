@@ -71,8 +71,10 @@ resume id here), so each message to them is independent.
 - Multi-turn is **claude-only**; agy/codex are one-shot.
 - The bridge's chat→session map is **in-memory** — a bridge restart drops open
   sessions (start a new `agent claude …`).
-- **Output is truncated** to ~1400 chars in the reply. Chunking long output and
-  returning non-text artifacts (e.g. a generated image as a file) is a follow-up.
+- Long replies are **split across messages** (line-boundary chunks of
+  `MAX_MSG_CHARS`, default 3500; continuation parts marked `▸ (k/n)`). Failed-task
+  errors are capped to one message. Returning non-text artifacts (e.g. a generated
+  image as a file) is still a follow-up.
 
 ## Tests
 
