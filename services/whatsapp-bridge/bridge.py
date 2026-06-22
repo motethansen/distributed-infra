@@ -48,7 +48,7 @@ def _digits(jid: str) -> str:
 # Waha echoes the bridge's outbound messages back via webhook (fromMe=true),
 # so without this filter every reply would loop back as an "unknown" command.
 _REPLY_PREFIXES = (
-    "✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "⚪", "👀", "📋", "⏱", "⚙",
+    "✓", "✗", "⏳", "✅", "❌", "🟢", "🔴", "⚪", "👀", "📋", "⏱", "⚙", "▸",
     "Commands:", "Machines:", "Needs review:", "Failed:",
 )
 
@@ -133,6 +133,46 @@ async def _send_wa(chat_id: str, text: str) -> None:
             headers=_waha_headers(),
             json={"session": WAHA_SESSION, "chatId": chat_id, "text": text},
             timeout=10)
+
+
+MAX_MSG_CHARS = int(os.getenv("MAX_MSG_CHARS", "3500"))
+
+
+def _split_chunks(text: str, limit: int = MAX_MSG_CHARS) -> list[str]:
+    """Split text into pieces <= limit, breaking on line boundaries where possible.
+    A single line longer than limit is hard-split."""
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    cur = ""
+    for line in text.split("\n"):
+        while len(line) > limit:
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + 1 + len(line) > limit:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+async def _send_long(chat_id: str, text: str, limit: int = MAX_MSG_CHARS) -> None:
+    """Send text as one or more WhatsApp messages. Continuation parts get a ▸ (k/n)
+    marker — ▸ is in _REPLY_PREFIXES so the bridge ignores its own echoed chunks."""
+    parts = _split_chunks(text, limit)
+    n = len(parts)
+    if n == 1:
+        await _send_wa(chat_id, parts[0])
+        return
+    for i, part in enumerate(parts):
+        prefix = f"▸ ({i + 1}/{n})\n"
+        await _send_wa(chat_id, (part + f"\n▸ (1/{n})") if i == 0 else prefix + part)
 
 
 async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | None:
@@ -348,16 +388,18 @@ async def _poll_loop() -> None:
 
             status = task.get("status")
             result = task.get("result") or {}
-            response_text = (result.get("response") or result.get("error") or "")[:1400]
+            response_text = result.get("response") or result.get("error") or ""
 
             if status == "done":
-                await _send_wa(meta["chat_id"],
+                # full answer, chunked across messages if long
+                await _send_long(meta["chat_id"],
                     f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
                 _pending.pop(task_id, None)
 
             elif status == "failed":
+                # errors can be huge/noisy — cap to a single message
                 await _send_wa(meta["chat_id"],
-                    f"❌ Failed  [{task_id[:8]}]\n{response_text[:600]}")
+                    f"❌ Failed  [{task_id[:8]}]\n{response_text[:MAX_MSG_CHARS]}")
                 _pending.pop(task_id, None)
 
             elif status == "needs_human":

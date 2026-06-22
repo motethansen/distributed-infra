@@ -149,3 +149,28 @@ def test_duplicate_expires_after_ttl():
     bridge._is_duplicate("msg-x", 100.0)
     # after TTL the id is forgotten → treated as fresh again
     assert bridge._is_duplicate("msg-x", 100.0 + bridge._SEEN_TTL + 1) is False
+
+
+# ── Output chunking ──────────────────────────────────────────────────────────
+def test_short_text_is_one_chunk():
+    assert bridge._split_chunks("hello world", 100) == ["hello world"]
+
+
+def test_long_text_splits_within_limit():
+    text = "\n".join(f"line {i} " + "x" * 50 for i in range(50))  # well over 200
+    parts = bridge._split_chunks(text, 200)
+    assert len(parts) > 1
+    assert all(len(p) <= 200 for p in parts)
+    # reassembled content preserves every line (chunks split on newlines)
+    assert "".join(parts).replace("\n", "") == text.replace("\n", "")
+
+
+def test_single_overlong_line_is_hard_split():
+    parts = bridge._split_chunks("y" * 1000, 300)
+    assert len(parts) == 4
+    assert all(len(p) <= 300 for p in parts)
+    assert "".join(parts) == "y" * 1000
+
+
+def test_chunk_boundary_no_split_at_limit():
+    assert bridge._split_chunks("a" * 100, 100) == ["a" * 100]
