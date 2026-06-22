@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -72,6 +73,27 @@ _AGENT_ALIASES = {
 def _agent_choices() -> str:
     """User-facing list of accepted agent keywords for help / error replies."""
     return ", ".join(sorted(_AGENT_ALIASES))
+
+
+# Multi-turn sessions (BLI-050). Only resumable backends keep a conversation; the
+# agent's own CLI stores the history (we pass a fixed session id). After an `agent`
+# command, any non-command message continues the session until it goes idle or the
+# user sends `end`. In-memory only — a bridge restart drops the mapping.
+_RESUMABLE_BACKENDS = {"claude"}
+SESSION_TTL = int(os.getenv("AGENT_SESSION_TTL", "1800"))  # seconds of idle before a session expires
+# chat_id → {agent, llm, session_id, last_active, turns}
+_sessions: dict[str, dict] = {}
+
+
+def _live_session(chat_id: str, now: float) -> dict | None:
+    """Return the chat's active session if it hasn't gone idle, else None (and evict)."""
+    s = _sessions.get(chat_id)
+    if not s:
+        return None
+    if now - s["last_active"] > SESSION_TTL:
+        _sessions.pop(chat_id, None)
+        return None
+    return s
 
 
 # ── Queue client ──────────────────────────────────────────────────────────────
@@ -218,6 +240,8 @@ def _parse(text: str) -> tuple[str, dict]:
         return "failures", {}
     if tl in ("help", "/help", "?", "h"):
         return "help", {}
+    if tl in ("end", "/end", "reset", "/reset", "new", "/new"):
+        return "end_session", {}
     m = re.match(r"^/?help\s+(.+)", t, re.IGNORECASE)
     if m:
         return "help_ai", {"question": m.group(1).strip()}
@@ -427,6 +451,7 @@ async def webhook(request: Request):
         return Response(status_code=200)
 
     cmd, kwargs = _parse(body)
+    now = datetime.now(timezone.utc).timestamp()
 
     if cmd == "status":
         machines = await _list_machines()
@@ -533,16 +558,30 @@ async def webhook(request: Request):
             await _send_wa(chat_id, f"❌ No prompt.\nUsage: agent {llm} <your request>")
             return Response(status_code=200)
 
+        # Start a fresh session. Resumable backends (claude) keep a conversation
+        # the user can continue with plain replies; others run one-shot.
+        resumable = backend in _RESUMABLE_BACKENDS
         payload = {"agent": backend, "prompt": prompt, "_target_machine": "mac-mini"}
+        if resumable:
+            sid = str(uuid.uuid4())
+            payload["session_id"] = sid
+            payload["resume"] = False
+            _sessions[chat_id] = {"agent": backend, "llm": llm, "session_id": sid,
+                                  "last_active": now, "turns": 1}
+        else:
+            _sessions.pop(chat_id, None)  # non-resumable: clear any stale session
         task_id = await _create_task("agent_run", payload, notes=f"agent/{backend}: {prompt[:60]}")
         if task_id:
-            _pending[task_id] = {"chat_id": chat_id,
-                                  "started_at": datetime.now(timezone.utc).timestamp()}
-            await _send_wa(chat_id,
-                f"⏳ {backend}  [{task_id[:8]}]\n\"{prompt[:60]}\"\n"
-                f"I'll reply here when it's done.")
+            _pending[task_id] = {"chat_id": chat_id, "started_at": now}
+            tail = "  — just reply to continue (send `end` to stop)" if resumable else ""
+            await _send_wa(chat_id, f"⏳ {backend}  [{task_id[:8]}]\n\"{prompt[:60]}\"{tail}")
         else:
+            _sessions.pop(chat_id, None)  # rollback session if the queue is unreachable
             await _send_wa(chat_id, "❌ Could not reach the queue.")
+
+    elif cmd == "end_session":
+        had = _sessions.pop(chat_id, None)
+        await _send_wa(chat_id, "✓ Session ended." if had else "✓ No active session.")
 
     elif cmd == "run":
         agent  = kwargs["agent"]
@@ -637,6 +676,7 @@ async def webhook(request: Request):
             "  write post: <topic> [--format=twitter] — social post (Groq)\n"
             "  code review: <path> [--focus=security] — repo review\n"
             "  agent <llm> <prompt> — launch a CLI agent (claude, code, agy, codex…)\n"
+            "    ↳ after `agent claude …` just reply to continue; send `end` to stop\n"
             "  run <agent> <prompt> — agent_run on mac-mini\n"
             "  assist <today|sync|status|plan [today|week]>\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
@@ -653,8 +693,25 @@ async def webhook(request: Request):
         ))
 
     else:
-        await _send_wa(chat_id,
-            f'❌ Unknown: "{body[:40]}"\nSend help for commands.')
+        # Not a command: if a multi-turn session is live, treat this as the next
+        # turn and resume it; otherwise it's an unknown command.
+        sess = _live_session(chat_id, now)
+        if sess:
+            sess["last_active"] = now
+            sess["turns"] += 1
+            payload = {"agent": sess["agent"], "prompt": body,
+                       "session_id": sess["session_id"], "resume": True,
+                       "_target_machine": "mac-mini"}
+            task_id = await _create_task("agent_run", payload,
+                                         notes=f"agent/{sess['agent']} cont: {body[:50]}")
+            if task_id:
+                _pending[task_id] = {"chat_id": chat_id, "started_at": now}
+                await _send_wa(chat_id, f"⏳ {sess['agent']} (cont·{sess['turns']})  [{task_id[:8]}]")
+            else:
+                await _send_wa(chat_id, "❌ Could not reach the queue.")
+        else:
+            await _send_wa(chat_id,
+                f'❌ Unknown: "{body[:40]}"\nSend help for commands.')
 
     return Response(status_code=200)
 

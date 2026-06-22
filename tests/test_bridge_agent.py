@@ -99,3 +99,33 @@ def test_agent_choices_lists_keywords():
     choices = bridge._agent_choices()
     for kw in ("claude", "code", "agy", "codex"):
         assert kw in choices
+
+
+# ── Multi-turn sessions ──────────────────────────────────────────────────────
+@pytest.mark.parametrize("text", ["end", "/end", "reset", "/reset", "new", "/new", "END"])
+def test_parse_end_session(text):
+    assert bridge._parse(text)[0] == "end_session"
+
+
+def test_only_claude_is_resumable():
+    # claude keeps a conversation; agy/codex run one-shot
+    assert "claude" in bridge._RESUMABLE_BACKENDS
+    assert "agy" not in bridge._RESUMABLE_BACKENDS
+    assert "codex" not in bridge._RESUMABLE_BACKENDS
+
+
+def test_live_session_returns_active_then_expires():
+    bridge._sessions.clear()
+    chat = "me@c.us"
+    bridge._sessions[chat] = {"agent": "claude", "llm": "claude",
+                              "session_id": "sid-1", "last_active": 1000.0, "turns": 1}
+    # within TTL → live
+    assert bridge._live_session(chat, 1000.0 + bridge.SESSION_TTL - 1) is not None
+    # past TTL → evicted, returns None
+    assert bridge._live_session(chat, 1000.0 + bridge.SESSION_TTL + 1) is None
+    assert chat not in bridge._sessions  # evicted on expiry
+
+
+def test_live_session_unknown_chat():
+    bridge._sessions.clear()
+    assert bridge._live_session("nobody@c.us", 123.0) is None

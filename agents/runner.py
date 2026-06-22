@@ -40,7 +40,13 @@ def _load_agents() -> None:
     AGENTS["social"] = social_run
 
 
-async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str | None = None, timeout: int | None = None) -> dict:
+# Agents that support multi-turn conversation resume (caller-supplied session id).
+# Others run one-shot and ignore session_id, so we never pass it to them.
+RESUMABLE = {"claude"}
+
+
+async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str | None = None,
+                    timeout: int | None = None, session_id: str | None = None, resume: bool = False) -> dict:
     _load_agents()
     if agent not in AGENTS:
         return {"error": f"Unknown agent: {agent}. Choose from: {list(AGENTS)}", "ok": False}
@@ -51,6 +57,9 @@ async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str 
         kwargs["cwd"] = cwd
     if timeout is not None:
         kwargs["timeout"] = timeout
+    if session_id and agent in RESUMABLE:
+        kwargs["session_id"] = session_id
+        kwargs["resume"] = resume
     return await AGENTS[agent](**kwargs)
 
 

@@ -49,12 +49,28 @@ agent codex fix the failing test in cart.py
 
 An unknown keyword replies with the accepted list. A missing prompt replies with usage.
 
+### Multi-turn (claude)
+
+After `agent claude <prompt>`, the conversation stays open: **just reply** with a
+plain message and it continues the same Claude session (via `claude --session-id`
+/ `--resume`). Send `end` (or `reset` / `new`) to close it; it also expires after
+`AGENT_SESSION_TTL` seconds idle (default 1800). Example:
+
+```
+agent claude help me start a new writing project. ask me what i want to do
+   …Claude replies with questions…
+a sci-fi short story about Mars            ← plain reply continues the session
+end                                        ← closes the session
+```
+
+`agy` and `codex` run **one-shot** (their CLIs don't expose a caller-supplied
+resume id here), so each message to them is independent.
+
 ### Current limitations (next increments)
 
-- **Single-shot only.** Each `agent` message is one task; the agent cannot ask
-  follow-up questions yet. Put everything needed in the prompt. Multi-turn
-  sessions (the agent's question comes back to WhatsApp and your reply continues
-  the same session) are the next step of BLI-050.
+- Multi-turn is **claude-only**; agy/codex are one-shot.
+- The bridge's chat→session map is **in-memory** — a bridge restart drops open
+  sessions (start a new `agent claude …`).
 - **Output is truncated** to ~1400 chars in the reply. Chunking long output and
   returning non-text artifacts (e.g. a generated image as a file) is a follow-up.
 
