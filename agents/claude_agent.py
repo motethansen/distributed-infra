@@ -50,7 +50,8 @@ def _resolve_model(requested: str) -> str | None:
     return chosen
 
 
-async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None) -> dict:
+async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None,
+              session_id: str = "", resume: bool = False) -> dict:
     cli = _find_cli()
     if not cli:
         return {
@@ -71,6 +72,10 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         }
 
     args = [cli, "-p", prompt, "--dangerously-skip-permissions"]
+    # Multi-turn: --session-id pins a caller-supplied id on the first turn;
+    # --resume continues that same conversation on later turns.
+    if session_id:
+        args += (["--resume", session_id] if resume else ["--session-id", session_id])
     if effective_model:
         args += ["--model", effective_model]
 
@@ -95,7 +100,8 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     if proc.returncode != 0:
         return {"error": err or out, "agent": "claude", "ok": False}
 
-    return {"agent": "claude", "model": effective_model or "claude-default", "response": out, "ok": True}
+    return {"agent": "claude", "model": effective_model or "claude-default",
+            "response": out, "session_id": session_id, "ok": True}
 
 
 if __name__ == "__main__":
