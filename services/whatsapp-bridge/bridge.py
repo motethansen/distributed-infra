@@ -51,6 +51,28 @@ _REPLY_PREFIXES = (
     "Commands:", "Machines:", "Needs review:", "Failed:",
 )
 
+# `agent <llm> <prompt>` launcher (BLI-050). Maps the user-facing LLM keyword to a
+# backend agent in the worker's runner (agents/runner.py AGENTS:
+# claude, agy, codex, groq, content, social). All are subscription CLI agents,
+# so no API keys are needed. Aliases let the user type natural names.
+_AGENT_ALIASES = {
+    "claude":       "claude",   # Claude Code (`claude -p`)
+    "code":         "claude",   # Claude Code is the claude CLI
+    "claude-code":  "claude",
+    "agy":          "agy",      # Google Antigravity CLI (`agy -p`)
+    "antigravity":  "agy",
+    "codex":        "codex",    # OpenAI Codex CLI
+    "gpt":          "codex",
+    "groq":         "groq",
+    "content":      "content",  # long-form content agent
+    "social":       "social",   # social-post agent
+}
+
+
+def _agent_choices() -> str:
+    """User-facing list of accepted agent keywords for help / error replies."""
+    return ", ".join(sorted(_AGENT_ALIASES))
+
 
 # ── Queue client ──────────────────────────────────────────────────────────────
 def _headers() -> dict:
@@ -234,6 +256,15 @@ def _parse(text: str) -> tuple[str, dict]:
         focus = re.search(r"--focus=(\S+)", body)
         target = re.sub(r"--focus=\S+", "", body).strip()
         return "code_review", {"target": target, "focus": focus.group(1) if focus else ""}
+
+    # agent <llm> <prompt>  →  launch a CLI agent (BLI-050). Single-shot for now;
+    # multi-turn sessions are a later increment. `run` (below) stays as an alias.
+    if re.match(r"^/?agent(\s+|$)", t, re.IGNORECASE):
+        body  = re.sub(r"^/?agent\s*", "", t, flags=re.IGNORECASE).strip()
+        parts = body.split(None, 1)
+        llm    = parts[0].lower() if parts else ""
+        prompt = parts[1] if len(parts) == 2 else ""
+        return "agent", {"llm": llm, "prompt": prompt}
 
     # run <agent> <prompt>  →  agent_run on mac-mini
     if re.match(r"^/?run\s+", t, re.IGNORECASE):
@@ -487,6 +518,32 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "agent":
+        llm    = kwargs["llm"]
+        prompt = kwargs["prompt"]
+        backend = _AGENT_ALIASES.get(llm)
+        if not llm or backend is None:
+            hint = f' (got "{llm}")' if llm else ""
+            await _send_wa(chat_id,
+                f"❌ Unknown agent{hint}.\n"
+                f"Usage: agent <llm> <prompt>\n"
+                f"Available: {_agent_choices()}")
+            return Response(status_code=200)
+        if not prompt:
+            await _send_wa(chat_id, f"❌ No prompt.\nUsage: agent {llm} <your request>")
+            return Response(status_code=200)
+
+        payload = {"agent": backend, "prompt": prompt, "_target_machine": "mac-mini"}
+        task_id = await _create_task("agent_run", payload, notes=f"agent/{backend}: {prompt[:60]}")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id,
+                f"⏳ {backend}  [{task_id[:8]}]\n\"{prompt[:60]}\"\n"
+                f"I'll reply here when it's done.")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "run":
         agent  = kwargs["agent"]
         prompt = kwargs["prompt"]
@@ -537,6 +594,7 @@ async def webhook(request: Request):
             "  write article: <topic>  — long-form draft saved to ~/Articles/\n"
             "  write post: <topic> [--format=twitter]  — LinkedIn or X post (Groq)\n"
             "  code review: <path> [--focus=security]  — repo code review\n"
+            "  agent <llm> <prompt>  — launch a CLI agent (claude, code, agy, codex, groq)\n"
             "  run <agent> <prompt>  — run on mac-mini immediately\n"
             "  assign <description> [--machine=X] [--agent=Y] [--type=Z]\n"
             "    task types: agent_run, write_article, write_post, code_review,\n"
@@ -578,6 +636,7 @@ async def webhook(request: Request):
             "  write article: <topic> — long-form draft (Claude)\n"
             "  write post: <topic> [--format=twitter] — social post (Groq)\n"
             "  code review: <path> [--focus=security] — repo review\n"
+            "  agent <llm> <prompt> — launch a CLI agent (claude, code, agy, codex…)\n"
             "  run <agent> <prompt> — agent_run on mac-mini\n"
             "  assist <today|sync|status|plan [today|week]>\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
@@ -588,6 +647,8 @@ async def webhook(request: Request):
             "  write post: building in public --format=twitter\n"
             "  code review: ~/Projects/simtrader --focus=security\n"
             "  run claude explain Riverpod\n"
+            "  agent claude help me start a new writing project\n"
+            "  agent agy review my task list and suggest today's activities\n"
             "  assist today"
         ))
 
