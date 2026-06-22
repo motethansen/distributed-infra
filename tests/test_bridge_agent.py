@@ -7,7 +7,9 @@ file path.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
+import time
 
 import pytest
 
@@ -174,3 +176,77 @@ def test_single_overlong_line_is_hard_split():
 
 def test_chunk_boundary_no_split_at_limit():
     assert bridge._split_chunks("a" * 100, 100) == ["a" * 100]
+
+
+# ── Session persistence (survive bridge restart) ─────────────────────────────
+def test_sessions_persist_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "_STATE_FILE", str(tmp_path / "s.json"))
+    bridge._sessions.clear()
+    bridge._sessions["me@c.us"] = {"agent": "claude", "llm": "claude",
+                                   "session_id": "sid-9", "last_active": time.time(), "turns": 3}
+    bridge._save_sessions()
+    bridge._sessions.clear()          # simulate a restart
+    bridge._load_sessions()
+    assert bridge._sessions.get("me@c.us", {}).get("session_id") == "sid-9"
+    assert bridge._sessions["me@c.us"]["turns"] == 3
+
+
+def test_load_drops_expired_sessions(tmp_path, monkeypatch):
+    f = tmp_path / "s.json"
+    monkeypatch.setattr(bridge, "_STATE_FILE", str(f))
+    f.write_text(json.dumps({
+        "fresh@c.us": {"agent": "claude", "session_id": "f", "last_active": time.time(), "turns": 1},
+        "stale@c.us": {"agent": "claude", "session_id": "s", "last_active": 0, "turns": 1},
+    }))
+    bridge._sessions.clear()
+    bridge._load_sessions()
+    assert "fresh@c.us" in bridge._sessions
+    assert "stale@c.us" not in bridge._sessions  # last_active=0 is past TTL
+
+
+def test_load_missing_file_is_safe(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "_STATE_FILE", str(tmp_path / "nope.json"))
+    bridge._sessions.clear()
+    bridge._sessions["keep@c.us"] = {"agent": "claude", "session_id": "k",
+                                     "last_active": time.time(), "turns": 1}
+    bridge._load_sessions()  # no file → leaves state untouched, no crash
+    assert "keep@c.us" in bridge._sessions
+
+
+# ── Artifact extraction ──────────────────────────────────────────────────────
+def test_extract_artifacts_finds_existing_media(tmp_path):
+    img = tmp_path / "car.png"
+    img.write_bytes(b"\x89PNG fakeimage")
+    assert str(img) in bridge._extract_artifacts(f"I saved the image to {img}. Done.")
+
+
+def test_extract_artifacts_skips_missing_and_source(tmp_path):
+    assert bridge._extract_artifacts(f"see {tmp_path}/nope.png") == []   # doesn't exist
+    src = tmp_path / "bridge.py"
+    src.write_text("x")
+    assert bridge._extract_artifacts(f"edited {src}") == []              # source ext excluded
+
+
+def test_extract_artifacts_dedupes_and_caps(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "MAX_ARTIFACTS", 2)
+    paths = []
+    for i in range(4):
+        p = tmp_path / f"f{i}.pdf"
+        p.write_text("x")
+        paths.append(str(p))
+    got = bridge._extract_artifacts(" ".join(paths + [paths[0]]))  # 4 unique + 1 dup
+    assert len(got) == 2  # capped at MAX_ARTIFACTS
+
+
+def test_extract_artifacts_size_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "MAX_ARTIFACT_BYTES", 10)
+    big = tmp_path / "big.pdf"
+    big.write_bytes(b"x" * 100)
+    assert bridge._extract_artifacts(f"file {big}") == []
+
+
+def test_extract_artifacts_punctuation_boundaries(tmp_path):
+    p = tmp_path / "report.pdf"
+    p.write_bytes(b"data")
+    # path wrapped in parens / followed by a comma must still resolve cleanly
+    assert bridge._extract_artifacts(f"Output ({p}), enjoy") == [str(p)]
