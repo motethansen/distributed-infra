@@ -69,12 +69,19 @@ resume id here), so each message to them is independent.
 ### Artifacts (files)
 
 If an agent writes a file and names its absolute (or `~/`) path in its reply, the
-bridge returns the file itself — images via `sendImage`, everything else via
-`sendFile`. The bridge and worker share the Mac Mini filesystem, so no upload step
-is needed. Returned types: images (png/jpg/jpeg/gif/webp), pdf, csv/xlsx/docx/pptx,
-zip, and audio/video (mp3/mp4/wav/m4a/mov). Source code is intentionally **not**
-auto-returned. Caps: `MAX_ARTIFACTS` (4) and `MAX_ARTIFACT_BYTES` (16 MB). A worker
-result may also set an explicit `artifacts: [paths]` list to override detection.
+bridge validates the file exists and replies with a `📎` note listing the path(s)
+and size(s). The file lives on the Mac Mini (bridge + worker share the filesystem)
+— retrieve it there.
+
+> **In-chat file delivery is disabled:** the free WAHA NOWEB engine returns HTTP 422
+> for `sendImage`/`sendFile` ("available only in the Plus version"). With WAHA Plus
+> (or a file-serving URL the phone can reach over Tailscale) the bridge could attach
+> the binary instead of just the path.
+
+Detected types: images (png/jpg/jpeg/gif/webp/svg), pdf, csv/xlsx/docx/pptx, zip,
+audio/video (mp3/mp4/wav/m4a/mov). Source code is intentionally excluded. Caps:
+`MAX_ARTIFACTS` (5) and `MAX_ARTIFACT_BYTES` (64 MB). A worker result may also set an
+explicit `artifacts: [paths]` list to override detection.
 
 ### Persistence
 
