@@ -121,8 +121,8 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         except OSError:
             pass
 
-    # codex prints model/auth errors to stdout and can still exit non-zero.
-    if _CHATGPT_MODEL_ERR in out:
+    # codex prints model/auth errors to stdout or stderr and can still exit non-zero.
+    if _CHATGPT_MODEL_ERR in f"{out}\n{err}":
         return {
             "error": (
                 "Codex model not supported on this ChatGPT account. Set "
