@@ -12,6 +12,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import mimetypes
 import os
 import re
 import uuid
@@ -92,8 +95,42 @@ def _live_session(chat_id: str, now: float) -> dict | None:
         return None
     if now - s["last_active"] > SESSION_TTL:
         _sessions.pop(chat_id, None)
+        _save_sessions()
         return None
     return s
+
+
+# Persist sessions to disk so multi-turn survives a bridge restart. The claude CLI
+# already stores the conversation; this just keeps the chat→session_id mapping.
+_STATE_FILE = os.getenv("BRIDGE_STATE_FILE", os.path.expanduser("~/.whatsapp-bridge-sessions.json"))
+
+
+def _save_sessions() -> None:
+    """Best-effort write of the current sessions map (atomic via temp + replace)."""
+    try:
+        tmp = f"{_STATE_FILE}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_sessions, f)
+        os.replace(tmp, _STATE_FILE)
+    except OSError:
+        pass
+
+
+def _load_sessions() -> None:
+    """Load persisted sessions on startup, dropping any already past their TTL."""
+    global _sessions
+    try:
+        with open(_STATE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    now = datetime.now(timezone.utc).timestamp()
+    _sessions = {
+        cid: s for cid, s in data.items()
+        if isinstance(s, dict) and now - s.get("last_active", 0) <= SESSION_TTL
+    }
 
 
 # Idempotency: Waha can deliver the same message more than once (a global
@@ -173,6 +210,62 @@ async def _send_long(chat_id: str, text: str, limit: int = MAX_MSG_CHARS) -> Non
     for i, part in enumerate(parts):
         prefix = f"▸ ({i + 1}/{n})\n"
         await _send_wa(chat_id, (part + f"\n▸ (1/{n})") if i == 0 else prefix + part)
+
+
+# ── Artifact return ─────────────────────────────────────────────────────────
+# When an agent writes a file and names its path in the reply, send the file back.
+# Bridge + worker share the Mac Mini filesystem, so the bridge can read it directly.
+_IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp"}
+# files we'll auto-return (media/docs/archives) — deliberately excludes source code
+_ARTIFACT_EXTS = _IMAGE_EXTS | {"pdf", "csv", "xlsx", "docx", "pptx", "zip",
+                                "mp3", "mp4", "wav", "m4a", "mov"}
+MAX_ARTIFACTS = int(os.getenv("MAX_ARTIFACTS", "4"))
+MAX_ARTIFACT_BYTES = int(os.getenv("MAX_ARTIFACT_BYTES", str(16 * 1024 * 1024)))  # 16 MB
+# absolute or home-relative paths ending in a file extension
+_PATH_RE = re.compile(r"(?:/|~/)[^\s'\"()<>]+\.([A-Za-z0-9]{1,5})")
+
+
+def _extract_artifacts(text: str) -> list[str]:
+    """Existing artifact files referenced by absolute/~ path in the agent's reply."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _PATH_RE.finditer(text or ""):
+        if m.group(1).lower() not in _ARTIFACT_EXTS:
+            continue
+        path = os.path.expanduser(m.group(0))
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if os.path.isfile(path) and 0 < os.path.getsize(path) <= MAX_ARTIFACT_BYTES:
+                out.append(path)
+        except OSError:
+            continue
+        if len(out) >= MAX_ARTIFACTS:
+            break
+    return out
+
+
+async def _send_artifact(chat_id: str, path: str) -> bool:
+    """Send one local file via Waha (image → sendImage, else sendFile). No caption,
+    so the echoed media message has an empty body and the bridge ignores it."""
+    try:
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+    except OSError:
+        return False
+    ext = path.rsplit(".", 1)[-1].lower()
+    endpoint = "sendImage" if ext in _IMAGE_EXTS else "sendFile"
+    body = {"session": WAHA_SESSION, "chatId": chat_id,
+            "file": {"mimetype": mimetypes.guess_type(path)[0] or "application/octet-stream",
+                     "filename": os.path.basename(path), "data": data}}
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.post(f"{WAHA_URL}/api/{endpoint}", headers=_waha_headers(),
+                             json=body, timeout=60)
+        return r.status_code in (200, 201)
+    except httpx.HTTPError:
+        return False
 
 
 async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | None:
@@ -394,6 +487,12 @@ async def _poll_loop() -> None:
                 # full answer, chunked across messages if long
                 await _send_long(meta["chat_id"],
                     f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
+                # return any files the agent produced and named in its reply
+                artifacts = (result.get("artifacts")
+                             if isinstance(result.get("artifacts"), list)
+                             else _extract_artifacts(response_text))
+                for art in artifacts[:MAX_ARTIFACTS]:
+                    await _send_artifact(meta["chat_id"], os.path.expanduser(str(art)))
                 _pending.pop(task_id, None)
 
             elif status == "failed":
@@ -466,6 +565,7 @@ async def _ensure_waha_config() -> None:
 # ── App lifespan ──────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    _load_sessions()  # restore multi-turn sessions from before a restart
     await _ensure_waha_config()
     asyncio.create_task(_poll_loop())
     yield
@@ -637,6 +737,7 @@ async def webhook(request: Request):
                                   "last_active": now, "turns": 1}
         else:
             _sessions.pop(chat_id, None)  # non-resumable: clear any stale session
+        _save_sessions()
         task_id = await _create_task("agent_run", payload, notes=f"agent/{backend}: {prompt[:60]}")
         if task_id:
             _pending[task_id] = {"chat_id": chat_id, "started_at": now}
@@ -644,10 +745,12 @@ async def webhook(request: Request):
             await _send_wa(chat_id, f"⏳ {backend}  [{task_id[:8]}]\n\"{prompt[:60]}\"{tail}")
         else:
             _sessions.pop(chat_id, None)  # rollback session if the queue is unreachable
+            _save_sessions()
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
     elif cmd == "end_session":
         had = _sessions.pop(chat_id, None)
+        _save_sessions()
         await _send_wa(chat_id, "✓ Session ended." if had else "✓ No active session.")
 
     elif cmd == "run":
@@ -766,6 +869,7 @@ async def webhook(request: Request):
         if sess:
             sess["last_active"] = now
             sess["turns"] += 1
+            _save_sessions()
             payload = {"agent": sess["agent"], "prompt": body,
                        "session_id": sess["session_id"], "resume": True,
                        "_target_machine": "mac-mini"}

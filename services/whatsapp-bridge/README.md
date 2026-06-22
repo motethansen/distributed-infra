@@ -66,15 +66,31 @@ end                                        ← closes the session
 `agy` and `codex` run **one-shot** (their CLIs don't expose a caller-supplied
 resume id here), so each message to them is independent.
 
+### Artifacts (files)
+
+If an agent writes a file and names its absolute (or `~/`) path in its reply, the
+bridge returns the file itself — images via `sendImage`, everything else via
+`sendFile`. The bridge and worker share the Mac Mini filesystem, so no upload step
+is needed. Returned types: images (png/jpg/jpeg/gif/webp), pdf, csv/xlsx/docx/pptx,
+zip, and audio/video (mp3/mp4/wav/m4a/mov). Source code is intentionally **not**
+auto-returned. Caps: `MAX_ARTIFACTS` (4) and `MAX_ARTIFACT_BYTES` (16 MB). A worker
+result may also set an explicit `artifacts: [paths]` list to override detection.
+
+### Persistence
+
+Multi-turn sessions are saved to `BRIDGE_STATE_FILE`
+(default `~/.whatsapp-bridge-sessions.json`) and reloaded on startup, so a bridge
+restart no longer drops an open conversation (expired sessions are dropped on load).
+In-flight task tracking (`_pending`) is still in-memory.
+
 ### Current limitations (next increments)
 
 - Multi-turn is **claude-only**; agy/codex are one-shot.
-- The bridge's chat→session map is **in-memory** — a bridge restart drops open
-  sessions (start a new `agent claude …`).
 - Long replies are **split across messages** (line-boundary chunks of
-  `MAX_MSG_CHARS`, default 3500; continuation parts marked `▸ (k/n)`). Failed-task
-  errors are capped to one message. Returning non-text artifacts (e.g. a generated
-  image as a file) is still a follow-up.
+  `MAX_MSG_CHARS`, default 3500; continuation parts marked `▸ (k/n)`); failed-task
+  errors are capped to one message.
+- Artifact detection relies on the agent naming an **absolute path** in its reply;
+  relative paths aren't resolved.
 
 ## Tests
 
