@@ -79,4 +79,24 @@ class OrchestratorApi {
     if (r.statusCode != 200) return const [];
     return jsonDecode(r.body) as List<dynamic>;
   }
+
+  /// Validate the URL + secret against the live orchestrator. Hits an
+  /// authenticated endpoint so it checks both reachability and the key.
+  Future<({bool ok, String message})> testConnection() async {
+    try {
+      final r = await http
+          .get(Uri.parse('$baseUrl/machines'), headers: _headers)
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200) {
+        final n = (jsonDecode(r.body) as List).length;
+        return (ok: true, message: 'Connected — $n machine(s) on the fleet.');
+      }
+      if (r.statusCode == 401) {
+        return (ok: false, message: 'Reached the orchestrator, but the secret key was rejected (401).');
+      }
+      return (ok: false, message: 'Orchestrator returned HTTP ${r.statusCode}.');
+    } catch (e) {
+      return (ok: false, message: 'Cannot reach $baseUrl — is the phone on Tailscale? ($e)');
+    }
+  }
 }
