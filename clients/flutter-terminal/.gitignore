@@ -1,0 +1,17 @@
+# Flutter/Dart — only lib/, pubspec.yaml, README are source. Platform scaffolding
+# is generated with `flutter create .`.
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+# generated platform dirs (run `flutter create .` to regenerate)
+/ios/
+/android/
+/macos/
+/linux/
+/windows/
+/web/
+*.iml
+.idea/
