@@ -69,14 +69,23 @@ resume id here), so each message to them is independent.
 ### Artifacts (files)
 
 If an agent writes a file and names its absolute (or `~/`) path in its reply, the
-bridge validates the file exists and replies with a `📎` note listing the path(s)
-and size(s). The file lives on the Mac Mini (bridge + worker share the filesystem)
-— retrieve it there.
+bridge validates it and replies with a `📎` note giving the path, size, and a
+**tap-to-download link** over Tailscale, e.g.:
 
-> **In-chat file delivery is disabled:** the free WAHA NOWEB engine returns HTTP 422
-> for `sendImage`/`sendFile` ("available only in the Plus version"). With WAHA Plus
-> (or a file-serving URL the phone can reach over Tailscale) the bridge could attach
-> the binary instead of just the path.
+```
+📎 File(s) created on mac-mini (tap to download over Tailscale):
+• /Users/.../wines.csv (1.2KB)
+  ⬇ http://100.76.214.54:3001/artifact/<token>
+```
+
+The link hits `GET /artifact/{token}` on this bridge. Tokens are unguessable and
+time-limited (`ARTIFACT_URL_TTL`, default 24 h) and only ever map to files the
+bridge explicitly registered — there is **no arbitrary-path access**. Your phone
+must be on the tailnet. Set `BRIDGE_PUBLIC_URL` if the Mac Mini's Tailscale address
+changes (e.g. `http://mac-mini.tail8bbe59.ts.net:3001`).
+
+> The free WAHA NOWEB engine can't *attach* binaries in chat (`sendImage`/`sendFile`
+> → HTTP 422, Plus-only), so we hand back a download link instead.
 
 Detected types: images (png/jpg/jpeg/gif/webp/svg), pdf, csv/xlsx/docx/pptx, zip,
 audio/video (mp3/mp4/wav/m4a/mov). Source code is intentionally excluded. Caps:

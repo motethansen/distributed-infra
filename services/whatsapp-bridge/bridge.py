@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import FileResponse, PlainTextResponse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 WAHA_URL         = os.getenv("WAHA_URL", "http://localhost:3000")
@@ -31,6 +32,12 @@ WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
 HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
+BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
+# Public base URL of THIS bridge, reachable from your phone over Tailscale — used
+# for artifact download links. Default = Mac Mini Tailscale IP; override via env
+# (e.g. BRIDGE_PUBLIC_URL=http://mac-mini.tail8bbe59.ts.net:3001) if the IP changes.
+BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", f"http://100.76.214.54:{BRIDGE_PORT}").rstrip("/")
+ARTIFACT_URL_TTL = int(os.getenv("ARTIFACT_URL_TTL", "86400"))  # download-link validity (seconds)
 
 # In-memory map: task_id → {chat_id, started_at}
 _pending: dict[str, dict] = {}
@@ -254,15 +261,32 @@ def _human_size(num: float) -> str:
     return f"{num:.1f}TB"
 
 
-def _artifacts_note(paths: list[str]) -> str:
-    """Text summary of created files (free WAHA can't attach binaries)."""
+# Token → file map for download links. Tokens are unguessable and time-limited, so
+# the /artifact endpoint can only serve files we explicitly registered (no path
+# traversal / arbitrary file read). In-memory: links reset on a bridge restart.
+_artifact_tokens: dict[str, dict] = {}
+
+
+def _register_artifact(path: str, now: float) -> str:
+    """Mint a one-file download token; evict expired tokens first."""
+    for t in [t for t, r in _artifact_tokens.items() if r["expires"] < now]:
+        _artifact_tokens.pop(t, None)
+    token = uuid.uuid4().hex
+    _artifact_tokens[token] = {"path": path, "expires": now + ARTIFACT_URL_TTL}
+    return token
+
+
+def _artifacts_note(paths: list[str], now: float) -> str:
+    """Summary of created files with tap-to-download Tailscale links."""
     lines = []
     for p in paths:
         try:
-            lines.append(f"• {p} ({_human_size(os.path.getsize(p))})")
+            size = f" ({_human_size(os.path.getsize(p))})"
         except OSError:
-            lines.append(f"• {p}")
-    return "📎 File(s) created on mac-mini:\n" + "\n".join(lines)
+            size = ""
+        url = f"{BRIDGE_PUBLIC_URL}/artifact/{_register_artifact(p, now)}"
+        lines.append(f"• {p}{size}\n  ⬇ {url}")
+    return "📎 File(s) created on mac-mini (tap to download over Tailscale):\n" + "\n".join(lines)
 
 
 async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | None:
@@ -491,7 +515,7 @@ async def _poll_loop() -> None:
                 artifacts = [os.path.expanduser(str(a)) for a in artifacts[:MAX_ARTIFACTS]]
                 artifacts = [a for a in artifacts if os.path.isfile(a)]
                 if artifacts:
-                    await _send_wa(meta["chat_id"], _artifacts_note(artifacts))
+                    await _send_wa(meta["chat_id"], _artifacts_note(artifacts, now))
                 _pending.pop(task_id, None)
 
             elif status == "failed":
@@ -902,6 +926,17 @@ async def webhook(request: Request):
                 f'❌ Unknown: "{body[:40]}"\nSend help for commands.')
 
     return Response(status_code=200)
+
+
+@app.get("/artifact/{token}")
+async def serve_artifact(token: str):
+    """Serve a registered artifact file (token-gated, time-limited). Reachable from
+    the phone over Tailscale. Only files explicitly registered are served."""
+    now = datetime.now(timezone.utc).timestamp()
+    rec = _artifact_tokens.get(token)
+    if not rec or rec["expires"] < now or not os.path.isfile(rec["path"]):
+        return PlainTextResponse("Not found or link expired.", status_code=404)
+    return FileResponse(rec["path"], filename=os.path.basename(rec["path"]))
 
 
 @app.get("/health")
