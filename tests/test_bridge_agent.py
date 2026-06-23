@@ -258,9 +258,40 @@ def test_human_size():
     assert bridge._human_size(5 * 1024 * 1024) == "5.0MB"
 
 
-def test_artifacts_note_lists_paths_and_sizes(tmp_path):
+def test_artifacts_note_lists_paths_sizes_and_urls(tmp_path):
     p = tmp_path / "out.pdf"
     p.write_bytes(b"x" * 2048)
-    note = bridge._artifacts_note([str(p)])
+    bridge._artifact_tokens.clear()
+    note = bridge._artifacts_note([str(p)], 1000.0)
     assert note.startswith("📎")          # prefixed so the bridge ignores its echo
     assert str(p) in note and "2.0KB" in note
+    assert "/artifact/" in note and bridge.BRIDGE_PUBLIC_URL in note
+    assert any(r["path"] == str(p) for r in bridge._artifact_tokens.values())
+
+
+def test_register_artifact_evicts_expired():
+    bridge._artifact_tokens.clear()
+    bridge._artifact_tokens["old"] = {"path": "/x", "expires": 10.0}
+    tok = bridge._register_artifact("/new", now=1000.0)
+    assert "old" not in bridge._artifact_tokens          # expired token evicted
+    assert bridge._artifact_tokens[tok]["path"] == "/new"
+    assert bridge._artifact_tokens[tok]["expires"] > 1000.0
+
+
+def test_serve_artifact_valid_and_invalid(tmp_path):
+    import asyncio
+    bridge._artifact_tokens.clear()
+    p = tmp_path / "f.pdf"
+    p.write_bytes(b"data")
+    tok = bridge._register_artifact(str(p), now=time.time())
+    assert asyncio.run(bridge.serve_artifact(tok)).status_code == 200
+    assert asyncio.run(bridge.serve_artifact("bogus")).status_code == 404
+
+
+def test_serve_artifact_expired_token(tmp_path):
+    import asyncio
+    bridge._artifact_tokens.clear()
+    p = tmp_path / "f.pdf"
+    p.write_bytes(b"data")
+    bridge._artifact_tokens["t"] = {"path": str(p), "expires": 1.0}  # long expired
+    assert asyncio.run(bridge.serve_artifact("t")).status_code == 404
