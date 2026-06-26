@@ -12,6 +12,72 @@ Living roadmap for new agents and capabilities. Each track lists the smallest va
 
 ---
 
+## Architecture reality (read this before planning autonomy)
+
+`distributed-infra` is a **distributed task queue with a worker fleet — not (yet) a multi-agent reasoning system.** The distinction drives every track below.
+
+**What the code is today:**
+
+- **Control:** centralized. One orchestrator (`orchestrator/main.py`, MacBook) owns a SQLite queue; workers poll `/tasks/claim` every 10s (`worker/poller.py`). `claim_next_task` (`db.py:101`) is pure SQL — priority DESC, created_at ASC, capability + `_target_machine` filtering. Routing is fully deterministic.
+- **"Agents":** thin subprocess wrappers (`agents/claude_agent.py` shells out to `claude -p`, plus codex/groq/agy/content/social). They execute; they do **not** decompose, delegate, or call each other. The human is the planner today (via `da` CLI / WhatsApp self-chat).
+- **Orchestration:** `worker/handlers/dispatch()` auto-discovers `handle_<type>(task)` by filename. A dispatcher, not an inter-agent hand-off mechanism.
+- **Memory:** durable task state in SQLite (good short-term/state persistence). Claude multi-turn via `--session-id`/`--resume`. No vector DB, no cross-agent message history — and that's deliberate (the ChromaDB layer was cut from `ai_agent_assistant` for being over-engineered).
+- **Failure handling:** per-call timeouts (1800s default), try/except → `fail` or `needs_human` escalation with a macOS notification (`main.py:165`). A real human-in-the-loop gate already exists.
+
+**Proposed multi-agent layers/patterns, mapped to reality:**
+
+| Proposed layer / pattern | Status in code | Gap |
+|---|---|---|
+| Control Layer (centralized/hier/decentral) | ✅ Centralized, clean | No hierarchy among agents — only human→queue→worker |
+| Agent Layer (specialized, scoped, tool-first) | ⚠️ Partial — capability handlers, not reasoning agents | Agents shell out to CLIs (prompt-based), not native structured tool-calling |
+| Orchestration Layer (comms, state, hand-offs) | ⚠️ Dispatch only | No agent→agent hand-off, no state machine across steps |
+| Memory Layer (vector + history) | ⚠️ State yes, semantic no | No long-term/vector; intentionally so |
+| Hierarchical Supervisor | ❌ Absent | The headline gap if you want autonomy |
+| Plan-and-Execute / Re-planner | ❌ Absent | Tasks are human-decomposed |
+| Debate/Adversarial | ❌ (seed: `code_review` handler) | Single-shot, no consensus loop |
+| Model Routing | ✅ Best-developed principle | `claude_agent` blocks Opus, defaults Sonnet, allows Haiku — generalize across providers (Track #5) |
+| Explicit (deterministic) Control Logic | ✅ Strong — SQL routing | Keep it; best asset |
+| Circuit Breakers | ⚠️ Timeouts only | No token/step budget for autonomous loops |
+| State Persistence | ✅ SQLite | No per-step plan state (no steps table) |
+| Self-Correction / Validator | ❌ | `code_review` is the seed of a validator-in-loop |
+| Observability | ❌ Weakest area | Logging only; no trace/graph |
+
+**Key insight:** You don't need LangGraph/LangSmith/a vector DB to get a Hierarchical Supervisor — the stack already has the primitive. A `claude_agent` runs with `--dangerously-skip-permissions` and can hit the queue API; give it the `da` CLI / `POST /tasks` as a tool and it becomes a manager that decomposes a request into sub-tasks and enqueues them for specialist workers. This reuses everything already built (capabilities, `_target_machine`, `needs_human`, model routing) instead of bolting on a parallel framework.
+
+**Warning:** `ai_agent_assistant` was torn down precisely because it ran n8n + ChromaDB + LangChain + Docker for a solo tool. The proposal's reflexes — vector databases, LangSmith, observability platforms, "state machine for every decision" — are that same failure mode. **Adopt these per concrete use case, not as a platform.**
+
+**Pattern → track fit:**
+
+- **#2 Stock alerts** already has risk gates + kill switch + paper-trading = circuit-breakers + HITL gates. Stay deterministic-Python; do **not** add an LLM orchestrator here.
+- **#3 Research + #4 Writing** are the genuine fit for **Plan-and-Execute** (planner → executor → validator). This is where reasoning autonomy pays off (Track #8).
+- **#1 Assistant integration** stays the thin subprocess adapter. No pattern needed.
+
+---
+
+## Agent catalog (at a glance)
+
+The wish-list is **not** N separate agents — it's **5 specialist domains + 1 concierge + 1 bridge**, each scoped tight (the "atomic objectives" principle). The clean rule across all of them: **search/read = autonomous; order/trade/send = `needs_human` gate** (`escalate_task`, `main.py:165` — no new machinery needed).
+
+| Domain | Task types | Data source (reality) | Mode | HITL | Track |
+|---|---|---|---|---|---|
+| Concierge / router | `find` | — (classifies + fans out) | reason | no | #9 |
+| Commerce search | `shop_search` (`source=amazon_sg\|lazada\|redmart`) | PA-API / Lazada API (Redmart = Lazada SG) | read | no | #10 |
+| Commerce action | `shop_cart`, `shop_order` | web-access agent (Playwright) | act | **yes** | #11 |
+| Weather | `weather` | Open-Meteo (free, no key) | read | no | #12 |
+| Finance | `market_brief`, `portfolio` | yfinance, IBKR, Saxo OpenAPI | read → act | trades = **yes** | #2, #13 |
+| Email | `email_lookup` | Gmail API | read | send = **yes** | #14 |
+| Calendar | `calendar` | Google Calendar API | read | edits = **yes** | #14 |
+| Social | `social_read`, `social_reply` | Mastodon API (clean); LinkedIn (web, fragile) | read → act | reply/post = **yes** | #16 |
+| Assistant bridge | `assistant_run` | `ai_agent_assistant` subprocess | read/write | no | #1 |
+
+**Cross-cutting conventions (bake in from the first agent):**
+- **Secrets:** every new source = its own OAuth/API key. Centralize per-machine in `.env` (never the repo), same as `SECRET_KEY`.
+- **SG-localization:** SGD pricing, GST awareness, `.sg` domains — put these in the normalized result schema now, not later.
+- **Privacy class (#5 routing):** email / finance / calendar / personal content is never routed to DeepSeek or any cloud-CN endpoint — **Claude only** for now (cloud), until a dedicated LLM machine exists (#7).
+- **Connectors ≠ fleet creds:** IBKR + Gmail are reachable as connectors in dev sessions (handy for prototyping #6/#13/#14 reads), but won't survive headless/cron fleet runs — the fleet versions still need their own API creds.
+
+---
+
 ## 1 — AI assistant integration  ·  `planned`
 
 Expose the `ai_agent_assistant` project as a worker capability on MacBook Pro so personal-productivity commands can be sent from WhatsApp self-chat.
@@ -24,11 +90,9 @@ Expose the `ai_agent_assistant` project as a worker capability on MacBook Pro so
 - WhatsApp bridge gets one new command `assist <subcommand> [args]`. v1 subcommands: `today`, `sync`, `status`, `plan [today|week]`.
 - Reply: assistant's stdout, truncated to ~1400 chars, sent to self-chat.
 
-**Out of scope for v1:** freeform chat (`assist chat <prompt>`) — depends on the assistant gaining a non-interactive single-prompt mode. Event-driven triggers (assistant pushing notifications), shared SQLite state, repo merge.
+**Out of scope for v1:** freeform chat (`assist chat <prompt>`) — depends on the assistant gaining a non-interactive single-prompt mode. Event-driven triggers, shared SQLite state, repo merge.
 
-**Out of scope for v1:** event-driven triggers (assistant pushing notifications), shared SQLite state, merging the two repos.
-
-**Unlocks:** Tracks #3 and #4 sit on top of the assistant's existing `notes_agent` and `knowledge_agent`.
+**Unlocks:** Tracks #3, #4, and the email/Obsidian wishes (#14) sit on top of the assistant's existing `notes_agent` / `knowledge_agent`.
 
 ---
 
@@ -43,60 +107,310 @@ Scheduled tasks that pull market data and surface signals via WhatsApp. **No ord
 - Sends a single WhatsApp message: ticker · last · 1d% · which signal fired.
 
 **Open decisions:**
-- Universe: personal watchlist file in `config/watchlist.yaml`, S&P sector ETFs, or both?
-- Data source: stick to yfinance (free, occasional flaky), or budget for Alpaca/polygon.io?
-- Worker placement: orchestrator-as-cron, dedicated worker on Mac Mini, or new "trading worker" machine?
-- Signal/strategy split: keep dumb-but-readable Python at v1 vs. pull in an LLM for "explain the move"?
+- Universe: personal watchlist in `config/watchlist.yaml`, S&P sector ETFs, or both?
+- Data source: yfinance (free, occasionally flaky) vs. Alpaca/polygon.io.
+- Worker placement: orchestrator-as-cron, dedicated Mac Mini worker, or a new "trading worker".
+- Signal split: dumb-but-readable Python at v1 vs. LLM "explain the move".
 
 **Risk gates (must satisfy before any execution-mode v2):** max daily loss limit, max position size, kill switch via WhatsApp command, paper-trading dry-run period.
 
-**Independent of** #1, #3, #4 — can run in parallel.
+**Independent of** #1, #3, #4. Extended into a real portfolio/brokerage track by #13.
 
 ---
 
 ## 3 — Academic research agent  ·  `idea`
 
-Pull recent papers on a topic, summarise abstracts, write a structured note into Obsidian. Extension of the assistant's `notes_agent` / `knowledge_agent` rather than a new top-level agent.
+Pull recent papers on a topic, summarise abstracts, write a structured note into Obsidian. Extension of the assistant's `notes_agent` / `knowledge_agent`.
 
 **Smallest slice (v1):**
 - New `ai_agent_assistant` subcommand: `python main.py --research <topic>`.
-- Queries arXiv + Semantic Scholar APIs (both free), takes top N=5 by recency × citations.
-- Writes a markdown note to `Obsidian/Resources/research/<slug>.md` with title, authors, abstract, link, BibTeX.
-- Surfaces via the same `assist research <topic>` bridge command added in #1.
+- Queries arXiv + Semantic Scholar APIs (both free), top N=5 by recency × citations.
+- Writes a markdown note to `Obsidian/Resources/research/<slug>.md` (title, authors, abstract, link, BibTeX).
+- Surfaces via the `assist research <topic>` bridge command from #1.
 
-**Open decisions:**
-- Research areas to wire by default: AI/ML (arXiv cs.LG, cs.AI), quant finance (arXiv q-fin), other?
-- Abstract-only vs. PDF download + summarisation in v1?
-- Citation graph (follow refs) — feature or out of scope?
+**Open decisions:** default areas (cs.LG/cs.AI, q-fin, …); abstract-only vs. PDF summarisation; citation-graph follow.
 
-**Depends on:** #1 (uses the same subprocess adapter).
+**Depends on:** #1 (same subprocess adapter). First real consumer of the Plan-and-Execute foundation (#8).
 
 ---
 
 ## 4 — Writing agents (Medium + Substack)  ·  `idea`
 
-From a topic + your recent activity, draft a long-form post matching your existing voice. **Stop at draft** in v1 — no auto-publish, no API integration.
+From a topic + recent activity, draft a long-form post matching your voice. **Stop at draft** in v1 — no auto-publish.
 
 **Smallest slice (v1):**
-- Bridge command `assist draft <topic>` → assistant subcommand → output written to `Obsidian/Inbox/drafts/<slug>.md`.
-- Inputs to the prompt: recent git commits across watched repos, recent research notes (from #3), the existing posts in `docs/*.md` as voice exemplars.
+- Bridge command `assist draft <topic>` → assistant subcommand → output to `Obsidian/Inbox/drafts/<slug>.md`.
+- Prompt inputs: recent git commits across watched repos, recent research notes (#3), existing posts in `docs/*.md` as voice exemplars.
 - Single draft per call, no platform-specific render yet.
 
-**Open decisions:**
-- One agent + two render passes (Medium vs. Substack formatting), or two agents?
-- Voice-tuning: zero-shot off existing posts, or pre-build a "style card" from `docs/medium-distributed-agent-stack.md` + `docs/substack-distributed-agent-stack.md`?
-- Eventual publishing: Medium API (drafts only) feasible; Substack is email/RSS so likely manual indefinitely.
+**Open decisions:** one agent + two render passes vs. two agents; zero-shot voice vs. pre-built "style card".
 
-**Depends on:** #1, ideally #3 for research-grounded posts.
+**Depends on:** #1, ideally #3. Second consumer of the Validator loop (#8) — draft checked against voice exemplars before `needs_human`.
+
+---
+
+## 5 — Model routing layer (multi-provider)  ·  `idea`
+
+Generalize the cost/privacy logic already in `claude_agent` into a single router across **all** providers, so every agent call picks the cheapest model that fits.
+
+**Smallest slice (v1):**
+- A `route(task_kind, sensitivity) -> (agent, model)` policy table, read from `config/routing.yaml`.
+- Default policy:
+  - `privacy` (email, finance, personal) → `claude` (cloud) — never DeepSeek/cloud-CN. *(Routes to local once #7 lands.)*
+  - `cheap-reasoning / bulk` → **deepseek** (#6).
+  - `coding / planning` → `claude` sonnet.
+  - `mechanical / classify / reformat` → `haiku` (cheap cloud) — local once #7 lands.
+- `runner.run_agent()` consults the policy when caller passes `task_kind` instead of a hard-coded agent.
+
+**Keeps the existing guardrail:** Opus stays blocked (`BLOCKED_MODEL_SUBSTRINGS`); per-call override still wins.
+
+**Unlocks:** #6 plugs in as a routing target; #7 (local) slots into the `privacy` + `mechanical` classes when a dedicated machine arrives. The concierge (#9) routes classification to Haiku cheaply until then.
+
+---
+
+## 5b — Workload placement & overflow (Mac Mini primary)  ·  `idea`
+
+Run agents **primarily on the Mac Mini**, spilling over to ThinkPad / MacBook Pro only when the Mini is busy or offline. Keep it deterministic and pull-based — no scheduler service, no message broker. This is the "orchestration feature" the fleet needs once most agent work lands on one preferred box.
+
+**Model — soft preference + time-based overflow, all in the existing claim SQL:**
+- New optional payload key `_preferred_machine` (default `mac-mini`, from `DEFAULT_PREFERRED_MACHINE`). Distinct from the existing **hard** pin `_target_machine`.
+- `claim_next_task(worker, caps)` (`db.py:101`) lets a worker claim a task when **any** holds:
+  - `_target_machine == worker` (existing hard pin), or
+  - no preference set, or
+  - `_preferred_machine == worker` — the primary claims **immediately**, or
+  - `_preferred_machine != worker` **and** the task has been pending ≥ `OVERFLOW_GRACE_SECS` (e.g. 20s) — the Mini didn't grab it → **overflow** to a free worker.
+- **Worker concurrency cap:** the poller (`worker/poller.py`) skips claiming when `len(active_tasks) >= MAX_CONCURRENT` (per-machine env). This is what makes the Mini "full" so tasks age past the grace window and overflow.
+
+**Why it works:** the Mini polls every 10s, so a 20s grace gives it ~2 cycles of first refusal. If it's saturated (cap reached) or offline (not polling), tasks naturally age out and a free worker claims them — **automatic failover, no health-check logic in v1.**
+
+**Config:**
+- `machines.yaml`: per-machine `max_concurrent` (Mini high; ThinkPad/MBP modest); global `default_preferred_machine: mac-mini`.
+- `.env`: `MAX_CONCURRENT`, `OVERFLOW_GRACE_SECS`.
+
+**Open decisions / v2:**
+- Liveness-aware overflow: skip the grace wait when the orchestrator already knows the Mini is offline (it tracks `_last_seen`, `main.py`) — faster failover.
+- Tiered overflow (ThinkPad before MBP) vs. open overflow to any capable worker (**v1 = open**).
+- Default preference per task-type: only `agent_run` / `assistant_run` prefer the Mini; builds stay pinned by capability anyway.
+
+**Depends on:** nothing — pure extension of `claim_next_task` + the poller. Foundational; lands in Sprint 1 alongside the router.
+
+---
+
+## 6 — DeepSeek agent (API)  ·  `idea`
+
+Add DeepSeek as a cheap reasoning/coding provider. **API, not CLI** — no dependable first-party CLI; the API is OpenAI-compatible, so the agent is a near-copy of `groq_agent.py`.
+
+**Smallest slice (v1):**
+- `agents/deepseek_agent.py`: OpenAI-compatible client, `base_url=https://api.deepseek.com`, `DEEPSEEK_API` in `.env`. Models `deepseek-chat` (V3) and `deepseek-reasoner` (R1).
+- Register `"deepseek"` in `runner.py` `AGENTS` + `--agent` choices; add to `machines.yaml` `agents:` on the workers.
+- Smoke-test via `runner.py --test`.
+
+**Privacy caveat (hard rule):** DeepSeek API is China-hosted. **Never** route email/finance/personal-data tasks (#6 finance content, #7, assistant data) to it — that's what #5's `privacy` class enforces. DeepSeek is for non-sensitive coding/reasoning/bulk summarization only.
+
+**Depends on:** ideally #5 to be useful (otherwise it's just another manual `--agent` choice).
+
+---
+
+## 7 — Local LLM (dedicated machine)  ·  `deferred`
+
+A zero-cost, private model for classification, routing, and sensitive-content summarization that must not leave the fleet.
+
+**Decision (2026-06-26):** the Mac Mini is confirmed **Intel** → Ollama would be CPU-only (small quantized models, modest throughput) — not worth the wiring. **Park this track.** Until a dedicated LLM box exists (Apple Silicon Mac or a GPU machine), **privacy-class work runs on Claude (cloud)** and mechanical/classify runs on Haiku. Revisit when the hardware lands.
+
+**When revisited — smallest slice (v1):**
+- Install Ollama on the dedicated machine; pick a model sized to its capability (e.g. `qwen2.5:14b`+ on Apple Silicon; `llama3.2:3b` only if stuck on CPU).
+- `agents/local_agent.py`: OpenAI-compatible wrapper, `base_url=http://<host>:11434/v1`.
+- Add capability `local_llm` to that machine in `machines.yaml`; register `"local"` in `runner.py`.
+- Flip the `privacy` + `mechanical` routing classes in #5 from Claude/Haiku to `local`.
+
+**Role (when live):** intent classification for the concierge (#9), summarizing email/finance/calendar text (#13/#14) without sending it to a cloud, mechanical reformatting. **Not** a Sonnet-class reasoner.
+
+**Depends on:** new hardware; #5 routing already leaves the slot open.
+
+---
+
+## 8 — Autonomy foundation: Plan-and-Execute + Supervisor  ·  `idea`
+
+The smallest real step from "task queue" to "reasoning system", grounded in existing primitives. Proven against #3 (research) and #4 (writing) — **not** built as a generic platform.
+
+**Smallest slice (v1):**
+1. **`plan` task type** + a `steps` array stored in the existing `payload` JSON column — Plan-and-Execute state with **no schema change**.
+2. **Supervisor agent:** a `claude_agent` run given the queue API (`da` / `POST /tasks`) as its one tool; it decomposes a request into `steps` and enqueues specialist sub-tasks.
+3. **Circuit breaker:** a step/token budget in `runner.py`, extending the existing timeout guard — terminate the loop on budget exhaustion or no-progress.
+4. **Validator loop:** promote `code_review` into a Validator that checks output against a threshold and forces a retry-with-error-context; `needs_human` is the existing escape hatch when it can't converge.
+
+**Explicitly out of scope:** vector/long-term memory and a tracing/observability platform. Defer both until a track actually hurts without them — `result` dict + SQLite is enough for three machines.
+
+**Depends on:** nothing structural; #5 makes it cheaper (route planner vs. executor vs. validator to different models).
+
+---
+
+## 9 — Concierge / router agent  ·  `idea`
+
+The front door for freeform requests ("find me X", "what's the weather", "any deals on Y") — the Hierarchical Supervisor applied to everyday lookups. Classifies intent, suggests/selects sources, fans out to specialists, synthesizes the reply.
+
+**Smallest slice (v1):**
+- New task type `find`. Bridge command `find <query>` from WhatsApp self-chat.
+- **Deterministic first:** keyword→category map (`book/grocery/electronics/finance/email/weather`) handles the common cases at zero LLM cost.
+- **LLM only for ambiguity** (route classification to **Haiku** cheaply via #5; swaps to local when #7 lands). Asks the user where to look when sources are ambiguous (wish #3 in the brief).
+- Enqueues the right specialist sub-task(s) (#10, #12, #13, #14) and returns a combined answer.
+
+**Depends on:** #5/#7 (cheap classify), and at least one specialist (#12 weather is the easiest first).
+
+---
+
+## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `idea`
+
+Search products + groceries across SG marketplaces; return a normalized result list (title, price SGD, url, rating, availability).
+
+**Reality check (decides the design):** there is **no clean consumer ordering API**.
+- **Search data is gettable:** Amazon **PA-API** (SG marketplace; affiliate-account-gated), **Lazada Open Platform** (covers **Redmart** too — Redmart is Lazada SG's grocery arm, so one integration serves two wishes). Both are seller/affiliate-scoped, return product data only.
+- **Ordering has no API** → see #11.
+
+**Smallest slice (v1):**
+- Task type `shop_search` with payload `{query, source}` where `source ∈ {amazon_sg, lazada, redmart}`.
+- Start with **one** source — **Redmart via Lazada API** (real API, recurring grocery use) — return a normalized schema with SGD pricing + GST awareness.
+- Surfaced through the concierge (#9) or directly via `shop <source> <query>`.
+
+**Open decisions:** PA-API affiliate eligibility; result ranking; caching to respect rate limits.
+
+**Depends on:** none to start; best behind #9.
+
+---
+
+## 11 — Commerce action: cart + order (web-access, HITL)  ·  `idea`  ·  v2
+
+Last-mile ordering. **Autonomous cart, human checkout** — the line for a personal-money agent.
+
+**Reality:** ordering only works via **authenticated web automation** (Playwright) on your own logged-in account. Fragile (DOM changes, captcha, OTP/2FA) and carries account-risk if flagged as a bot.
+
+**Smallest slice (v1):**
+- New `web_shop` capability on **one** machine with a persistent, logged-in browser profile.
+- Task types `shop_cart` (build the cart — autonomous) and `shop_order` (**stops before the purchase-confirm click** → `needs_human` for the final approval).
+- The `needs_human` gate (`main.py:165`) + macOS/WhatsApp notification is the approval step.
+
+**Depends on:** #10 (search → choose item), the `needs_human` gate.
+
+---
+
+## 12 — Weather agent  ·  `idea`
+
+Today's weather at your location. The easiest end-to-end proof of the new-agent loop (task type → handler → state → WhatsApp reply).
+
+**Smallest slice (v1):**
+- Task type `weather`. Data source **Open-Meteo** (free, no API key).
+- Location from a `set-location <place>` command stored in `config/location.yaml`; falls back to last-known ("this is your last location").
+- Reply: today's high/low, conditions, rain %.
+
+**Depends on:** none. **Recommended first build** (Sprint 0).
+
+---
+
+## 13 — Investment / portfolio agents  ·  `idea`
+
+Read-only portfolio + market view across **Saxo, IBKR, Yahoo Finance**. Extends #2 from watchlist-alerts to real accounts.
+
+**Smallest slice (v1):**
+- Task type `portfolio` — read positions/balances. **IBKR** has an API (already reachable as a connector in dev sessions); **Saxo** has OpenAPI (OAuth); **yfinance** for quotes/marks.
+- Reply: positions · market value · day P/L, one WhatsApp message.
+
+**Out of scope for v1:** any order placement. Trades are v2 and inherit #2's risk gates + the `needs_human` checkout pattern from #11.
+
+**Privacy:** finance content is `privacy`-class in #5 — never routed to DeepSeek/cloud-CN; summarize via Claude (cloud; local once #7 lands).
+
+**Depends on:** #2 (shares `market_brief`), #5 for safe routing.
+
+---
+
+## 14 — Personal data: email + calendar + Obsidian/planning  ·  `idea`
+
+Read/search/summarize email and calendar; reach Obsidian tasks & planning (the existing assistant).
+
+**Smallest slice (v1):**
+- Task type `email_lookup` — search + summarize inbox via Gmail API. **Read-only**; sending is a v2 `needs_human` action.
+- Task type `calendar` — "what's my day" / "next free 2h slot" via Google Calendar API. **Read-only**; creating/moving events is a v2 `needs_human` action.
+- Obsidian/tasks/planning go through the **#1 assistant bridge** (`assist …`) — no new integration.
+
+**Privacy:** `privacy`-class routing (#5) — summarize via Claude (cloud; local once #7 lands), never DeepSeek.
+
+**Depends on:** #1 (Obsidian side); Gmail + Google Calendar OAuth creds per machine.
+
+---
+
+## 16 — Social presence: Mastodon + LinkedIn (read + reply)  ·  `idea`
+
+Read your social feeds, and — future version — when you share a post link, fetch that post and draft (or, behind HITL, submit) your reply. Reuses #4's voice exemplars for the drafting, and the same **draft = autonomous / post = `needs_human`** line as commerce and email.
+
+**Reality check (decides the design — the two platforms are opposites):**
+- **Mastodon: clean, first-class API.** Full documented REST API with OAuth / personal access tokens — read home timeline, read your own posts, resolve a post URL to its content (`/api/v2/search?resolve=true`), and post a reply (`POST /api/v1/statuses` with `in_reply_to_id`). ToS-compliant, low account-risk. **Build this side first.**
+- **LinkedIn: effectively no usable API.** The official APIs (Marketing / Community Management) are partner-gated and don't expose your personal feed or arbitrary post replies. Reading your feed or posting a reply therefore needs **authenticated web automation** (Playwright on your logged-in profile) — fragile (DOM churn, feed virtualization), against LinkedIn's ToS, and carries real account-restriction risk. Treat as **v2, opt-in, and risk-flagged** (mirrors the #11 web-shop posture). Default the LinkedIn reply path to **draft-only** (you paste it) to avoid automated posting entirely.
+
+**Smallest slice (v1 — Mastodon, read + draft):**
+- Task type `social_read` — fetch home timeline / your recent posts via the Mastodon API; return a normalized list (author, text, url, time, reply-count). `MASTODON_INSTANCE` + `MASTODON_TOKEN` in `.env`.
+- Task type `social_reply` with payload `{url, intent?}` — resolve the post URL → fetch its content → **draft** a reply in your voice (style card from #4). v1 **returns the draft only** ("help me formulate a reply"); no posting.
+- Bridge commands: `social feed` and `reply <url> [hint]` from WhatsApp self-chat → draft comes back to self-chat for copy-paste.
+
+**v2 (submit + LinkedIn):**
+- Mastodon: `social_reply` gains a `post=true` mode → `POST` the reply behind the `needs_human` gate (`main.py:165`) — approve in WhatsApp, then it submits.
+- LinkedIn: add a `social_web` capability on the one machine with a persistent logged-in browser profile (same box as #11's `web_shop`). `social_read`/`social_reply` for `source=linkedin` route through Playwright; **posting always behind `needs_human`**, draft-only by default.
+- **LinkedIn read scope (what you asked for):** two read modes, both via the logged-in web session (no API for either):
+  - `social_read source=linkedin mode=relevant` → **latest posts relevant to me**: scrape the top of your home feed, return a normalized top-N (author, text, url, time, reaction/comment counts). "Relevant" ranking is best-effort — LinkedIn's own feed ordering first, optionally re-ranked by keyword/topic affinity (your watched topics) so it surfaces what matters to you rather than raw chronology.
+  - `social_read source=linkedin mode=mentions` → **activities where I'm part of or mentioned in**: scrape the Notifications + your own Activity pages for items where you're tagged, mentioned, commented-on, or replied-to. Return author · what-happened · the post url · time, so you can jump straight to `reply <url>`. This is the natural feeder into the reply flow.
+  - Both are read-only scraping → autonomous (no `needs_human`); only the reply/post step gates. Caveat: scraping volume/cadence is itself an account-risk signal — keep it low-frequency (on-demand or a once-or-twice-daily digest), not continuous polling.
+
+**Privacy / routing:** feed content and your account creds are sensitive — keep account-touching calls and reply drafting on **Claude (cloud; local once #7 lands)**, never DeepSeek/cloud-CN (consistent with #5's `privacy` class). Reply drafting can use Sonnet (voice quality matters); classification/triage of the feed can use Haiku.
+
+**Open decisions:** which Mastodon instance is home; whether `social_read` is pull-on-demand vs. a periodic digest (feeds into #15 morning brief); LinkedIn web automation is a genuine ToS/account-risk call to make explicitly before building the v2 path.
+
+**Depends on:** #4 (voice exemplars / style card) for good drafts; #5 for routing; the `needs_human` gate for posting; #11's logged-in-browser machine pattern reused for the LinkedIn path.
+
+---
+
+## 15 — Composite features  ·  `idea`
+
+Compositions of the agents above — high value-per-effort once the parts exist.
+
+- **Morning brief** (cron, 7am → WhatsApp): weather (#12) + `market_brief` (#2) + calendar + top-3 emails (#14) in one message.
+- **Price-watch / deal alerts:** save a product (#10) → cron `price_watch` → WhatsApp when below threshold.
+- **Grocery list → cart:** read a recurring list from Obsidian (#14) → build Redmart cart (#11) → HITL checkout.
+- **Receipt/order email → expense note** in Obsidian (#14 + #1).
+
+**Depends on:** the specific parts each composes.
+
+---
+
+## Sprint plan (summary)
+
+Time-boxed groupings of the tracks above, in dependency + value order. Each sprint ships something usable.
+
+| Sprint | Theme | Tracks | Deliverable |
+|---|---|---|---|
+| **0** | Quick win + cheap provider | #12 Weather · #6 DeepSeek | One new agent working end-to-end via WhatsApp; DeepSeek selectable in `runner` |
+| **1** | Routing + placement | #5 Router · #5b Placement/overflow  ·  *#7 deferred* | Cheapest-fit model per call; agents prefer Mac Mini, overflow to ThinkPad/MBP when it's busy or down |
+| **2** | Personal data (read) | #1 Assistant integration · #14 Email/Calendar/Obsidian read | `assist …` + `email_lookup` + `calendar` from self-chat; Obsidian/tasks reachable |
+| **3** | Front door + commerce search | #9 Concierge · #10 Commerce search (Redmart first) | `find <query>` classifies + searches one marketplace |
+| **4** | Reasoning autonomy | #8 Plan-and-Execute + Supervisor + Validator, proven on #3/#4 | Supervisor decomposes a research/writing request into queued steps with a validator loop |
+| **5** | Finance (read) | #2 Market alerts · #13 Portfolio read (IBKR/Saxo/yfinance) | Market brief + portfolio snapshot via WhatsApp |
+| **6** | Actions behind HITL + composites | #11 Web-shop cart/order · #16 Social (Mastodon read+reply; LinkedIn web v2) · #15 Morning brief, price-watch, grocery→cart · finance trades (v2) | Autonomous cart / human checkout; Mastodon feed + reply drafts; morning brief; deal alerts |
+
+**Notes**
+- Sprint 0 is deliberately tiny — it proves the full loop (and de-risks DeepSeek) before anything ambitious.
+- Sprints 0–1 are foundational; 2–3 deliver daily-use value; 4 adds reasoning autonomy; 5–6 add money-touching actions, all behind `needs_human`.
+- Defer vector memory + observability platform until a sprint demonstrably hurts without them.
 
 ---
 
 ## Sequencing summary
 
 ```
-#1  AI assistant integration   ──┬──→  #3  Research agent
-                                 └──→  #4  Writing agents
-#2  Stock alerts                 ─── independent track ───
+Sprint 0  #12 Weather ─┐                              ┌─→ Sprint 3  #9 Concierge ─→ #10 Commerce search
+          #6 DeepSeek ─┴─→ Sprint 1  #5 Router + #5b ─┤
+                          (#7 local deferred)          └─→ Sprint 2  #1 Assistant ─→ #14 Email/Calendar/Obsidian
+                          #5b = Mac Mini primary, overflow to ThinkPad/MBP
+
+Sprint 4  #8 Autonomy (Plan-Execute + Supervisor + Validator)  ── on top of #3 Research, #4 Writing
+Sprint 5  #2 Alerts ─→ #13 Portfolio (read)
+Sprint 6  #11 Web-shop (HITL) · #16 Social (Mastodon first, LinkedIn web v2) · #15 Composites · finance trades (v2)
 ```
 
-**Recommendation:** ship #1 first; pick up #2 in parallel only if there's appetite (it's a sizable independent track). #3 → #4 follow naturally once #1 lands.
+**Recommendation:** ship Sprint 0 first (weather + DeepSeek — both small, independent, prove the loop). Then the model-routing layer (Sprint 1) so DeepSeek actually earns its place — the local model is parked until you have a dedicated (non-Intel) machine, so privacy-class work stays on Claude meanwhile. Everything else sits on those two foundations.
