@@ -3,10 +3,11 @@
 Today's weather for a location, via Open-Meteo (free, no API key).
 
 payload:
-  location: str      — optional place name; geocode it, answer for it, AND persist
-                       as the new last-known location.
+  location: str      — optional place name; geocode + answer for it ONLY (a one-off
+                       peek, e.g. "weather in Tokyo"). Does NOT change last-known.
   set_location: str  — optional place name; geocode + persist + confirm only
-                       (no forecast). Used by the `set-location` bridge command.
+                       (no forecast). Used by the `set-location` bridge command —
+                       the only thing that changes the saved last-known location.
   (none)             — use the last-known location from config/location.yaml.
 
 Returns {"response": <text for WhatsApp>, "data": {...}} on success, or a
@@ -150,7 +151,9 @@ async def handle_weather(task: Task) -> dict:
         return {"response": f"📍 Location set to {where}.\nSend `weather` for today's forecast.",
                 "data": loc}
 
-    # one-off place: geocode + persist as new last-known, then forecast.
+    # one-off place ("weather in Tokyo"): geocode + forecast only.
+    # Do NOT persist — this is a peek at another location; the saved last-known
+    # location is only changed via `set-location`.
     if place:
         try:
             loc = await _geocode(place)
@@ -159,7 +162,6 @@ async def handle_weather(task: Task) -> dict:
         if not loc:
             return {"needs_human": True,
                     "notes": f"Couldn't find a place called '{place}'. Try a city name."}
-        _save_location(loc)
     else:
         # no place given: use last-known from config/location.yaml.
         loc = _load_location()
