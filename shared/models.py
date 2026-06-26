@@ -35,6 +35,8 @@ class TaskType(str, Enum):
     write_article = "write_article"
     write_post = "write_post"
     code_review = "code_review"
+    # Info / lookups
+    weather = "weather"
     # Human review
     human_action = "human_action"
     custom = "custom"

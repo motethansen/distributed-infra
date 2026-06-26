@@ -1,0 +1,8 @@
+# Last-known location for the weather agent (#12). Copy to location.yaml.
+# Updated automatically when you send `set-location <place>` or `weather <place>`.
+name: "Singapore"
+latitude: 1.3521
+longitude: 103.8198
+timezone: "Asia/Singapore"
+country: "Singapore"
+updated_at: ""

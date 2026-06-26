@@ -471,6 +471,16 @@ def _parse(text: str) -> tuple[str, dict]:
             return "run", {"agent": parts[0].lower(), "prompt": parts[1]}
         return "run", {"agent": "claude", "prompt": body}
 
+    # set-location <place>  →  persist last-known location (weather task, no forecast)
+    m = re.match(r"^/?set[-\s]?location\s+(.+)", t, re.IGNORECASE)
+    if m:
+        return "set_location", {"location": m.group(1).strip()}
+
+    # weather [place]  →  weather task on mac-mini; place is optional (last-known)
+    m = re.match(r"^/?weather(?:\s+(.+))?$", t, re.IGNORECASE)
+    if m:
+        return "weather", {"location": (m.group(1) or "").strip()}
+
     # assist <subcommand> [args]  →  assistant_run on macbook-pro
     if re.match(r"^/?assist(\s+|$)", t, re.IGNORECASE):
         body  = re.sub(r"^/?assist\s*", "", t, flags=re.IGNORECASE).strip()
@@ -788,6 +798,31 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "weather":
+        place   = kwargs.get("location", "")
+        payload = {"_target_machine": "mac-mini"}
+        if place:
+            payload["location"] = place
+        notes   = f"weather{(' ' + place) if place else ''}"
+        task_id = await _create_task("weather", payload, notes=notes[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Weather{(' for ' + place) if place else ''}…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
+    elif cmd == "set_location":
+        place   = kwargs["location"]
+        payload = {"set_location": place, "_target_machine": "mac-mini"}
+        task_id = await _create_task("weather", payload, notes=f"set-location {place}"[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Setting location to {place}…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "assist":
         sub  = kwargs["subcommand"]
         args = kwargs["args"]
@@ -834,6 +869,8 @@ async def webhook(request: Request):
             "                npm_build, test_run, lint, assistant_run\n"
             "    agents: claude, agy, codex, groq, content, social\n"
             "  assist <today|sync|status|plan [today|week]>  — AI assistant\n"
+            "  weather [place]  — today's forecast (no place = last location)\n"
+            "  set-location <place>  — remember a place for future weather lookups\n"
             "  queue / status / review / failures\n"
             "  help <question>  — ask about commands\n\n"
             "Agent tasks: include everything in the prompt — the agent cannot ask "
@@ -884,6 +921,10 @@ async def webhook(request: Request):
             "\n"
             "🗓 ASSISTANT (on MacBook)\n"
             "  assist <today|sync|status|plan [today|week]>\n"
+            "\n"
+            "🌤 INFO\n"
+            "  weather [place]          — today's forecast (no place = last location)\n"
+            "  set-location <place>     — remember a place for future `weather`\n"
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"
