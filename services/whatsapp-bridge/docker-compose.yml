@@ -13,6 +13,11 @@ services:
       WHATSAPP_HOOK_URL: "http://host.docker.internal:3001/webhook"
       WHATSAPP_HOOK_EVENTS: "message.any"
       WHATSAPP_DEFAULT_ENGINE: "NOWEB"
+      # Auto-start the persisted `default` session on container boot. Without this,
+      # WAHA leaves sessions STOPPED after a restart (restart: unless-stopped only
+      # restarts the container, not the WhatsApp session) and the bridge goes dark.
+      # The noweb credentials in ./waha-sessions let it reconnect with no new QR.
+      WAHA_AUTO_START_SESSIONS: "default"
       WAHA_DASHBOARD_USERNAME: "michaelhansen"
       WAHA_DASHBOARD_PASSWORD: "L9gnd8v3!"
       WAHA_API_KEY: "9e449d34a07f439d92c2eb3cdf94748f"
