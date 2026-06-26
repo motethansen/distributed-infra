@@ -480,8 +480,9 @@ def _parse(text: str) -> tuple[str, dict]:
     if m:
         return "set_location", {"location": m.group(1).strip()}
 
-    # weather [place]  →  weather task on mac-mini; place is optional (last-known)
-    m = re.match(r"^/?weather(?:\s+(.+))?$", t, re.IGNORECASE)
+    # weather [in] [place]  →  weather task on mac-mini; place optional (last-known).
+    # Accepts "weather", "weather Tokyo", and the natural "weather in Tokyo".
+    m = re.match(r"^/?weather(?:\s+(?:in\s+)?(.+))?$", t, re.IGNORECASE)
     if m:
         return "weather", {"location": (m.group(1) or "").strip()}
 
@@ -957,7 +958,8 @@ async def webhook(request: Request):
             "  assist <today|sync|status|plan [today|week]>\n"
             "\n"
             "🌤 INFO\n"
-            "  weather [place]          — today's forecast (no place = last location)\n"
+            "  weather [in] [place]     — today's forecast (e.g. `weather in Tokyo`;\n"
+            "                             no place = last location)\n"
             "  set-location <place>     — remember a place for future `weather`\n"
             "\n"
             "🖥 FLEET\n"
