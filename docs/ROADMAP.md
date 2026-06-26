@@ -366,6 +366,63 @@ Read your social feeds, and — future version — when you share a post link, f
 
 ---
 
+## 17 — Multi-user / family access  ·  `idea`
+
+Let approved **family members have their own accounts** and use the assistant over WhatsApp — each with their own state (location, sessions) and a **restricted, safe command set**. This replaces the bridge's current single-user lock, so it has to be done security-first.
+
+**Reality check (this is a security-model change, not just a feature):** today the bridge hard-scopes to the owner's self-chat — `webhook()` drops every message where `_digits(chat_id) != _self_number` (`bridge.py`). That lock is *why* it's safe to expose arbitrary-exec commands (`agent`, `run`, `assign`, `code review`, `assist`) — they can only ever come from you. Opening the door to other people means that lock is gone, so the **permission model below is mandatory, not optional**.
+
+**Two decisions that shape everything:**
+1. **Whose WhatsApp number is the assistant?** The Waha session is currently linked to *your personal* number — so family "contacting the assistant" would mean the bot auto-replying inside your real chats with them. **Strongly recommend a dedicated assistant WhatsApp number** (separate SIM/account linked to Waha) so the bot has its own identity and family DM *it*, not you. Keeps personal chats clean and makes per-sender routing unambiguous. (Owner keeps the existing self-chat path, or moves to the dedicated number too.)
+2. **Permission tiers.** Roles, not a flat allowlist:
+   - **owner** (you) → everything, including the arbitrary-exec/private-data commands.
+   - **family** → a **safe, curated subset only**: `weather` / `weather in <place>`, `find` (concierge, #9), commerce **search** (#10), maybe `write post`. **Hard-denied:** `agent` / `run` / `assign` / `code review` (arbitrary code on the fleet via `--dangerously-skip-permissions`), `assist` + email/finance/calendar/Obsidian (#14/#13 — *your* private data and connectors). Default-deny: a command is family-usable only if explicitly on the safe list.
+
+**Smallest slice (v1):**
+- **Roster:** `config/family.yaml` (gitignored — it's PII / phone numbers) mapping `number → {name, role}`. Bridge loads it; `webhook()` accepts a message when the sender is the owner **or** an allowlisted family number, and tags the request with that role.
+- **Command gate:** a `role → allowed-commands` table in the bridge; `_parse` result is checked against the sender's role before dispatch. Non-allowed → a polite "not available" reply. **This is the core of the track** — everything else is plumbing.
+- **Per-user state:** key `location.yaml` (and multi-turn sessions) by sender number instead of a single global, so each member has their own saved location / context. (Weather's last-known becomes per-user.)
+- **Enrollment:** owner-only command `family add <number> <name> [role]` / `family remove <number>` / `family list` — writes `family.yaml`. New members default to the `family` role.
+
+**Privacy / isolation:** family members never reach the owner's private connectors or data; each member's data (location, history) is scoped to them. Audit line per family-initiated task (who asked what) in `notes`. DeepSeek/cloud-CN routing rules (#5) still apply per request.
+
+**Open decisions:** dedicated number vs. owner number (decide first — it changes the enrollment + scoping design); whether family members get *any* write/action commands in v1 or read-only to start; rate-limiting per member; whether to support group chats or 1:1 only (1:1 first).
+
+**Depends on:** nothing structural to start (it's a bridge-layer change), but it gates how every later capability is exposed — best landed **before** money-touching or private-data tracks are broadly used. Reuses `needs_human` if any family action ever needs owner approval.
+
+---
+
+## 18 — Autonomous project lifecycle (intake → plan → scaffold → execute)  ·  `idea`
+
+One or more agents that take a project from idea to delivery: you *start* a new project or ask to *review* an existing one, the agent proposes tasks and scaffolds it on a chosen machine, you discuss and refine the plan together, and on your go-ahead the fleet **autonomously executes** it — coding, writing, publishing, shopping — with money/publish steps gated. This is the headline "more autonomy" ask.
+
+**Reality check (this is the *product* on top of #8's *engine* — reuse, don't rebuild):** the primitives already exist. The Supervisor (#8) is a `claude_agent` given the queue API as its one tool; it decomposes a request into `steps` and enqueues specialist sub-tasks. Workers already run `claude`/`codex` with a `cwd` and `--dangerously-skip-permissions`, so they can create folders, write code, run tests, and commit on whichever machine holds the repo. Multi-turn claude sessions already power the back-and-forth "discuss the plan" phase. `needs_human` already gates money/publish. **What's genuinely new here is the orchestration + guardrails around those, not a new framework.**
+
+**The lifecycle (each phase maps to an existing primitive):**
+1. **Intake / review** — `project start <name> …` or `project review <path|name>`. For *review*, an `agent_run` with `cwd=<repo>` on the machine that holds it (claude reads the code, summarizes state, proposes a task list). For *new*, the agent proposes a structure. Output: a draft plan, not action yet.
+2. **Plan (collaborative)** — a multi-turn claude session (#1 pattern): you refine scope, the agent updates the plan. The plan is persisted as `steps` in the task payload (#8) **and** as a human-readable `PLAN.md` in the project (or an Obsidian note via #1) so it's reviewable/editable.
+3. **Approve (HITL gate)** — execution does **not** begin until you explicitly approve the plan (`project go <name>`). This is the single most important gate: it's the line between "drafting" and "the fleet starts doing things."
+4. **Scaffold** — on approval, a worker task creates the project folder + skeleton (git init, base files) on the chosen machine (**mac-mini or thinkpad**, picked via #5b placement / `_preferred_machine`; the repo must live on that worker).
+5. **Execute (autonomous)** — the Supervisor decomposes the agreed plan into sub-tasks and enqueues them to specialists: **coding** → `claude`/`codex` with `cwd` on the project's machine; **writing** → content/social agents (#4); **publishing** → #16 (LinkedIn) / drafts for Substack/Medium; **shopping** → #11. A **Validator** (#8) checks each output and retries-with-context; `needs_human` is the escape hatch when it can't converge.
+6. **Iterate / report** — progress back to WhatsApp; at decision points or gate hits it asks you (`needs_human`), and you can amend the plan mid-flight (back to phase 2).
+
+**Autonomy levels (you set per project — this is how "autonomous" it actually is):**
+- **L1 plan-only** — proposes + maintains the plan, executes nothing.
+- **L2 develop-but-gate** *(recommended default)* — writes code/drafts and runs tests autonomously, but **stops at**: `git push`, publish, deploy, and any spend → `needs_human`.
+- **L3 full-auto within budget** — executes the whole plan under a step/token **circuit breaker** (#8), still hard-gating money/publish (those are never silently autonomous).
+
+**Hard gates (always, regardless of level):** purchases (#11 — cart autonomous, **purchase-confirm = `needs_human`**, "on my command" honored literally); publishing to LinkedIn/Substack/Medium (#16/#4 — note Substack/Medium have **no clean auto-publish API** → realistically draft → `needs_human` to post); anything spending money or acting as you externally.
+
+**New pieces to build (small):** a `project` task type + WhatsApp verbs (`project start|review|plan|go|status|stop <name>`); a gitignored **project registry** (`config/projects.yaml`: name → machine, path, autonomy level, status, plan ref) — lightweight, not a new DB; a scaffold handler. Everything else is #8 + #5b + existing agents.
+
+**Circuit breakers (must-have before L3):** per-project step/token budget and a no-progress detector (extend #8's), plus the `needs_human` stop and a `project stop <name>` kill switch. Autonomy without a brake is the main risk here.
+
+**Open decisions:** default autonomy level (recommend L2); is `git push` itself a gate or autonomous within a project's own branch; how plans are stored (PLAN.md in-repo vs Obsidian vs both); one generalist project-agent vs. a Supervisor that routes to per-domain specialists (coding/writing/commerce); how tightly to bind a project to one machine vs. allow cross-machine steps.
+
+**Depends on:** #8 (the engine — Supervisor/Plan-Execute/Validator/circuit-breaker), #5b (which machine runs it), #1 (assistant/Obsidian for plans), #4 (writing), #11 (shopping HITL), #16 (publishing HITL). Lands **after** #8; it's the capstone that makes the rest feel like one assistant.
+
+---
+
 ## 15 — Composite features  ·  `idea`
 
 Compositions of the agents above — high value-per-effort once the parts exist.
@@ -392,10 +449,14 @@ Time-boxed groupings of the tracks above, in dependency + value order. Each spri
 | **4** | Reasoning autonomy | #8 Plan-and-Execute + Supervisor + Validator, proven on #3/#4 | Supervisor decomposes a research/writing request into queued steps with a validator loop |
 | **5** | Finance (read) | #2 Market alerts · #13 Portfolio read (IBKR/Saxo/yfinance) | Market brief + portfolio snapshot via WhatsApp |
 | **6** | Actions behind HITL + composites | #11 Web-shop cart/order · #16 Social (Mastodon read+reply; LinkedIn web v2) · #15 Morning brief, price-watch, grocery→cart · finance trades (v2) | Autonomous cart / human checkout; Mastodon feed + reply drafts; morning brief; deal alerts |
+| **7** | Multi-user / family access | #17 Family roster + role-based command gate (dedicated assistant number) | Approved family members use the safe command subset (weather/find/search) over WhatsApp, each with their own state — owner-only commands stay owner-only |
+| **8** | Autonomous project delivery | #18 Project lifecycle (intake → plan → approve → scaffold → execute) on the #8 engine | `project start/review <name>` → agent proposes + co-develops a plan → on `project go`, the fleet builds/executes it on mac-mini or thinkpad at autonomy level L2, money/publish gated |
 
 **Notes**
 - Sprint 0 is deliberately tiny — it proves the full loop (and de-risks DeepSeek) before anything ambitious.
 - Sprints 0–1 are foundational; 2–3 deliver daily-use value; 4 adds reasoning autonomy; 5–6 add money-touching actions, all behind `needs_human`.
+- **#17 (family) can move earlier** if family access is wanted sooner — it's a self-contained bridge-layer change. But it must land **before** any family member is given access, since it replaces the single-user security lock; until then the bridge stays owner-only.
+- **#18 (autonomous projects) is the capstone** and hard-requires #8's engine (Supervisor/Plan-Execute/Validator/circuit-breaker) — don't attempt it before Sprint 4 lands. It then *composes* the writing (#4), shopping (#11), and publishing (#16) tracks into one project-delivery flow, so those are worth having first too. Start it at autonomy **L2** (develop-but-gate); never ship **L3** without the step/token circuit breaker and `project stop` kill switch.
 - Defer vector memory + observability platform until a sprint demonstrably hurts without them.
 
 ---
