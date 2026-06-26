@@ -31,6 +31,7 @@ SECRET_KEY       = os.getenv("INFRA_SECRET_KEY", "")
 WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
+WAHA_CHECK_INTERVAL = int(os.getenv("WAHA_CHECK_INTERVAL", "60"))  # re-ensure session is up
 HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
 BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
 # Public base URL of THIS bridge, reachable from your phone over Tailscale — used
@@ -41,6 +42,9 @@ ARTIFACT_URL_TTL = int(os.getenv("ARTIFACT_URL_TTL", "86400"))  # download-link 
 
 # In-memory map: task_id → {chat_id, started_at}
 _pending: dict[str, dict] = {}
+
+# Last time the poll loop re-ensured the Waha session (throttle).
+_last_waha_check: float = 0.0
 
 # The numeric WhatsApp ID of the user (just the digits, no @suffix). Loaded
 # from Waha at startup via _ensure_waha_config — anything outside this self-chat
@@ -494,9 +498,21 @@ def _parse(text: str) -> tuple[str, dict]:
 
 # ── Result poller ─────────────────────────────────────────────────────────────
 async def _poll_loop() -> None:
+    global _last_waha_check
     while True:
         await asyncio.sleep(POLL_INTERVAL)
         now = datetime.now(timezone.utc).timestamp()
+
+        # Watchdog: re-ensure the Waha session is up. WAHA CORE won't auto-start it,
+        # and a Waha-only restart (or a reboot race where the bridge starts first)
+        # leaves the session STOPPED with the bridge unaware. _ensure_waha_config is
+        # idempotent and starts the session when it finds it down. Throttled.
+        if now - _last_waha_check >= WAHA_CHECK_INTERVAL:
+            _last_waha_check = now
+            try:
+                await _ensure_waha_config()
+            except Exception as e:  # never let the watchdog kill the poll loop
+                print(f"[waha-config] watchdog error: {e}", flush=True)
 
         for task_id, meta in list(_pending.items()):
             if now - meta["started_at"] > TASK_TIMEOUT:
