@@ -571,6 +571,24 @@ async def _ensure_waha_config() -> None:
             return
 
         session = r.json() or {}
+
+        # WAHA CORE does NOT auto-start sessions on container boot (that's a Plus
+        # feature — WAHA_AUTO_START_SESSIONS is ignored here). After a Waha/container
+        # restart the session is left STOPPED and the bridge goes dark. Start it
+        # ourselves: the persisted noweb credentials reconnect with no new QR.
+        status = (session.get("status") or "").upper()
+        if status in ("", "STOPPED", "FAILED"):
+            try:
+                await c.post(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}/start",
+                    headers=_waha_headers(), timeout=10)
+                print(f"[waha-config] started '{WAHA_SESSION}' session (was {status or 'absent'})", flush=True)
+                # re-read so we pick up me/status once it transitions to STARTING/WORKING
+                r = await c.get(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
+                    headers=_waha_headers(), timeout=5)
+                session = r.json() or {}
+            except httpx.HTTPError as e:
+                print(f"[waha-config] session start failed: {e}", flush=True)
+
         me      = session.get("me") or {}
         _self_number = _digits(me.get("id", ""))
         if _self_number:
