@@ -269,36 +269,30 @@ The front door for freeform requests ("find me X", "what's the weather", "any de
 
 ## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `deferred → later sprint` (2026-06-27)
 
-**Decision:** parked for a later sprint; the **official-API access path is now defined** (user-provided, 2026-06-27). The concierge (#9) already answers `find shop…` with "coming in #10". All three platforms offer programmatic APIs via **two channels** (Redmart rides Lazada's):
+**Decision (clarified 2026-06-27): consumer web automation, NOT seller APIs.** The user wants to *browse/search as a shopper and order on their own account* — not manage a store. The seller/supplier APIs (Amazon **SP-API**, **Lazada Open Platform**, **RedMart** RSS category) are therefore **out of scope** — they manage listings/inventory/supply-chain, not consumer shopping, and there is **no official consumer-facing browse/order API**. (Those API details are kept for reference only: [[reference_commerce_apis]].)
 
-| Platform | Gateway | How to get access |
-|---|---|---|
-| **Amazon.sg** | **SP-API** (Selling Partner API; REST, replaces MWS) | Seller Central **Professional** plan → register as developer in **Developer Central** → private (automate own store) or public app. Listings, inventory, repricing, orders, analytics. |
-| **Lazada** | **Lazada Open Platform** (`api.lazada.sg`) | Register on the Open Platform → create app (Seller-Self / Third-Party) → request **permission groups** (Order Mgmt, Logistics, …). Official SDKs: Python/PHP/Java/.NET. |
-| **Redmart** | **Lazada Open Platform — RedMart category** | Same Open Platform app → explicitly apply for the **RedMart category permission group** (justify business scenario; ~1–3 business-day approval). Uses RSS endpoints (`/rss/products/get`, `/rss/stockLots/get`) for inventory/stock-lots/POs/grocery pickup. |
+**Approach:** consumer **browse + search via authenticated web automation (Playwright)** on the user's own logged-in account — same mechanism and machine as ordering (#11), so **#10 search and #11 cart/order merge into one consumer-web track**. Trade-offs: fragile (DOM changes, captcha/OTP), account-risk if flagged as a bot, low-frequency only. `shop_search` returns a normalized list (title, price SGD, url, rating, availability) scraped from the logged-in session.
 
-**Honest caveat to resolve when we build:** these are **seller/supplier-scoped** APIs (manage *your* listings/inventory/orders/supply-chain) — ideal for the "automate my own store / place orders on my account" angle (overlaps #11) and inventory sync, but a pure *consumer product-discovery* "search anything to buy" use case may need a different endpoint/scope than the seller catalog APIs. Confirm the exact endpoint serves search when the sprint starts. Full access details saved as a [[reference_commerce_apis]] memory. `shop_search` slice below is unchanged and ready to build against whichever channel we wire first (Redmart via Lazada OP is the single integration that serves both Lazada + grocery).
+**Parked for a later sprint.** The concierge (#9) already answers `find shop…` with "coming". Build it together with #11 on the single `web_shop` machine/profile.
 
-Search products + groceries across SG marketplaces; return a normalized result list (title, price SGD, url, rating, availability).
-
-**Reality check (decides the design):** there is **no clean consumer ordering API**.
-- **Search data is gettable:** Amazon **PA-API** (SG marketplace; affiliate-account-gated), **Lazada Open Platform** (covers **Redmart** too — Redmart is Lazada SG's grocery arm, so one integration serves two wishes). Both are seller/affiliate-scoped, return product data only.
-- **Ordering has no API** → see #11.
+Browse/search products + groceries across SG sites **as the shopper** (logged-in web session); return a normalized result list (title, price SGD, url, rating, availability).
 
 **Smallest slice (v1):**
 - Task type `shop_search` with payload `{query, source}` where `source ∈ {amazon_sg, lazada, redmart}`.
-- Start with **one** source — **Redmart via Lazada API** (real API, recurring grocery use) — return a normalized schema with SGD pricing + GST awareness.
+- Scrape the **logged-in web session** (Playwright on the `web_shop` profile, #11) — no API. Start with **one** source (Redmart groceries for recurring use), return a normalized schema with SGD pricing + GST awareness.
 - Surfaced through the concierge (#9) or directly via `shop <source> <query>`.
 
-**Open decisions:** PA-API affiliate eligibility; result ranking; caching to respect rate limits.
+**Open decisions:** result ranking; cache/rate-limit to keep scraping low-frequency (account-risk); captcha/OTP handling on session expiry.
 
-**Depends on:** none to start; best behind #9.
+**Depends on:** the #11 `web_shop` machine + logged-in browser profile (search and order share it).
 
 ---
 
 ## 11 — Commerce action: cart + order (web-access, HITL)  ·  `idea`  ·  v2
 
 Last-mile ordering. **Autonomous cart, human checkout** — the line for a personal-money agent.
+
+**Confirmed primary commerce approach (2026-06-27):** the user wants to **browse + order on their own account**, NOT seller APIs — so #10 (search) and #11 (cart/order) are **one consumer-web track** on the shared `web_shop` logged-in profile. "Place order on my account if possible" is honored with the money gate intact: agent browses → searches (#10) → builds cart → **the purchase-confirm click is `needs_human`** (your command/approval is the trigger). Ordering may be partial where captcha/OTP/2FA block automation — hence "if possible".
 
 **Reality:** ordering only works via **authenticated web automation** (Playwright) on your own logged-in account. Fragile (DOM changes, captcha, OTP/2FA) and carries account-risk if flagged as a bot.
 
