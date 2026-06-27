@@ -41,6 +41,10 @@ _FAMILY_FILE = os.path.join(
 # Commands a non-owner (family) role may run — safe, public, no owner data. weather
 # accepts "weather in <place>" (one-off, never changes the owner's saved location).
 FAMILY_ALLOWED = {"weather", "market", "help"}
+# Owner's personal number (digits). Only needed for a DEDICATED bot-number setup,
+# where the owner DMs the bot from their phone (incoming, not self-chat). On the
+# current owner's-number setup this stays empty (self-chat identifies the owner).
+OWNER_NUMBER = "".join(ch for ch in os.getenv("OWNER_NUMBER", "") if ch.isdigit())
 
 
 def _load_family() -> dict:
@@ -768,7 +772,9 @@ async def webhook(request: Request):
     #            so the bot never interjects in real conversations.
     sender = _digits(chat_id)
     if is_me and _self_number and sender == _self_number:
-        role = "owner"
+        role = "owner"                       # owner's-number setup: self-chat
+    elif OWNER_NUMBER and sender == OWNER_NUMBER:
+        role = "owner"                       # dedicated-bot-number setup: owner DMs the bot
     elif (not is_me) and sender and sender in _load_family():
         role = "family"
     else:
