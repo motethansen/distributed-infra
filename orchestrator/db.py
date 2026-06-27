@@ -12,6 +12,12 @@ from shared.models import Task, TaskStatus
 
 DB_PATH = os.getenv("QUEUE_DB_PATH", "./data/queue.db")
 
+# Workload placement (#5b): a task may carry a SOFT preference (_preferred_machine,
+# distinct from the hard _target_machine pin). The preferred worker can claim it
+# immediately; other capable workers may only claim it after it has been pending
+# this many seconds (overflow / failover). 0 disables the wait.
+OVERFLOW_GRACE_SECS = float(os.getenv("OVERFLOW_GRACE_SECS", "20"))
+
 CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS tasks (
     id          TEXT PRIMARY KEY,
@@ -101,9 +107,12 @@ async def list_tasks(status: str | None = None, limit: int = 100) -> list[Task]:
 async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | None:
     """Atomically claim the highest-priority pending task the worker can handle.
 
-    Respects _target_machine in the task payload — if set, only the named
-    machine may claim the task. Tasks without _target_machine are open to
-    any capable worker.
+    Placement rules (#5b), in order:
+      - Hard pin: if _target_machine is set, only that machine may claim it.
+      - Soft preference: if _preferred_machine is set, the preferred worker claims
+        immediately; any other capable worker may claim only after the task has
+        been pending >= OVERFLOW_GRACE_SECS (overflow when the primary is busy/down).
+      - No preference: open to any capable worker immediately (unchanged behavior).
     """
     if not capabilities:
         return None
@@ -116,13 +125,26 @@ async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | N
                 WHERE status='pending'
                   AND type IN ({cap_placeholders})
                   AND (
-                    json_extract(payload, '$._target_machine') IS NULL
-                    OR json_extract(payload, '$._target_machine') = ''
-                    OR json_extract(payload, '$._target_machine') = ?
+                    -- hard pin to this worker
+                    json_extract(payload, '$._target_machine') = ?
+                    OR (
+                      -- not hard-pinned to another machine
+                      (json_extract(payload, '$._target_machine') IS NULL
+                       OR json_extract(payload, '$._target_machine') = '')
+                      AND (
+                        -- no soft preference -> any capable worker, immediately
+                        json_extract(payload, '$._preferred_machine') IS NULL
+                        OR json_extract(payload, '$._preferred_machine') = ''
+                        -- preferred to this worker -> immediately
+                        OR json_extract(payload, '$._preferred_machine') = ?
+                        -- preferred elsewhere -> overflow only after the grace window
+                        OR (julianday('now') - julianday(created_at)) * 86400.0 >= ?
+                      )
+                    )
                   )
                 ORDER BY priority DESC, created_at ASC
                 LIMIT 1""",
-            (*capabilities, worker_name),
+            (*capabilities, worker_name, worker_name, OVERFLOW_GRACE_SECS),
         ) as cur:
             row = await cur.fetchone()
         if not row:

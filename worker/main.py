@@ -18,6 +18,7 @@ WORKER_PORT = int(os.getenv("WORKER_PORT", "8001"))
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))
+MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "0"))  # 0 = unlimited (#5b)
 HEADERS = {"x-secret-key": SECRET_KEY}
 
 START_TIME = time.time()
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
         orchestrator_url=ORCHESTRATOR_URL,
         headers=HEADERS,
         interval=POLL_INTERVAL,
+        max_concurrent=MAX_CONCURRENT,
     )
     task = asyncio.create_task(poller.run())
     yield

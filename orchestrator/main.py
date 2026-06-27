@@ -11,11 +11,21 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 
-from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskUpdate
+from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 from orchestrator import db
 
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 MACHINE_NAME = os.getenv("MACHINE_NAME", "orchestrator")
+
+# Workload placement (#5b): agent-style tasks prefer the primary box (Mac Mini) by
+# default and overflow to other capable workers after the grace window. Build/dev
+# tasks are pinned by capability and are left with NO preference, so the only
+# capable worker claims them immediately (no grace delay).
+DEFAULT_PREFERRED_MACHINE = os.getenv("DEFAULT_PREFERRED_MACHINE", "mac-mini")
+PREFER_PRIMARY_TYPES = {
+    TaskType.agent_run, TaskType.assistant_run, TaskType.assistant_query,
+    TaskType.weather, TaskType.write_article, TaskType.write_post, TaskType.code_review,
+}
 
 _MACHINES_CONFIG = Path(__file__).parent.parent / "config" / "machines.yaml"
 _ONLINE_WINDOW_SECS = 30  # worker is "online" if it polled within this window
@@ -41,10 +51,18 @@ async def health():
 @app.post("/tasks", response_model=Task, status_code=201)
 async def create_task(body: TaskCreate, x_secret_key: str = Header(default="")):
     _check_auth(x_secret_key)
+    payload = dict(body.payload or {})
+    # Default an agent-style task to prefer the primary box, unless the caller
+    # already pinned it (_target_machine) or set its own preference.
+    if (body.type in PREFER_PRIMARY_TYPES
+            and DEFAULT_PREFERRED_MACHINE
+            and not payload.get("_target_machine")
+            and not payload.get("_preferred_machine")):
+        payload["_preferred_machine"] = DEFAULT_PREFERRED_MACHINE
     task = Task(
         type=body.type,
         priority=body.priority,
-        payload=body.payload,
+        payload=payload,
         notes=body.notes,
         created_by=MACHINE_NAME,
     )

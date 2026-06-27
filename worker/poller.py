@@ -13,11 +13,16 @@ log = logging.getLogger(__name__)
 
 
 class Poller:
-    def __init__(self, machine_name: str, orchestrator_url: str, headers: dict, interval: int):
+    def __init__(self, machine_name: str, orchestrator_url: str, headers: dict, interval: int,
+                 max_concurrent: int = 0):
         self.machine_name = machine_name
         self.orchestrator_url = orchestrator_url
         self.headers = headers
         self.interval = interval
+        # Max tasks this worker runs at once. 0 = unlimited. When the cap is hit the
+        # poller stops claiming, so tasks age in the queue and (if they prefer this
+        # box) overflow to another capable worker after the grace window (#5b).
+        self.max_concurrent = max_concurrent
         self.active_tasks: list[str] = []
 
     async def run(self) -> None:
@@ -30,6 +35,10 @@ class Poller:
             await asyncio.sleep(self.interval)
 
     async def _poll_once(self) -> None:
+        # Concurrency cap: don't claim more while at capacity (lets work overflow).
+        if self.max_concurrent and len(self.active_tasks) >= self.max_concurrent:
+            log.debug("At concurrency cap (%d/%d) — not claiming", len(self.active_tasks), self.max_concurrent)
+            return
         async with httpx.AsyncClient(base_url=self.orchestrator_url, headers=self.headers, timeout=10) as client:
             resp = await client.post(
                 "/tasks/claim",
