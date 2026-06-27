@@ -39,6 +39,7 @@ class TaskType(str, Enum):
     weather = "weather"
     calendar = "calendar"
     email_lookup = "email_lookup"
+    find = "find"
     # Human review
     human_action = "human_action"
     custom = "custom"
