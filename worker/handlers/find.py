@@ -101,28 +101,34 @@ def _headers() -> dict:
 
 async def _enqueue_and_wait(task_type: str, payload: dict) -> dict:
     """Create a specialist sub-task and poll until it finishes."""
-    async with httpx.AsyncClient(timeout=15) as c:
-        r = await c.post(f"{ORCHESTRATOR_URL}/tasks", headers=_headers(),
-                         json={"type": task_type, "payload": payload, "notes": "via find"})
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(f"{ORCHESTRATOR_URL}/tasks", headers=_headers(),
+                             json={"type": task_type, "payload": payload, "notes": "via find"})
         if r.status_code != 201:
             return {"error": f"could not enqueue {task_type} ({r.status_code})"}
         tid = r.json().get("id")
+    except httpx.HTTPError as e:
+        return {"error": f"enqueue error: {e!r}"}
 
     waited = 0
-    async with httpx.AsyncClient(timeout=15) as c:
-        while waited < _SUB_TIMEOUT:
-            await asyncio.sleep(3)
-            waited += 3
-            rr = await c.get(f"{ORCHESTRATOR_URL}/tasks/{tid}", headers=_headers())
-            if rr.status_code != 200:
-                continue
-            d = rr.json()
-            status = d.get("status")
-            if status in ("done", "failed", "needs_human"):
-                result = d.get("result") or {}
-                if status == "done":
-                    return {"response": result.get("response", "")}
-                return {"error": result.get("error") or d.get("notes") or f"sub-task {status}"}
+    while waited < _SUB_TIMEOUT:
+        await asyncio.sleep(3)
+        waited += 3
+        try:  # transient network hiccup must not abort the wait
+            async with httpx.AsyncClient(timeout=15) as c:
+                rr = await c.get(f"{ORCHESTRATOR_URL}/tasks/{tid}", headers=_headers())
+        except httpx.HTTPError:
+            continue
+        if rr.status_code != 200:
+            continue
+        d = rr.json()
+        status = d.get("status")
+        if status in ("done", "failed", "needs_human"):
+            result = d.get("result") or {}
+            if status == "done":
+                return {"response": result.get("response", "")}
+            return {"error": result.get("error") or d.get("notes") or f"sub-task {status}"}
     return {"error": f"{task_type} timed out"}
 
 
