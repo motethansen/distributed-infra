@@ -267,7 +267,9 @@ The front door for freeform requests ("find me X", "what's the weather", "any de
 
 ---
 
-## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `idea`
+## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `deferred` (2026-06-27)
+
+**Decision (2026-06-27):** parked. Unlike email's quick app password, commerce search needs an **approval-gated affiliate account** (Lazada Affiliate/Open Platform App Key+Secret, or Amazon Associates+PA-API which requires qualifying sales first). The concierge (#9) already answers `find shop…` with "coming in #10". Revisit when an affiliate API account exists; the `shop_search` slice below is unchanged and ready to build against whichever source lands. (Scraping/third-party was considered and not chosen.)
 
 Search products + groceries across SG marketplaces; return a normalized result list (title, price SGD, url, rating, availability).
 
