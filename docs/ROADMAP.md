@@ -78,7 +78,7 @@ The wish-list is **not** N separate agents — it's **5 specialist domains + 1 c
 
 ---
 
-## 1 — AI assistant integration  ·  `planned`
+## 1 — AI assistant integration  ·  `shipped`
 
 Expose the `ai_agent_assistant` project as a worker capability on MacBook Pro so personal-productivity commands can be sent from WhatsApp self-chat.
 
@@ -328,7 +328,10 @@ Read-only portfolio + market view across **Saxo, IBKR, Yahoo Finance**. Extends 
 
 ---
 
-## 14 — Personal data: email + calendar + Obsidian/planning  ·  `idea`
+## 14 — Personal data: email + calendar + Obsidian/planning  ·  `in-progress` (2026-06-27)
+
+**Shipped:** Obsidian/tasks/planning via #1 (`assist …`, `assistant_query`). **`calendar`** command — today's events + next free slot via the assistant's ICS calendar (new `/calendar` API endpoint; bridge `calendar`/`day`). **`email`** — read-only Gmail search over IMAP (bridge `email [query]`, `email_lookup` handler) — deployed; **awaiting the Gmail app password** in the macbook worker env to go live (decision: IMAP + app password, not OAuth). Calendar decision: assistant ICS (not live Google).
+
 
 Read/search/summarize email and calendar; reach Obsidian tasks & planning (the existing assistant).
 
