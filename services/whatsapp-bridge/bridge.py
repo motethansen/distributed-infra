@@ -486,6 +486,11 @@ def _parse(text: str) -> tuple[str, dict]:
     if m:
         return "weather", {"location": (m.group(1) or "").strip()}
 
+    # find <query>  →  concierge: classify + route to a specialist (#9)
+    if re.match(r"^/?find(\s+|$)", t, re.IGNORECASE):
+        body = re.sub(r"^/?find\s*", "", t, flags=re.IGNORECASE).strip()
+        return "find", {"query": body}
+
     # calendar / cal / day  →  today's events + next free slot (assistant ICS)
     if tl in ("calendar", "/calendar", "cal", "day", "/day"):
         return "calendar", {}
@@ -867,6 +872,20 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "find":
+        query = kwargs.get("query", "")
+        if not query:
+            await _send_wa(chat_id, "Usage: find <what you need>\n"
+                                    "e.g. find weather in Tokyo · find unread email · find my schedule")
+            return Response(status_code=200)
+        task_id = await _create_task("find", {"query": query}, notes=f"find: {query[:60]}")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Finding…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "calendar":
         payload = {"_target_machine": "macbook-pro"}
         task_id = await _create_task("calendar", payload, notes="calendar")
@@ -964,6 +983,10 @@ async def webhook(request: Request):
     elif cmd == "help":
         await _send_long(chat_id, (
             "📋 Commands — send any of these to yourself\n"
+            "\n"
+            "🔎 FIND (concierge)\n"
+            "  find <anything>  — routes to the right tool\n"
+            "  e.g. find weather in Tokyo · find unread email · find my schedule\n"
             "\n"
             "🤖 RUN AN AI AGENT\n"
             "  agent <llm> <prompt>\n"
