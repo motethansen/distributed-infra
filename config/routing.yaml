@@ -1,0 +1,77 @@
+# Model routing policy (Track #5). Picks the cheapest agent+model that fits a
+# request. Read by agents/router.py. This file is fleet-wide policy (no secrets) —
+# it IS tracked in git, unlike machines.yaml/.env.
+#
+# How it resolves (see router.py):
+#   1. sensitivity in {private,sensitive,personal,...}  -> force the `privacy` class
+#   2. else task_kind -> class via `task_kinds`
+#   3. class -> {agent, model} via `classes`
+#   4. a caller-supplied agent/model overrides the class choice...
+#   5. ...EXCEPT the privacy guard: privacy/sensitive work is never sent to a
+#      non-private (cloud-CN) provider — it is rerouted to `privacy_fallback`.
+#
+# Opus stays blocked by claude_agent's cost policy regardless of what is set here.
+
+default_class: default
+
+classes:
+  # privacy: email / finance / calendar / personal — Claude cloud only for now;
+  # routes to the local model once #7 (dedicated LLM machine) lands.
+  privacy:    { agent: claude,   model: sonnet }
+  # coding / planning — quality matters, use Sonnet.
+  coding:     { agent: claude,   model: sonnet }
+  planning:   { agent: claude,   model: sonnet }
+  # cheap reasoning / bulk summarization — DeepSeek (non-sensitive only).
+  reasoning:  { agent: deepseek, model: deepseek-reasoner }
+  bulk:       { agent: deepseek, model: deepseek-chat }
+  # mechanical: classify / route / reformat / extract — cheap cloud (Haiku);
+  # local once #7 lands.
+  mechanical: { agent: claude,   model: haiku }
+  # fallback when nothing else matches.
+  default:    { agent: claude,   model: sonnet }
+
+# Natural task_kind keywords a caller can pass -> class.
+task_kinds:
+  code: coding
+  coding: coding
+  fix: coding
+  refactor: coding
+  review: coding
+  code_review: coding
+  plan: planning
+  planning: planning
+  decompose: planning
+  supervise: planning
+  reason: reasoning
+  reasoning: reasoning
+  analyze: reasoning
+  research: reasoning
+  bulk: bulk
+  summarize: bulk
+  summarise: bulk
+  draft: bulk
+  brainstorm: bulk
+  classify: mechanical
+  route: mechanical
+  reformat: mechanical
+  extract: mechanical
+  tag: mechanical
+  mechanical: mechanical
+  # privacy-class kinds (also force-triggered by sensitivity)
+  email: privacy
+  finance: privacy
+  portfolio: privacy
+  calendar: privacy
+  personal: privacy
+  private: privacy
+
+# ── Privacy guard (hard rule) ──────────────────────────────────────────────────
+# Classes whose data must never leave to a non-private provider.
+privacy_classes: [privacy]
+# Sensitivity values that force the privacy class.
+sensitive_values: [private, privacy, sensitive, personal, confidential, secret]
+# Providers considered non-private (China-hosted / cloud-CN). Privacy work is
+# rerouted away from these even if explicitly requested.
+non_private_agents: [deepseek]
+# Where privacy work goes when the guard trips (until #7's local model exists).
+privacy_fallback: { agent: claude, model: sonnet }

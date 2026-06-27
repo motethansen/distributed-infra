@@ -47,11 +47,20 @@ def _load_agents() -> None:
 RESUMABLE = {"claude"}
 
 
-async def run_agent(agent: str, prompt: str, model: str | None = None, cwd: str | None = None,
-                    timeout: int | None = None, session_id: str | None = None, resume: bool = False) -> dict:
+async def run_agent(agent: str | None = None, prompt: str = "", model: str | None = None,
+                    cwd: str | None = None, timeout: int | None = None,
+                    session_id: str | None = None, resume: bool = False,
+                    task_kind: str | None = None, sensitivity: str | None = None) -> dict:
     _load_agents()
-    if agent not in AGENTS:
-        return {"error": f"Unknown agent: {agent}. Choose from: {list(AGENTS)}", "ok": False}
+    # Routing layer (#5): when the caller routes by task_kind/sensitivity (or omits
+    # the agent), resolve agent+model from config/routing.yaml. An explicit agent
+    # with no routing hints is used as-is (backward compatible). The privacy guard
+    # always applies whenever sensitivity is supplied.
+    if task_kind or sensitivity or not agent:
+        from agents.router import route
+        agent, model = route(task_kind=task_kind, sensitivity=sensitivity, agent=agent, model=model)
+    if not agent or agent not in AGENTS:
+        return {"error": f"Unknown agent: {agent!r}. Choose from: {list(AGENTS)}", "ok": False}
     kwargs = {"prompt": prompt}
     if model:
         kwargs["model"] = model
@@ -87,6 +96,8 @@ if __name__ == "__main__":
     parser.add_argument("--agent", choices=["claude", "agy", "codex", "groq", "deepseek", "content", "social"])
     parser.add_argument("--prompt", default="")
     parser.add_argument("--model", default=None)
+    parser.add_argument("--task-kind", default=None, help="Route by kind (e.g. code, reasoning, classify)")
+    parser.add_argument("--sensitivity", default=None, help="e.g. private — forces the privacy class")
     parser.add_argument("--test", action="store_true", help="Smoke-test all agents")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     args = parser.parse_args()
@@ -95,11 +106,12 @@ if __name__ == "__main__":
         asyncio.run(_smoke_test())
         sys.exit(0)
 
-    if not args.agent or not args.prompt:
+    if not args.prompt or not (args.agent or args.task_kind or args.sensitivity):
         parser.print_help()
         sys.exit(1)
 
-    result = asyncio.run(run_agent(args.agent, args.prompt, args.model))
+    result = asyncio.run(run_agent(agent=args.agent, prompt=args.prompt, model=args.model,
+                                   task_kind=args.task_kind, sensitivity=args.sensitivity))
     if args.json:
         print(json.dumps(result, indent=2))
     else:
