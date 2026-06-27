@@ -251,7 +251,9 @@ The smallest real step from "task queue" to "reasoning system", grounded in exis
 
 ---
 
-## 9 — Concierge / router agent  ·  `idea`
+## 9 — Concierge / router agent  ·  `shipped` (2026-06-27)
+
+**Shipped & live:** `find <query>` (bridge + `find` handler/TaskType). Deterministic keyword classifier (weather/email/calendar/tasks/shop) with LLM fallback routed to Haiku via #5; maps the category to a specialist task on the right machine, enqueues it, polls, returns the combined answer (the Hierarchical-Supervisor primitive over the queue). Verified: `find weather in Tokyo`, `find unread email`, `find my schedule`, and the LLM tail (`should I bring an umbrella` → weather). `shop` category replies "coming in #10".
 
 The front door for freeform requests ("find me X", "what's the weather", "any deals on Y") — the Hierarchical Supervisor applied to everyday lookups. Classifies intent, suggests/selects sources, fans out to specialists, synthesizes the reply.
 
