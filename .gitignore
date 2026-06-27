@@ -49,3 +49,7 @@ scripts/*.plist
 # location.yaml holds mutable last-known location (handler writes it) — use the .example
 config/location.yaml
 !config/location.yaml.example
+
+# project registry holds local paths/state (handler writes it) — use the .example
+config/projects.yaml
+!config/projects.yaml.example

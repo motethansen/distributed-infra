@@ -42,6 +42,7 @@ class TaskType(str, Enum):
     find = "find"
     # Reasoning autonomy
     plan = "plan"
+    project = "project"
     # Human review
     human_action = "human_action"
     custom = "custom"

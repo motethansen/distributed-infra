@@ -496,6 +496,14 @@ def _parse(text: str) -> tuple[str, dict]:
         body = re.sub(r"^/?plan\s*", "", t, flags=re.IGNORECASE).strip()
         return "plan_run", {"goal": body}
 
+    # project <sub> <args>  →  autonomous project lifecycle (#18)
+    if re.match(r"^/?project(\s+|$)", t, re.IGNORECASE):
+        body = re.sub(r"^/?project\s*", "", t, flags=re.IGNORECASE).strip()
+        parts = body.split(None, 1) if body else []
+        sub = parts[0].lower() if parts else "list"
+        pargs = parts[1] if len(parts) == 2 else ""
+        return "project", {"subcommand": sub, "args": pargs}
+
     # calendar / cal / day  →  today's events + next free slot (assistant ICS)
     if tl in ("calendar", "/calendar", "cal", "day", "/day"):
         return "calendar", {}
@@ -877,6 +885,20 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "project":
+        sub   = kwargs["subcommand"]
+        pargs = kwargs["args"]
+        payload = {"subcommand": sub, "args": pargs, "_target_machine": "macbook-pro"}
+        notes   = f"project {sub} {pargs}".strip()
+        task_id = await _create_task("project", payload, notes=notes[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            tail = " (building — this can take a while)" if sub == "go" else ""
+            await _send_wa(chat_id, f"⏳ project {sub}…{tail}  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "plan_run":
         goal = kwargs.get("goal", "")
         if not goal:
@@ -1010,6 +1032,12 @@ async def webhook(request: Request):
             "🧠 PLAN (autonomous)\n"
             "  plan <goal>  — decompose + execute + validate on the fleet\n"
             "  e.g. plan write a python fizzbuzz module with a pytest and make it pass\n"
+            "\n"
+            "🏗 PROJECT (autonomous lifecycle)\n"
+            "  project start <name> [on <machine>]: <goal>  — draft a plan\n"
+            "  project go <name>     — approve → scaffold + build it\n"
+            "  project status|list|stop <name>\n"
+            "  e.g. project start todoapp on thinkpad: build a python CLI todo app\n"
             "\n"
             "🤖 RUN AN AI AGENT\n"
             "  agent <llm> <prompt>\n"
