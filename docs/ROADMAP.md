@@ -96,7 +96,9 @@ Expose the `ai_agent_assistant` project as a worker capability on MacBook Pro so
 
 ---
 
-## 2 — Stock market agents (alerts-only)  ·  `idea`
+## 2 — Stock market agents (alerts-only)  ·  `shipped` (2026-06-27)
+
+**Shipped & live:** `market`/`stocks` (bridge + `market_brief` handler/TaskType). yfinance (free) watchlist in `config/watchlist.yaml`; per ticker: 1d %, RSI(14), 50/200 MA cross (golden/death), opening gap. Public data, not privacy-class; alerts-only (no order routing). Verified on AAPL/MSFT/NVDA/SPY + `ES3.SI` (SGX). **Follow-up:** cron at market open/close (currently on-demand) — schedule via the orchestrator or a morning-brief composite (#15).
 
 Scheduled tasks that pull market data and surface signals via WhatsApp. **No order routing in v1** — alerts only, to derisk.
 
