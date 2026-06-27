@@ -324,7 +324,9 @@ Today's weather at your location. The easiest end-to-end proof of the new-agent 
 
 ---
 
-## 13 — Investment / portfolio agents  ·  `idea`
+## 13 — Investment / portfolio agents  ·  `deferred` (2026-06-27)
+
+**Decision:** parked. Reading your actual positions/balances needs a **live, authenticated broker connection** — IBKR Client Portal Gateway (REST) or IB Gateway + TWS API, or Saxo OpenAPI (OAuth) — all requiring a running session with **periodic browser/2FA re-auth or token refresh**, fragile on a headless fleet. yfinance (shipped in #2) only gives public quotes, not holdings. Revisit when you want to run a gateway; IBKR is reachable as a *dev-session connector* for prototyping, but the fleet build needs its own gateway. Privacy-class routing (#5) applies — never DeepSeek.
 
 Read-only portfolio + market view across **Saxo, IBKR, Yahoo Finance**. Extends #2 from watchlist-alerts to real accounts.
 
