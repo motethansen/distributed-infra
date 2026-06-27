@@ -267,9 +267,17 @@ The front door for freeform requests ("find me X", "what's the weather", "any de
 
 ---
 
-## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `deferred` (2026-06-27)
+## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `deferred → later sprint` (2026-06-27)
 
-**Decision (2026-06-27):** parked. Unlike email's quick app password, commerce search needs an **approval-gated affiliate account** (Lazada Affiliate/Open Platform App Key+Secret, or Amazon Associates+PA-API which requires qualifying sales first). The concierge (#9) already answers `find shop…` with "coming in #10". Revisit when an affiliate API account exists; the `shop_search` slice below is unchanged and ready to build against whichever source lands. (Scraping/third-party was considered and not chosen.)
+**Decision:** parked for a later sprint; the **official-API access path is now defined** (user-provided, 2026-06-27). The concierge (#9) already answers `find shop…` with "coming in #10". All three platforms offer programmatic APIs via **two channels** (Redmart rides Lazada's):
+
+| Platform | Gateway | How to get access |
+|---|---|---|
+| **Amazon.sg** | **SP-API** (Selling Partner API; REST, replaces MWS) | Seller Central **Professional** plan → register as developer in **Developer Central** → private (automate own store) or public app. Listings, inventory, repricing, orders, analytics. |
+| **Lazada** | **Lazada Open Platform** (`api.lazada.sg`) | Register on the Open Platform → create app (Seller-Self / Third-Party) → request **permission groups** (Order Mgmt, Logistics, …). Official SDKs: Python/PHP/Java/.NET. |
+| **Redmart** | **Lazada Open Platform — RedMart category** | Same Open Platform app → explicitly apply for the **RedMart category permission group** (justify business scenario; ~1–3 business-day approval). Uses RSS endpoints (`/rss/products/get`, `/rss/stockLots/get`) for inventory/stock-lots/POs/grocery pickup. |
+
+**Honest caveat to resolve when we build:** these are **seller/supplier-scoped** APIs (manage *your* listings/inventory/orders/supply-chain) — ideal for the "automate my own store / place orders on my account" angle (overlaps #11) and inventory sync, but a pure *consumer product-discovery* "search anything to buy" use case may need a different endpoint/scope than the seller catalog APIs. Confirm the exact endpoint serves search when the sprint starts. Full access details saved as a [[reference_commerce_apis]] memory. `shop_search` slice below is unchanged and ready to build against whichever channel we wire first (Redmart via Lazada OP is the single integration that serves both Lazada + grocery).
 
 Search products + groceries across SG marketplaces; return a normalized result list (title, price SGD, url, rating, availability).
 
