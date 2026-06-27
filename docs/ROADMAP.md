@@ -411,7 +411,14 @@ Let approved **family members have their own accounts** and use the assistant ov
 
 ---
 
-## 18 — Autonomous project lifecycle (intake → plan → scaffold → execute)  ·  `idea`
+## 18 — Autonomous project lifecycle (intake → plan → scaffold → execute)  ·  `shipped (v1)` (2026-06-27)
+
+**Shipped & proven:** `project` handler (pinned macbook-pro; registry `config/projects.yaml`) + bridge verbs `start/review/go/status/list/stop`. `project start <name> [on <machine>]: <goal>` drafts a plan **and asks clarifying questions** (the two-source / ask-over-WhatsApp interaction); `project go <name>` is the **approval gate** → scaffolds (git init) + runs the #8 engine on the project's machine+path. Verified end-to-end: `project start demoapp on mac-mini: …` → `project go` autonomously produced a **real, working** argparse todo CLI (`cli.py` + `todos.json`, git-initialised, self-tested) on mac-mini.
+
+**Known v1 gaps:**
+- **Target machine = mac-mini only for now.** Building on **thinkpad** (the headline goal) needs a file-writing coding agent authed there — **claude CLI on thinkpad currently fails (`No ANTHROPIC_API_KEY`)** and codex CLI also errors; only deepseek (API, no file-write tools) works. Enable claude/codex on thinkpad to unlock on-thinkpad projects.
+- Clarify loop is one-shot (start returns plan+questions; refine by re-issuing start) — true multi-turn resume is v2.
+- Validator-retry can run long/over-cautious even when the deliverable is already good (#8 limitation); autonomy levels recorded but money/publish gates land with #11/#16; no live per-step progress to chat yet.
 
 One or more agents that take a project from idea to delivery: you *start* a new project or ask to *review* an existing one, the agent proposes tasks and scaffolds it on a chosen machine, you discuss and refine the plan together, and on your go-ahead the fleet **autonomously executes** it — coding, writing, publishing, shopping — with money/publish steps gated. This is the headline "more autonomy" ask.
 
