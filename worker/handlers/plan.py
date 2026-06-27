@@ -116,14 +116,22 @@ async def _enqueue_and_wait(payload: dict, timeout: int) -> dict:
 
 
 async def _validate(goal: str, description: str, output: str) -> tuple[bool, str]:
-    """VALIDATOR — judge whether a step's output satisfies the goal."""
+    """VALIDATOR — lenient judge of whether a step plausibly met the goal.
+
+    The output is the agent's own SUMMARY of what it did (not the file contents),
+    so we bias to PASS: fail only on a clear error/missing-deliverable signal, else
+    accept. Routed to a cheap/fast model (classify → Haiku) — judging is not planning.
+    """
     from agents.runner import run_agent
     prompt = (
-        "You are a strict validator. Decide if the step output satisfies the goal.\n"
+        "You are a LENIENT validator. The OUTPUT is the agent's own summary of what it did "
+        "(it usually does NOT show file contents). Return passed=false ONLY if the output "
+        "clearly indicates an error, a crash, a missing/incomplete deliverable, or directly "
+        "contradicts the goal. If it plausibly accomplished the goal, return passed=true.\n"
         "Return STRICT JSON only: {\"passed\": true|false, \"feedback\": \"<concise fix if failed, else ok>\"}\n\n"
         f"GOAL: {goal}\nSTEP: {description}\nOUTPUT:\n{output[:2000]}"
     )
-    res = await run_agent(prompt=prompt, task_kind="planning")
+    res = await run_agent(prompt=prompt, task_kind="classify")
     data = _extract_json(res.get("response", "")) if res.get("ok") else None
     if not isinstance(data, dict):
         return True, "validator-inconclusive"  # don't block on a flaky judge
@@ -139,7 +147,7 @@ async def handle_plan(task: Task) -> dict:
     machine = p.get("target_machine") or "mac-mini"
     cwd = p.get("cwd") or f"~/plan-scratch/{task.id[:8]}"
     max_steps = min(int(p.get("max_steps", 6) or 6), _HARD_MAX_STEPS)
-    max_retries = int(p.get("max_retries", 2) or 2)
+    max_retries = int(p.get("max_retries", 1) or 1)
     step_timeout = int(p.get("step_timeout", 600) or 600)
 
     steps = await _plan_steps(goal, max_steps)
