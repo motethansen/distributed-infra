@@ -419,7 +419,7 @@ Let approved **family members have their own accounts** and use the assistant ov
 
 **Known v1 gaps:**
 - Clarify loop is one-shot (start returns plan+questions; refine by re-issuing start) — true multi-turn resume is v2.
-- Validator-retry can run long/over-cautious even when the deliverable is already good (#8 limitation); autonomy levels recorded but money/publish gates land with #11/#16; no live per-step progress to chat yet.
+- Validator-retry was over-cautious (a 1-line build took ~6min) — **tuned 2026-06-27** (lenient Haiku judge, retries capped at 1) → ~40s for the same build. Autonomy levels recorded but money/publish gates land with #11/#16; no live per-step progress to chat yet.
 
 One or more agents that take a project from idea to delivery: you *start* a new project or ask to *review* an existing one, the agent proposes tasks and scaffolds it on a chosen machine, you discuss and refine the plan together, and on your go-ahead the fleet **autonomously executes** it — coding, writing, publishing, shopping — with money/publish steps gated. This is the headline "more autonomy" ask.
 
