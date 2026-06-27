@@ -415,8 +415,9 @@ Let approved **family members have their own accounts** and use the assistant ov
 
 **Shipped & proven:** `project` handler (pinned macbook-pro; registry `config/projects.yaml`) + bridge verbs `start/review/go/status/list/stop`. `project start <name> [on <machine>]: <goal>` drafts a plan **and asks clarifying questions** (the two-source / ask-over-WhatsApp interaction); `project go <name>` is the **approval gate** → scaffolds (git init) + runs the #8 engine on the project's machine+path. Verified end-to-end: `project start demoapp on mac-mini: …` → `project go` autonomously produced a **real, working** argparse todo CLI (`cli.py` + `todos.json`, git-initialised, self-tested) on mac-mini.
 
+**Verified on thinkpad too (2026-06-27):** claude CLI **is** installed + authed on thinkpad (`~/.local/bin/claude`, `~/.claude/.credentials.json`) and runs through the worker (the earlier `No ANTHROPIC_API_KEY` was stale tasks). `project … on thinkpad` works — the worker finds claude by absolute path even though it's not on the service PATH. So the headline goal ("develop on thinkpad") is live.
+
 **Known v1 gaps:**
-- **Target machine = mac-mini only for now.** Building on **thinkpad** (the headline goal) needs a file-writing coding agent authed there — **claude CLI on thinkpad currently fails (`No ANTHROPIC_API_KEY`)** and codex CLI also errors; only deepseek (API, no file-write tools) works. Enable claude/codex on thinkpad to unlock on-thinkpad projects.
 - Clarify loop is one-shot (start returns plan+questions; refine by re-issuing start) — true multi-turn resume is v2.
 - Validator-retry can run long/over-cautious even when the deliverable is already good (#8 limitation); autonomy levels recorded but money/publish gates land with #11/#16; no live per-step progress to chat yet.
 
