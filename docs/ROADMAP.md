@@ -389,7 +389,11 @@ Read your social feeds, and — future version — when you share a post link, f
 
 ---
 
-## 17 — Multi-user / family access  ·  `idea`
+## 17 — Multi-user / family access  ·  `shipped (v1)` (2026-06-27)
+
+**Shipped & deployed (inert until you enrol someone):** the bridge now determines each sender's **role** — owner (self-chat, or `OWNER_NUMBER` for a dedicated-bot-number setup) / family (allowlisted incoming number) / ignore (owner's other chats + non-allowlisted, so the bot never interjects in real conversations). **Family role is restricted to a safe set** (`weather`/`market`/`help`); recognized-but-disallowed → polite note, chatter → silent. **Hard-denied for family:** `agent`/`run`/`assign`/`project`/`plan` (arbitrary exec), `email`/`find`/`assist`/`calendar`/`brief` (owner's private data), `family` (owner-only). `family add|remove|list` (owner-only) writes `config/family.json` (gitignored PII). Role-aware help. Verified: roster round-trip + every gate decision. Default roster empty → **owner-only, zero behaviour change** until `family add`.
+
+**v1 limits / notes:** the **number decision** is now config, not code — current setup = your number (self-chat); a **dedicated bot number** just needs the Waha session re-linked to it + `OWNER_NUMBER` set (no code change). Per-user state (e.g. each member's own saved weather location) is v2 — for now family use one-off `weather in <place>` which never touches your saved location. Real end-to-end (a family phone sending `weather`) is untested here (needs a second number) but the role/gate/roster logic is verified.
 
 Let approved **family members have their own accounts** and use the assistant over WhatsApp — each with their own state (location, sessions) and a **restricted, safe command set**. This replaces the bridge's current single-user lock, so it has to be done security-first.
 
