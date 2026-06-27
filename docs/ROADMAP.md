@@ -171,7 +171,10 @@ Generalize the cost/privacy logic already in `claude_agent` into a single router
 
 ---
 
-## 5b — Workload placement & overflow (Mac Mini primary)  ·  `idea`
+## 5b — Workload placement & overflow (Mac Mini primary)  ·  `shipped` (2026-06-27)
+
+**Shipped:** opt-in soft preference in `claim_next_task` (`db.py`) + `OVERFLOW_GRACE_SECS` (default 20); orchestrator injects `_preferred_machine=mac-mini` for agent-style task types only (builds stay unpreferred → immediate); poller `MAX_CONCURRENT` cap (set to 4 on mac-mini + thinkpad). Verified live: agent tasks land on mac-mini immediately; `_preferred_machine` elsewhere routes there; an un-preferred machine overflows after the grace window (~28s incl. poll). v2 (liveness-aware/tiered) still open below.
+
 
 Run agents **primarily on the Mac Mini**, spilling over to ThinkPad / MacBook Pro only when the Mini is busy or offline. Keep it deterministic and pull-based — no scheduler service, no message broker. This is the "orchestration feature" the fleet needs once most agent work lands on one preferred box.
 
