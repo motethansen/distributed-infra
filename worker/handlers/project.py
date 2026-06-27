@@ -65,27 +65,36 @@ def _now() -> str:
 
 
 async def _enqueue_and_wait(task_type: str, payload: dict, timeout: int) -> dict:
-    async with httpx.AsyncClient(timeout=15) as c:
-        r = await c.post(f"{ORCHESTRATOR_URL}/tasks", headers=_headers(),
-                         json={"type": task_type, "payload": payload, "notes": "project step"})
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(f"{ORCHESTRATOR_URL}/tasks", headers=_headers(),
+                             json={"type": task_type, "payload": payload, "notes": "project step"})
         if r.status_code != 201:
             return {"ok": False, "error": f"enqueue failed ({r.status_code})"}
         tid = r.json().get("id")
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"enqueue error: {e!r}"}
+
     waited = 0
-    async with httpx.AsyncClient(timeout=15) as c:
-        while waited < timeout:
-            await asyncio.sleep(3)
-            waited += 3
-            rr = await c.get(f"{ORCHESTRATOR_URL}/tasks/{tid}", headers=_headers())
-            if rr.status_code != 200:
-                continue
-            d = rr.json()
-            st = d.get("status")
-            if st in ("done", "failed", "needs_human"):
-                result = d.get("result") or {}
-                if st == "done":
-                    return {"ok": True, "output": result.get("response", "")}
-                return {"ok": False, "error": result.get("error") or d.get("notes") or st, "status": st}
+    while waited < timeout:
+        await asyncio.sleep(3)
+        waited += 3
+        # Guard every poll: a single transient network hiccup over a long wait must
+        # not kill the whole orchestration — just retry on the next tick.
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                rr = await c.get(f"{ORCHESTRATOR_URL}/tasks/{tid}", headers=_headers())
+        except httpx.HTTPError:
+            continue
+        if rr.status_code != 200:
+            continue
+        d = rr.json()
+        st = d.get("status")
+        if st in ("done", "failed", "needs_human"):
+            result = d.get("result") or {}
+            if st == "done":
+                return {"ok": True, "output": result.get("response", "")}
+            return {"ok": False, "error": result.get("error") or d.get("notes") or st, "status": st}
     return {"ok": False, "error": f"{task_type} timed out"}
 
 
