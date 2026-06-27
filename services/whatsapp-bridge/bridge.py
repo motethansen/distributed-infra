@@ -486,6 +486,15 @@ def _parse(text: str) -> tuple[str, dict]:
     if m:
         return "weather", {"location": (m.group(1) or "").strip()}
 
+    # calendar / cal / day  →  today's events + next free slot (assistant ICS)
+    if tl in ("calendar", "/calendar", "cal", "day", "/day"):
+        return "calendar", {}
+
+    # email [query] / mail [query]  →  read-only Gmail search (IMAP)
+    m = re.match(r"^/?(?:email|mail)(?:\s+(.+))?$", t, re.IGNORECASE)
+    if m:
+        return "email", {"query": (m.group(1) or "").strip()}
+
     # assist <subcommand> [args]  →  assistant_run on macbook-pro
     if re.match(r"^/?assist(\s+|$)", t, re.IGNORECASE):
         body  = re.sub(r"^/?assist\s*", "", t, flags=re.IGNORECASE).strip()
@@ -858,6 +867,28 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "calendar":
+        payload = {"_target_machine": "macbook-pro"}
+        task_id = await _create_task("calendar", payload, notes="calendar")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Calendar…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
+    elif cmd == "email":
+        query   = kwargs.get("query", "")
+        payload = {"query": query, "_target_machine": "macbook-pro"}
+        notes   = f"email{(' ' + query) if query else ''}"
+        task_id = await _create_task("email_lookup", payload, notes=notes[:80])
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Email{(' · ' + query) if query else ''}…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "assist":
         sub  = kwargs["subcommand"]
         args = kwargs["args"]
@@ -961,6 +992,8 @@ async def webhook(request: Request):
             "  weather [in] [place]     — today's forecast (e.g. `weather in Tokyo`;\n"
             "                             no place = last location)\n"
             "  set-location <place>     — remember a place for future `weather`\n"
+            "  calendar (or day)        — today's events + next free slot\n"
+            "  email [query]            — read-only Gmail search (e.g. `email from:bank`)\n"
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"
