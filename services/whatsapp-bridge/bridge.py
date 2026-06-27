@@ -491,6 +491,11 @@ def _parse(text: str) -> tuple[str, dict]:
         body = re.sub(r"^/?find\s*", "", t, flags=re.IGNORECASE).strip()
         return "find", {"query": body}
 
+    # plan <goal>  →  Plan-and-Execute engine (#8): decompose + execute + validate
+    if re.match(r"^/?plan(\s+|$)", t, re.IGNORECASE):
+        body = re.sub(r"^/?plan\s*", "", t, flags=re.IGNORECASE).strip()
+        return "plan_run", {"goal": body}
+
     # calendar / cal / day  →  today's events + next free slot (assistant ICS)
     if tl in ("calendar", "/calendar", "cal", "day", "/day"):
         return "calendar", {}
@@ -872,6 +877,20 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "plan_run":
+        goal = kwargs.get("goal", "")
+        if not goal:
+            await _send_wa(chat_id, "Usage: plan <goal>\n"
+                                    "e.g. plan write a python fizzbuzz module with a pytest and make it pass")
+            return Response(status_code=200)
+        task_id = await _create_task("plan", {"goal": goal}, notes=f"plan: {goal[:60]}")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Planning + executing…  [{task_id[:8]}]\n\"{goal[:60]}\"")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "find":
         query = kwargs.get("query", "")
         if not query:
@@ -987,6 +1006,10 @@ async def webhook(request: Request):
             "🔎 FIND (concierge)\n"
             "  find <anything>  — routes to the right tool\n"
             "  e.g. find weather in Tokyo · find unread email · find my schedule\n"
+            "\n"
+            "🧠 PLAN (autonomous)\n"
+            "  plan <goal>  — decompose + execute + validate on the fleet\n"
+            "  e.g. plan write a python fizzbuzz module with a pytest and make it pass\n"
             "\n"
             "🤖 RUN AN AI AGENT\n"
             "  agent <llm> <prompt>\n"
