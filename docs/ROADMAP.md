@@ -235,7 +235,11 @@ A zero-cost, private model for classification, routing, and sensitive-content su
 
 ---
 
-## 8 — Autonomy foundation: Plan-and-Execute + Supervisor  ·  `idea`
+## 8 — Autonomy foundation: Plan-and-Execute + Supervisor  ·  `shipped` (2026-06-27)
+
+**Shipped & proven:** `plan <goal>` (bridge + `plan` handler/TaskType). PLANNER (LLM→JSON steps via #5 planning route) → EXECUTOR (each step an `agent_run` sub-task on a shared machine+cwd, context passed forward) → VALIDATOR (LLM judge PASS/FAIL on validate-flagged steps, retry-with-feedback) → CIRCUIT BREAKER (`max_steps`/`max_retries`/`_HARD_MAX_STEPS=12` + per-step timeout; `needs_human` escape on non-convergence). Verified end-to-end on a coding goal: planner made 2 steps, claude wrote real working files in `~/plan-scratch/<id>` on mac-mini, the test passed. **This is the engine #18 (autonomous projects) builds on.**
+
+**Known v1 limits (v2):** the supervisor occupies a worker slot while awaiting sub-tasks (deadlock risk only if many concurrent plans saturate `MAX_CONCURRENT`); breaker is step/retry/timeout-based, not token-counted; validator is LLM-judge, not a real test run; the bridge's `TASK_TIMEOUT` (360s) can fire on long plans even though the plan finishes server-side; no live per-step progress to chat yet.
 
 The smallest real step from "task queue" to "reasoning system", grounded in existing primitives. Proven against #3 (research) and #4 (writing) — **not** built as a generic platform.
 
