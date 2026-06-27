@@ -412,6 +412,12 @@ One or more agents that take a project from idea to delivery: you *start* a new 
 5. **Execute (autonomous)** — the Supervisor decomposes the agreed plan into sub-tasks and enqueues them to specialists: **coding** → `claude`/`codex` with `cwd` on the project's machine; **writing** → content/social agents (#4); **publishing** → #16 (LinkedIn) / drafts for Substack/Medium; **shopping** → #11. A **Validator** (#8) checks each output and retries-with-context; `needs_human` is the escape hatch when it can't converge.
 6. **Iterate / report** — progress back to WhatsApp; at decision points or gate hits it asks you (`needs_human`), and you can amend the plan mid-flight (back to phase 2).
 
+**Interaction — requirements come from your request AND from the agent asking you (all over WhatsApp):**
+- **Two-source requirements:** the agent extracts what it can from your initial message — project type/goal **and the target machine** (e.g. "develop a CLI on **thinkpad**" → scaffold + execute pinned there via `_target_machine`/`_preferred_machine`) — then **asks you clarifying questions** for the rest (stack? framework? deps? scope of v1?) instead of guessing.
+- **AskUserQuestion over WhatsApp = the multi-turn session (already shipped).** WhatsApp/WAHA has no native choice-button UI, so the agent asks in chat — posing concrete numbered options ("1) FastAPI  2) Flask  3) other") — and you reply with a number or free text; the claude session (`--session-id`/`--resume`, the bridge's existing multi-turn) carries the context. Functionally the same gather-by-asking loop as the IDE's AskUserQuestion, just conversational. (A structured quick-reply UI is a later nicety, gated on WAHA Plus / a richer client like the Flutter terminal.)
+- **Whole loop runs from self-chat:** `project start <name> on <machine>` → agent asks its questions → you answer in chat → it writes `PLAN.md` → you `project go` → it scaffolds + executes on that machine → progress + `needs_human` prompts come back to the same chat. No desktop needed.
+- **The clarify phase respects autonomy level + gates:** questions are free (L1+); only the `project go` approval and the money/publish gates pause for `needs_human`.
+
 **Autonomy levels (you set per project — this is how "autonomous" it actually is):**
 - **L1 plan-only** — proposes + maintains the plan, executes nothing.
 - **L2 develop-but-gate** *(recommended default)* — writes code/drafts and runs tests autonomously, but **stops at**: `git push`, publish, deploy, and any spend → `needs_human`.
