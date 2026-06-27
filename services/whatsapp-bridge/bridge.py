@@ -17,7 +17,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -32,6 +32,7 @@ WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
 WAHA_CHECK_INTERVAL = int(os.getenv("WAHA_CHECK_INTERVAL", "60"))  # re-ensure session is up
+MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "")  # "07:00" (local) to enable daily brief; empty = off
 HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
 BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
 # Public base URL of THIS bridge, reachable from your phone over Tailscale — used
@@ -504,6 +505,10 @@ def _parse(text: str) -> tuple[str, dict]:
         pargs = parts[1] if len(parts) == 2 else ""
         return "project", {"subcommand": sub, "args": pargs}
 
+    # brief / morning  →  morning brief composite (#15)
+    if tl in ("brief", "/brief", "morning", "/morning", "morning brief"):
+        return "brief", {}
+
     # market / stocks  →  watchlist quotes + signals (#2)
     if tl in ("market", "/market", "stocks", "/stocks", "market brief"):
         return "market", {}
@@ -597,6 +602,35 @@ WAHA_WEBHOOK_URL    = f"http://host.docker.internal:{int(os.getenv('BRIDGE_PORT'
 WAHA_WEBHOOK_EVENTS = ["message.any"]
 
 
+async def _morning_brief_scheduler() -> None:
+    """Fire a morning_brief at MORNING_BRIEF_TIME (local) each day, delivered to the
+    self-chat via the normal poller. Disabled when the env is empty."""
+    if not MORNING_BRIEF_TIME:
+        return
+    try:
+        hh, mm = (int(x) for x in MORNING_BRIEF_TIME.split(":")[:2])
+    except ValueError:
+        print(f"[brief] invalid MORNING_BRIEF_TIME={MORNING_BRIEF_TIME!r}; scheduler off", flush=True)
+        return
+    print(f"[brief] daily morning brief scheduled for {hh:02d}:{mm:02d} local", flush=True)
+    while True:
+        now = datetime.now()  # local time on the bridge host
+        target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        await asyncio.sleep(max((target - now).total_seconds(), 1))
+        if not _self_number:
+            await _ensure_waha_config()
+        if not _self_number:
+            continue
+        chat_id = f"{_self_number}@c.us"
+        task_id = await _create_task("morning_brief", {}, notes="scheduled morning brief")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            print(f"[brief] fired morning brief [{task_id[:8]}] → {chat_id}", flush=True)
+
+
 async def _ensure_waha_config() -> None:
     """Make sure the Waha session has the webhook + events the bridge expects,
     and cache the user's own number so we only respond in the self-chat.
@@ -667,6 +701,7 @@ async def _lifespan(app: FastAPI):
     _load_sessions()  # restore multi-turn sessions from before a restart
     await _ensure_waha_config()
     asyncio.create_task(_poll_loop())
+    asyncio.create_task(_morning_brief_scheduler())
     yield
 
 app = FastAPI(lifespan=_lifespan)
@@ -940,6 +975,15 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "brief":
+        task_id = await _create_task("morning_brief", {}, notes="morning brief")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Morning brief…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "calendar":
         payload = {"_target_machine": "macbook-pro"}
         task_id = await _create_task("calendar", payload, notes="calendar")
@@ -1082,6 +1126,7 @@ async def webhook(request: Request):
             "  calendar (or day)        — today's events + next free slot\n"
             "  email [query]            — read-only Gmail search (e.g. `email from:bank`)\n"
             "  market (or stocks)       — watchlist quotes + signals\n"
+            "  brief (or morning)       — weather+calendar+market+email in one (daily 7am)\n"
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"

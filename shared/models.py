@@ -46,6 +46,8 @@ class TaskType(str, Enum):
     # Finance
     market_brief = "market_brief"
     portfolio = "portfolio"
+    # Composites
+    morning_brief = "morning_brief"
     # Human review
     human_action = "human_action"
     custom = "custom"

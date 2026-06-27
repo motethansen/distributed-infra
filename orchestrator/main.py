@@ -25,7 +25,7 @@ DEFAULT_PREFERRED_MACHINE = os.getenv("DEFAULT_PREFERRED_MACHINE", "mac-mini")
 PREFER_PRIMARY_TYPES = {
     TaskType.agent_run, TaskType.assistant_run, TaskType.assistant_query,
     TaskType.weather, TaskType.write_article, TaskType.write_post, TaskType.code_review,
-    TaskType.find, TaskType.plan, TaskType.market_brief,
+    TaskType.find, TaskType.plan, TaskType.market_brief, TaskType.morning_brief,
 }
 
 _MACHINES_CONFIG = Path(__file__).parent.parent / "config" / "machines.yaml"
