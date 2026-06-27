@@ -328,9 +328,9 @@ Read-only portfolio + market view across **Saxo, IBKR, Yahoo Finance**. Extends 
 
 ---
 
-## 14 — Personal data: email + calendar + Obsidian/planning  ·  `in-progress` (2026-06-27)
+## 14 — Personal data: email + calendar + Obsidian/planning  ·  `shipped` (2026-06-27)
 
-**Shipped:** Obsidian/tasks/planning via #1 (`assist …`, `assistant_query`). **`calendar`** command — today's events + next free slot via the assistant's ICS calendar (new `/calendar` API endpoint; bridge `calendar`/`day`). **`email`** — read-only Gmail search over IMAP (bridge `email [query]`, `email_lookup` handler) — deployed; **awaiting the Gmail app password** in the macbook worker env to go live (decision: IMAP + app password, not OAuth). Calendar decision: assistant ICS (not live Google).
+**Shipped & live:** Obsidian/tasks/planning via #1 (`assist …`, `assistant_query`); **`calendar`** — today's events + next free slot via the assistant's ICS calendar (new `/calendar` API endpoint; bridge `calendar`/`day`); **`email`** — read-only Gmail search over IMAP (bridge `email [query]` w/ Gmail `X-GM-RAW` syntax; `email_lookup` handler on macbook-pro). Decisions: IMAP + app password (not OAuth); assistant ICS calendar (not live Google). Send = v2 `needs_human`.
 
 
 Read/search/summarize email and calendar; reach Obsidian tasks & planning (the existing assistant).
