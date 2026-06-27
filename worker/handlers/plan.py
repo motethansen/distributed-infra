@@ -158,11 +158,14 @@ async def handle_plan(task: Task) -> dict:
             prompt = (
                 (f"Context from previous steps:\n{context}\n\n" if context else "")
                 + (f"A previous attempt failed validation. Fix this: {feedback}\n\n" if feedback else "")
-                + f"Working directory: {cwd} (on {machine}). Create/modify files there.\n"
+                + f"Working directory: {cwd} (on {machine}). Run `mkdir -p {cwd}` first if it "
+                  f"doesn't exist, then create/modify ALL files under that exact path.\n"
                 + f"Task: {desc}\nBe concrete and complete."
             )
+            # Note: cwd is NOT set on the subprocess (the dir may not exist yet) — the
+            # agent creates it and uses the absolute path from the prompt.
             result = await _enqueue_and_wait(
-                {"agent": agent, "prompt": prompt, "cwd": cwd, "_target_machine": machine,
+                {"agent": agent, "prompt": prompt, "_target_machine": machine,
                  "timeout": step_timeout},
                 timeout=step_timeout + 30,
             )
