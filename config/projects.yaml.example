@@ -1,0 +1,3 @@
+# Autonomous project registry (#18). Written by the `project` handler on macbook-pro.
+# Gitignored (holds local paths/state). The handler creates projects.yaml on first use.
+projects: {}
