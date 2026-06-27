@@ -53,3 +53,7 @@ config/location.yaml
 # project registry holds local paths/state (handler writes it) — use the .example
 config/projects.yaml
 !config/projects.yaml.example
+
+# family roster holds phone numbers (PII) — use family.json.example
+config/family.json
+!config/family.json.example

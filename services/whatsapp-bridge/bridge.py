@@ -33,6 +33,31 @@ POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
 WAHA_CHECK_INTERVAL = int(os.getenv("WAHA_CHECK_INTERVAL", "60"))  # re-ensure session is up
 MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "")  # "07:00" (local) to enable daily brief; empty = off
+
+# Multi-user / family access (#17). Roster of approved non-owner numbers (gitignored
+# — it's PII). Starts EMPTY, so the bridge is owner-only until you `family add` someone.
+_FAMILY_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config", "family.json")
+# Commands a non-owner (family) role may run — safe, public, no owner data. weather
+# accepts "weather in <place>" (one-off, never changes the owner's saved location).
+FAMILY_ALLOWED = {"weather", "market", "help"}
+
+
+def _load_family() -> dict:
+    """number -> {name, role}. Read fresh per message so `family add` takes effect live."""
+    try:
+        with open(_FAMILY_FILE, encoding="utf-8") as f:
+            return (json.load(f) or {}).get("members", {}) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_family(members: dict) -> None:
+    os.makedirs(os.path.dirname(_FAMILY_FILE), exist_ok=True)
+    tmp = f"{_FAMILY_FILE}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"members": members}, f, indent=2)
+    os.replace(tmp, _FAMILY_FILE)
 HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
 BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
 # Public base URL of THIS bridge, reachable from your phone over Tailscale — used
@@ -497,6 +522,15 @@ def _parse(text: str) -> tuple[str, dict]:
         body = re.sub(r"^/?plan\s*", "", t, flags=re.IGNORECASE).strip()
         return "plan_run", {"goal": body}
 
+    # family <add|remove|list> [number] [name]  →  manage the access roster (#17, owner-only)
+    if re.match(r"^/?family(\s+|$)", t, re.IGNORECASE):
+        body = re.sub(r"^/?family\s*", "", t, flags=re.IGNORECASE).strip()
+        toks = body.split(None, 2)
+        sub = toks[0].lower() if toks else "list"
+        number = toks[1] if len(toks) >= 2 else ""
+        name = toks[2] if len(toks) >= 3 else ""
+        return "family", {"sub": sub, "number": number, "name": name}
+
     # project <sub> <args>  →  autonomous project lifecycle (#18)
     if re.match(r"^/?project(\s+|$)", t, re.IGNORECASE):
         body = re.sub(r"^/?project\s*", "", t, flags=re.IGNORECASE).strip()
@@ -722,20 +756,22 @@ async def webhook(request: Request):
     body    = (msg.get("body") or "").strip()
     is_me   = msg.get("fromMe", False)
 
-    # Hard scope: only process messages the user sent IN THEIR OWN SELF-CHAT.
-    # Without this, every message the user sends to anyone (fromMe=true) would
-    # be parsed as a command and replied to — wrecking real conversations.
-    if not is_me:
-        return Response(status_code=200)
-
-    # Self-heal: the bridge may have started before the WhatsApp session was
-    # linked, leaving _self_number empty — which silently drops every self
-    # message. Re-read me.id from Waha as soon as a message arrives (the session
-    # must be WORKING for that to happen), instead of requiring a manual restart.
+    # Self-heal: the bridge may have started before the WhatsApp session was linked,
+    # leaving _self_number empty. Re-read me.id from Waha when a message arrives.
     if not _self_number:
         await _ensure_waha_config()
 
-    if not _self_number or _digits(chat_id) != _self_number:
+    # Determine the SENDER's role (#17):
+    #   owner  → the user's own self-chat (fromMe in their own number)
+    #   family → an incoming message from an allowlisted number (1:1 with the bot)
+    #   else   → ignore (the owner's chats with non-family, or non-allowlisted incoming),
+    #            so the bot never interjects in real conversations.
+    sender = _digits(chat_id)
+    if is_me and _self_number and sender == _self_number:
+        role = "owner"
+    elif (not is_me) and sender and sender in _load_family():
+        role = "family"
+    else:
         return Response(status_code=200)
 
     # Ignore the bridge's own replies (they always start with a known emoji/prefix)
@@ -753,6 +789,14 @@ async def webhook(request: Request):
         return Response(status_code=200)
 
     cmd, kwargs = _parse(body)
+
+    # Role gate (#17): non-owners may only run the safe command set. A recognized but
+    # disallowed command gets a polite note; anything else stays silent so the bot
+    # doesn't reply to ordinary chatter from a family member.
+    if role == "family" and cmd not in FAMILY_ALLOWED:
+        if cmd != "unknown":
+            await _send_wa(chat_id, "🔒 That command isn't available to you.")
+        return Response(status_code=200)
 
     if cmd == "status":
         machines = await _list_machines()
@@ -984,6 +1028,33 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "family":
+        # owner-only (family role is gated out above)
+        sub    = kwargs["sub"]
+        number = re.sub(r"\D", "", kwargs.get("number", ""))  # digits only (country code + number)
+        name   = kwargs.get("name", "").strip()
+        members = _load_family()
+        if sub == "add":
+            if not number:
+                await _send_wa(chat_id, "Usage: family add <number-with-country-code> <name>")
+            else:
+                members[number] = {"name": name or number, "role": "family"}
+                _save_family(members)
+                await _send_wa(chat_id, f"✓ Added {name or number} ({number}) as family.\n"
+                                        f"They can use: {', '.join(sorted(FAMILY_ALLOWED))}.")
+        elif sub in ("remove", "rm", "del"):
+            if members.pop(number, None) is not None:
+                _save_family(members)
+                await _send_wa(chat_id, f"✓ Removed {number} from family.")
+            else:
+                await _send_wa(chat_id, f"No family member with number {number}.")
+        else:  # list
+            if not members:
+                await _send_wa(chat_id, "👪 No family members yet.\nAdd one: family add <number> <name>")
+            else:
+                lines = [f"• {m.get('name')} ({n}) — {m.get('role')}" for n, m in members.items()]
+                await _send_wa(chat_id, "👪 Family:\n" + "\n".join(lines))
+
     elif cmd == "calendar":
         payload = {"_target_machine": "macbook-pro"}
         task_id = await _create_task("calendar", payload, notes="calendar")
@@ -1078,6 +1149,13 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "help" and role == "family":
+        await _send_wa(chat_id,
+            "👋 Hi! You can use:\n"
+            "  weather [in <place>]   — today's forecast (e.g. weather in Tokyo)\n"
+            "  market (or stocks)     — market snapshot\n"
+            "  help                   — this list")
+
     elif cmd == "help":
         await _send_long(chat_id, (
             "📋 Commands — send any of these to yourself\n"
@@ -1130,6 +1208,7 @@ async def webhook(request: Request):
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"
+            "  family <add|remove|list> [number] [name]  — manage who can use the bot\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
             "  run <agent> <prompt>              — low-level agent_run on mac-mini\n"
             "\n"
