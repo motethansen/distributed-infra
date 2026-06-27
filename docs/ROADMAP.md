@@ -149,7 +149,10 @@ From a topic + recent activity, draft a long-form post matching your voice. **St
 
 ---
 
-## 5 — Model routing layer (multi-provider)  ·  `idea`
+## 5 — Model routing layer (multi-provider)  ·  `shipped` (2026-06-27)
+
+**Shipped:** `config/routing.yaml` policy + `agents/router.py` `route(task_kind, sensitivity, agent, model)`; wired into `runner.run_agent` (opt-in via `task_kind`/`sensitivity`, backward-compatible) and the `agent_run` payload. Hard privacy guard verified end-to-end (private work never reaches DeepSeek). Local model (#7) slots into the `privacy`/`mechanical` classes when it lands.
+
 
 Generalize the cost/privacy logic already in `claude_agent` into a single router across **all** providers, so every agent call picks the cheapest model that fits.
 
