@@ -460,11 +460,11 @@ One or more agents that take a project from idea to delivery: you *start* a new 
 
 ---
 
-## 15 — Composite features  ·  `idea`
+## 15 — Composite features  ·  `in-progress` (morning brief shipped 2026-06-27)
 
 Compositions of the agents above — high value-per-effort once the parts exist.
 
-- **Morning brief** (cron, 7am → WhatsApp): weather (#12) + `market_brief` (#2) + calendar + top-3 emails (#14) in one message.
+- **Morning brief** — ✅ **shipped & live**: `morning_brief` handler fans out in parallel to weather + calendar + `market_brief` + top-3 emails → one message. On-demand via bridge `brief`/`morning`; **daily scheduler** in the bridge fires it at `MORNING_BRIEF_TIME` (set `07:00` local) to the self-chat. Verified end-to-end.
 - **Price-watch / deal alerts:** save a product (#10) → cron `price_watch` → WhatsApp when below threshold.
 - **Grocery list → cart:** read a recurring list from Obsidian (#14) → build Redmart cart (#11) → HITL checkout.
 - **Receipt/order email → expense note** in Obsidian (#14 + #1).
