@@ -43,6 +43,9 @@ class TaskType(str, Enum):
     # Reasoning autonomy
     plan = "plan"
     project = "project"
+    # Finance
+    market_brief = "market_brief"
+    portfolio = "portfolio"
     # Human review
     human_action = "human_action"
     custom = "custom"

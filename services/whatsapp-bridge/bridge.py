@@ -504,6 +504,10 @@ def _parse(text: str) -> tuple[str, dict]:
         pargs = parts[1] if len(parts) == 2 else ""
         return "project", {"subcommand": sub, "args": pargs}
 
+    # market / stocks  →  watchlist quotes + signals (#2)
+    if tl in ("market", "/market", "stocks", "/stocks", "market brief"):
+        return "market", {}
+
     # calendar / cal / day  →  today's events + next free slot (assistant ICS)
     if tl in ("calendar", "/calendar", "cal", "day", "/day"):
         return "calendar", {}
@@ -927,6 +931,15 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "market":
+        task_id = await _create_task("market_brief", {}, notes="market brief")
+        if task_id:
+            _pending[task_id] = {"chat_id": chat_id,
+                                  "started_at": datetime.now(timezone.utc).timestamp()}
+            await _send_wa(chat_id, f"⏳ Market brief…  [{task_id[:8]}]")
+        else:
+            await _send_wa(chat_id, "❌ Could not reach the queue.")
+
     elif cmd == "calendar":
         payload = {"_target_machine": "macbook-pro"}
         task_id = await _create_task("calendar", payload, notes="calendar")
@@ -1068,6 +1081,7 @@ async def webhook(request: Request):
             "  set-location <place>     — remember a place for future `weather`\n"
             "  calendar (or day)        — today's events + next free slot\n"
             "  email [query]            — read-only Gmail search (e.g. `email from:bank`)\n"
+            "  market (or stocks)       — watchlist quotes + signals\n"
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"
