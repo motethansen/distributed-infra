@@ -1,0 +1,9 @@
+# Market-brief watchlist (#2). Public quotes via yfinance — edit freely.
+# US tickers plain (AAPL); SGX tickers use the .SI suffix (e.g. ES3.SI = STI ETF,
+# D05.SI = DBS); crypto like BTC-USD; indices like ^GSPC.
+tickers:
+  - AAPL
+  - MSFT
+  - NVDA
+  - SPY
+  - ES3.SI
