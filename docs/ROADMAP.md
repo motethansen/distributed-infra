@@ -4,6 +4,29 @@ Living roadmap for new agents and capabilities. Each track lists the smallest va
 
 ---
 
+## Status & resume point (2026-06-27)
+
+Sprints **0–7 + the #18 capstone are shipped, deployed, and verified** across the fleet (orchestrator on macbook-pro; workers on mac-mini + thinkpad-x1; WhatsApp bridge on mac-mini).
+
+**Shipped & live** (WhatsApp commands from self-chat):
+- **#12 Weather** `weather [in <place>]`, `set-location` · **#6 DeepSeek** (`--agent deepseek`)
+- **#5 Model routing** (`task_kind`/`sensitivity` → cheapest-fit; hard privacy guard) · **#5b Placement/overflow** (Mac Mini primary, `MAX_CONCURRENT=4`, 20s overflow)
+- **#1 Assistant** `assist …` · **#14 Email/Calendar/Obsidian** `email [query]`, `calendar`/`day`
+- **#9 Concierge** `find <anything>` · **#8 Reasoning engine** `plan <goal>` (validator tuned, ~40s)
+- **#18 Autonomous projects** `project start/review/go/status/list/stop` — builds real software on mac-mini **or thinkpad**
+- **#2 Market alerts** `market`/`stocks` · **#15 Morning brief** `brief`/`morning` (+ daily 7am scheduler)
+- **#17 Family access** `family add|remove|list` (role-gated; inert until you enrol someone)
+
+**Deferred — waiting on your credential/account setup (not code):**
+- **#10/#11 Commerce** (consumer web automation on your logged-in account — Playwright `web_shop`; you chose *not* seller APIs). See [[reference_commerce_apis]].
+- **#13 Portfolio** (IBKR Client Portal Gateway / TWS, or Saxo OAuth — a running authenticated broker session).
+
+**Polish / v2 (no blocker, pick up anytime):** #18 live per-step progress to chat + true multi-turn clarify; #2 cron at market open/close; per-user family state (#17); validator = real test-run not LLM judge (#8).
+
+**To resume:** pick a deferred track once its creds are ready, or a polish item. Fleet ops notes (deploy flow, launchd-vs-systemd env, thinkpad claude/PATH, Waha session) are in memory; this file holds intent.
+
+---
+
 ## Conventions
 
 - **Smallest slice** = the minimum scope that delivers user-visible value. Everything past that is iteration.
