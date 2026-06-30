@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Header, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 from orchestrator import db
@@ -114,7 +114,10 @@ async def claim_task(body: ClaimRequest, x_secret_key: str = Header(default=""))
     _last_seen[body.worker_name] = time.time()
     task = await db.claim_next_task(body.worker_name, body.capabilities)
     if not task:
-        return JSONResponse(status_code=204, content=None)
+        # 204 No Content MUST NOT carry a body; a bodyless Response is correct
+        # across Starlette versions (JSONResponse(content=None) renders b"null",
+        # which trips uvicorn's "content longer than Content-Length" on a 204).
+        return Response(status_code=204)
     return task
 
 
