@@ -1084,7 +1084,9 @@ async def webhook(request: Request):
                 await _send_wa(chat_id, "👪 Family:\n" + "\n".join(lines))
 
     elif cmd == "calendar":
-        payload = {"_target_machine": "macbook-pro"}
+        # Soft preference (mac-mini primary, macbook overflow) — #19: assistant API
+        # now runs on mac-mini too, so this no longer hard-depends on the laptop.
+        payload = {"_preferred_machine": "mac-mini"}
         task_id = await _create_task("calendar", payload, notes="calendar")
         if task_id:
             _pending[task_id] = {"chat_id": chat_id,
@@ -1095,7 +1097,7 @@ async def webhook(request: Request):
 
     elif cmd == "email":
         query   = kwargs.get("query", "")
-        payload = {"query": query, "_target_machine": "macbook-pro"}
+        payload = {"query": query, "_preferred_machine": "mac-mini"}  # #19: mac-mini primary (IMAP), macbook overflow
         notes   = f"email{(' ' + query) if query else ''}"
         task_id = await _create_task("email_lookup", payload, notes=notes[:80])
         if task_id:
@@ -1113,7 +1115,7 @@ async def webhook(request: Request):
                 "❌ Usage: assist <today|sync|status|plan [today|week]>")
             return Response(status_code=200)
 
-        payload = {"subcommand": sub, "args": args, "_target_machine": "macbook-pro"}
+        payload = {"subcommand": sub, "args": args, "_preferred_machine": "mac-mini"}  # #19: mac-mini primary, macbook overflow
         notes   = f"assist {sub}{(' ' + args) if args else ''}"
         task_id = await _create_task("assistant_run", payload, notes=notes[:80])
         if task_id:
