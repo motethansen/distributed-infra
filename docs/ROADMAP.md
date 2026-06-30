@@ -8,7 +8,7 @@ Living roadmap for new agents and capabilities. Each track lists the smallest va
 
 Sprints **0–7 + the #18 capstone are shipped, deployed, and verified** across the fleet (orchestrator on **mac-mini** since 2026-06-30; workers on mac-mini + thinkpad-x1 + macbook-pro; WhatsApp bridge on mac-mini).
 
-**Infra (2026-06-30):** orchestrator + queue relocated off the laptop to the always-on mac-mini, so the fleet no longer stalls when the MacBook sleeps. Remaining laptop dependency: `calendar`/`email`/`assist` (assistant service still on macbook-pro) — tracked as **#19 `planned`**.
+**Infra (2026-06-30):** orchestrator + queue relocated off the laptop to the always-on mac-mini, so the fleet no longer stalls when the MacBook sleeps. **#19 shipped** — `calendar`/`email`/`assist` now run on mac-mini too (assistant API + sync moved there; soft-pref with laptop overflow). Only `project` (#18) remains laptop-pinned.
 
 **Shipped & live** (WhatsApp commands from self-chat):
 - **#12 Weather** `weather [in <place>]`, `set-location` · **#6 DeepSeek** (`--agent deepseek`)
@@ -489,7 +489,9 @@ One or more agents that take a project from idea to delivery: you *start* a new 
 
 ---
 
-## 19 — Relocate personal-data services off the laptop (assistant/Gmail/Calendar → mac-mini)  ·  `planned` (2026-06-30)
+## 19 — Relocate personal-data services off the laptop (assistant/Gmail/Calendar → mac-mini)  ·  `shipped` (2026-06-30)
+
+**Shipped:** the `ai_agent_assistant` API + sync now run on mac-mini (launchd `com.mh.aiassistant.{api,sync}`; mac-mini already had the iCloud Obsidian/Logseq vaults synced). The mac-mini worker advertises `calendar`/`email_lookup`/`assistant_run`, with `ASSISTANT_API_URL=http://localhost:7890` and the Gmail IMAP creds. Bridge flipped the three commands from a hard `_target_machine: macbook-pro` to a soft `_preferred_machine: mac-mini` (laptop = overflow). macbook's assistant **sync** disabled (one writer to the iCloud vault). Verified end-to-end on mac-mini: `calendar` (events + free slot), `email` (IMAP), `assist status` (subprocess). Caveat: the assistant's `--api` entrypoint (`main.py` + `api/__init__.py`) is still **uncommitted WIP in the `ai_agent_assistant` repo** — scp'd to mac-mini, needs a proper commit/push to be reproducible. `project` (#18) still pinned to macbook-pro (separate scope).
 
 **Why:** the orchestrator + queue moved to the always-on mac-mini (2026-06-30), so weather, agents, market, code review, articles, `plan`, and `find` are now laptop-independent. But `calendar`, `email`, and `assist` are still **hard-pinned to macbook-pro** (`_target_machine: macbook-pro` in `bridge.py`) because they call the assistant service at `http://100.97.176.37:7890` and use the laptop's Gmail/Calendar credentials. When the MacBook sleeps those three commands fail/degrade — the **last remaining laptop dependency** in the fleet.
 
