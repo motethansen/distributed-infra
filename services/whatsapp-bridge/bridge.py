@@ -327,20 +327,33 @@ async def _create_task(task_type: str, payload: dict, notes: str = "") -> str | 
     body = {"type": task_type, "payload": payload}
     if notes:
         body["notes"] = notes
-    async with httpx.AsyncClient() as c:
-        r = await c.post(f"{ORCHESTRATOR_URL}/tasks",
-            headers=_headers(), json=body, timeout=10)
-        if r.status_code == 201:
-            return r.json().get("id")
+    # Return None (never raise) when the orchestrator is unreachable, so callers
+    # fall through to their "❌ Could not reach the queue" reply. Without this the
+    # httpx error propagates out of the webhook handler → 500 → the user gets total
+    # silence (the exact symptom when the orchestrator host was offline).
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.post(f"{ORCHESTRATOR_URL}/tasks",
+                headers=_headers(), json=body, timeout=10)
+            if r.status_code == 201:
+                return r.json().get("id")
+    except httpx.HTTPError as e:
+        print(f"[queue] could not reach orchestrator at {ORCHESTRATOR_URL}: {e}", flush=True)
     return None
 
 
 async def _get_task(task_id: str) -> dict | None:
-    async with httpx.AsyncClient() as c:
-        r = await c.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}",
-            headers=_headers(), timeout=10)
-        if r.status_code == 200:
-            return r.json()
+    # Never raise: _get_task runs inside _poll_loop, and an uncaught httpx error
+    # there would kill the whole loop (no further results ever delivered until a
+    # bridge restart). On a transient orchestrator blip we just retry next tick.
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{ORCHESTRATOR_URL}/tasks/{task_id}",
+                headers=_headers(), timeout=10)
+            if r.status_code == 200:
+                return r.json()
+    except httpx.HTTPError as e:
+        print(f"[queue] get_task {task_id[:8]} failed: {e}", flush=True)
     return None
 
 
@@ -348,10 +361,14 @@ async def _list_tasks(status: str | None = None) -> list[dict]:
     params = {"limit": 15}
     if status:
         params["status"] = status
-    async with httpx.AsyncClient() as c:
-        r = await c.get(f"{ORCHESTRATOR_URL}/tasks",
-            headers=_headers(), params=params, timeout=10)
-        return r.json() if r.status_code == 200 else []
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(f"{ORCHESTRATOR_URL}/tasks",
+                headers=_headers(), params=params, timeout=10)
+            return r.json() if r.status_code == 200 else []
+    except httpx.HTTPError as e:
+        print(f"[queue] list_tasks failed: {e}", flush=True)
+        return []
 
 
 async def _list_machines() -> list[dict]:
@@ -590,46 +607,51 @@ async def _poll_loop() -> None:
                 print(f"[waha-config] watchdog error: {e}", flush=True)
 
         for task_id, meta in list(_pending.items()):
-            if now - meta["started_at"] > TASK_TIMEOUT:
-                await _send_wa(meta["chat_id"],
-                    f"⏱ Task `{task_id[:8]}` timed out after {TASK_TIMEOUT}s.\n"
-                    f"Check: da › review")
-                _pending.pop(task_id, None)
-                continue
+            # Guard each task independently — a transient WAHA/orchestrator error
+            # on one task must not kill the loop and stall delivery for all others.
+            try:
+                if now - meta["started_at"] > TASK_TIMEOUT:
+                    await _send_wa(meta["chat_id"],
+                        f"⏱ Task `{task_id[:8]}` timed out after {TASK_TIMEOUT}s.\n"
+                        f"Check: da › review")
+                    _pending.pop(task_id, None)
+                    continue
 
-            task = await _get_task(task_id)
-            if not task:
-                continue
+                task = await _get_task(task_id)
+                if not task:
+                    continue
 
-            status = task.get("status")
-            result = task.get("result") or {}
-            response_text = result.get("response") or result.get("error") or ""
+                status = task.get("status")
+                result = task.get("result") or {}
+                response_text = result.get("response") or result.get("error") or ""
 
-            if status == "done":
-                # full answer, chunked across messages if long
-                await _send_long(meta["chat_id"],
-                    f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
-                # surface any files the agent produced and named in its reply
-                artifacts = (result.get("artifacts")
-                             if isinstance(result.get("artifacts"), list)
-                             else _extract_artifacts(response_text))
-                artifacts = [os.path.expanduser(str(a)) for a in artifacts[:MAX_ARTIFACTS]]
-                artifacts = [a for a in artifacts if os.path.isfile(a)]
-                if artifacts:
-                    await _send_wa(meta["chat_id"], _artifacts_note(artifacts, now))
-                _pending.pop(task_id, None)
+                if status == "done":
+                    # full answer, chunked across messages if long
+                    await _send_long(meta["chat_id"],
+                        f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
+                    # surface any files the agent produced and named in its reply
+                    artifacts = (result.get("artifacts")
+                                 if isinstance(result.get("artifacts"), list)
+                                 else _extract_artifacts(response_text))
+                    artifacts = [os.path.expanduser(str(a)) for a in artifacts[:MAX_ARTIFACTS]]
+                    artifacts = [a for a in artifacts if os.path.isfile(a)]
+                    if artifacts:
+                        await _send_wa(meta["chat_id"], _artifacts_note(artifacts, now))
+                    _pending.pop(task_id, None)
 
-            elif status == "failed":
-                # errors can be huge/noisy — cap to a single message
-                await _send_wa(meta["chat_id"],
-                    f"❌ Failed  [{task_id[:8]}]\n{response_text[:MAX_MSG_CHARS]}")
-                _pending.pop(task_id, None)
+                elif status == "failed":
+                    # errors can be huge/noisy — cap to a single message
+                    await _send_wa(meta["chat_id"],
+                        f"❌ Failed  [{task_id[:8]}]\n{response_text[:MAX_MSG_CHARS]}")
+                    _pending.pop(task_id, None)
 
-            elif status == "needs_human":
-                notes = (task.get("notes") or "")[:400]
-                await _send_wa(meta["chat_id"],
-                    f"👀 Needs input  [{task_id[:8]}]\n{notes}\n\nRun: da › review")
-                _pending.pop(task_id, None)
+                elif status == "needs_human":
+                    notes = (task.get("notes") or "")[:400]
+                    await _send_wa(meta["chat_id"],
+                        f"👀 Needs input  [{task_id[:8]}]\n{notes}\n\nRun: da › review")
+                    _pending.pop(task_id, None)
+            except Exception as e:  # keep the poll loop alive no matter what
+                print(f"[poll] error handling task {task_id[:8]}: {e}", flush=True)
 
 
 # ── Waha session config ──────────────────────────────────────────────────────

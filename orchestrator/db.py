@@ -86,18 +86,22 @@ async def get_task(task_id: str) -> Task | None:
 
 
 async def list_tasks(status: str | None = None, limit: int = 100) -> list[Task]:
+    # Display/inspection query — ordered by recency (newest first) so `status`/
+    # `queue` views surface current activity. Do NOT order by priority here: that
+    # would pin old high-priority rows to the top. Scheduling priority belongs to
+    # claim_next_task, which has its own ordering.
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await _ensure_schema(db)
         if status:
             async with db.execute(
-                "SELECT * FROM tasks WHERE status=? ORDER BY priority DESC, created_at ASC LIMIT ?",
+                "SELECT * FROM tasks WHERE status=? ORDER BY created_at DESC LIMIT ?",
                 (status, limit),
             ) as cur:
                 rows = await cur.fetchall()
         else:
             async with db.execute(
-                "SELECT * FROM tasks ORDER BY priority DESC, created_at ASC LIMIT ?",
+                "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ) as cur:
                 rows = await cur.fetchall()
