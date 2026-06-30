@@ -6,7 +6,9 @@ Living roadmap for new agents and capabilities. Each track lists the smallest va
 
 ## Status & resume point (2026-06-27)
 
-Sprints **0–7 + the #18 capstone are shipped, deployed, and verified** across the fleet (orchestrator on macbook-pro; workers on mac-mini + thinkpad-x1; WhatsApp bridge on mac-mini).
+Sprints **0–7 + the #18 capstone are shipped, deployed, and verified** across the fleet (orchestrator on **mac-mini** since 2026-06-30; workers on mac-mini + thinkpad-x1 + macbook-pro; WhatsApp bridge on mac-mini).
+
+**Infra (2026-06-30):** orchestrator + queue relocated off the laptop to the always-on mac-mini, so the fleet no longer stalls when the MacBook sleeps. Remaining laptop dependency: `calendar`/`email`/`assist` (assistant service still on macbook-pro) — tracked as **#19 `planned`**.
 
 **Shipped & live** (WhatsApp commands from self-chat):
 - **#12 Weather** `weather [in <place>]`, `set-location` · **#6 DeepSeek** (`--agent deepseek`)
@@ -484,6 +486,21 @@ One or more agents that take a project from idea to delivery: you *start* a new 
 **Open decisions:** default autonomy level (recommend L2); is `git push` itself a gate or autonomous within a project's own branch; how plans are stored (PLAN.md in-repo vs Obsidian vs both); one generalist project-agent vs. a Supervisor that routes to per-domain specialists (coding/writing/commerce); how tightly to bind a project to one machine vs. allow cross-machine steps.
 
 **Depends on:** #8 (the engine — Supervisor/Plan-Execute/Validator/circuit-breaker), #5b (which machine runs it), #1 (assistant/Obsidian for plans), #4 (writing), #11 (shopping HITL), #16 (publishing HITL). Lands **after** #8; it's the capstone that makes the rest feel like one assistant.
+
+---
+
+## 19 — Relocate personal-data services off the laptop (assistant/Gmail/Calendar → mac-mini)  ·  `planned` (2026-06-30)
+
+**Why:** the orchestrator + queue moved to the always-on mac-mini (2026-06-30), so weather, agents, market, code review, articles, `plan`, and `find` are now laptop-independent. But `calendar`, `email`, and `assist` are still **hard-pinned to macbook-pro** (`_target_machine: macbook-pro` in `bridge.py`) because they call the assistant service at `http://100.97.176.37:7890` and use the laptop's Gmail/Calendar credentials. When the MacBook sleeps those three commands fail/degrade — the **last remaining laptop dependency** in the fleet.
+
+**Smallest slice:** stand up the assistant service (port 7890) on mac-mini with its own Gmail/Calendar access, repoint workers' `ASSISTANT_API_URL` to mac-mini (worker plist on mac-mini + thinkpad `.env`), and change the three task types from a **hard pin** (`_target_machine`) to a **soft preference** (`_preferred_machine`) so they run on the primary box but can still overflow to the laptop when it's around.
+
+**Open decisions:**
+- Credentials: re-auth Gmail/Calendar OAuth on mac-mini (cleaner, one-time) vs. share the existing token store across the fleet.
+- Obsidian/planning vault — if it lives on the laptop, it needs the same move or a synced copy reachable from mac-mini.
+- Keep macbook-pro as a soft-preference fallback for these, or move them off the laptop entirely.
+
+**Depends on:** #14 (personal-data agents — shipped) · #5b (placement/overflow — shipped; reuse soft preference instead of the hard pin). Mostly ops + a one-line `bridge.py` change (`_target_machine` → `_preferred_machine` for `calendar`/`email_lookup`/`assistant_run`).
 
 ---
 
