@@ -154,14 +154,21 @@ async def claim_next_task(worker_name: str, capabilities: list[str]) -> Task | N
         if not row:
             return None
         now = datetime.utcnow().isoformat()
-        await db.execute(
+        cur = await db.execute(
             "UPDATE tasks SET status='claimed', assigned_to=?, updated_at=? WHERE id=? AND status='pending'",
             (worker_name, now, row["id"]),
         )
         await db.commit()
-        async with db.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)) as cur:
-            updated = await cur.fetchone()
-    return _row_to_task(updated) if updated else None
+        if cur.rowcount == 0:
+            # Another worker claimed it between our SELECT and UPDATE.
+            return None
+    # Build the claimed task from the selected row plus the update delta —
+    # avoids a second SELECT on every worker poll.
+    task = _row_to_task(row)
+    task.status = TaskStatus.claimed
+    task.assigned_to = worker_name
+    task.updated_at = datetime.fromisoformat(now)
+    return task
 
 
 async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:

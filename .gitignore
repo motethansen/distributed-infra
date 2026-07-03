@@ -57,3 +57,7 @@ config/projects.yaml
 # family roster holds phone numbers (PII) — use family.json.example
 config/family.json
 !config/family.json.example
+
+# local scratch & config backups
+config/*.bak*
+scratch/

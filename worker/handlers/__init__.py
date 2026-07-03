@@ -9,6 +9,7 @@ when a task arrives with type == <name>.
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 from pathlib import Path
 
@@ -39,9 +40,10 @@ async def dispatch(task: Task) -> dict:
             if callable(fn):
                 return await fn(task)
         except Exception as exc:
+            logging.exception("Handler for '%s' raised", type_name)
             return {
                 "needs_human": True,
-                "notes": f"Handler for '{type_name}' raised: {exc}",
+                "notes": f"Handler for '{type_name}' raised: {type(exc).__name__}: {exc}",
             }
 
     return {
