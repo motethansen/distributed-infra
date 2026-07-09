@@ -10,6 +10,7 @@ payload:
 from __future__ import annotations
 
 import asyncio
+import math
 from pathlib import Path
 
 import yaml
@@ -18,6 +19,17 @@ from shared.models import Task
 
 _WATCHLIST = Path(__file__).parent.parent.parent / "config" / "watchlist.yaml"
 _DEFAULT = ["AAPL", "MSFT", "SPY"]
+
+
+def _finite(x):
+    """Coerce non-finite floats (NaN/inf) to None so the result stays JSON-serializable.
+
+    yfinance can yield NaN for a ticker's latest close (holiday/partial data), which
+    propagates into chg/rsi and makes FastAPI's JSON encoder reject the whole response.
+    """
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    return x
 
 
 def _load_watchlist() -> list[str]:
@@ -67,7 +79,13 @@ def _analyze_all(tickers: list[str]) -> list[dict]:
             if abs(gap) >= 2:
                 signals.append(f"gap {gap:+.1f}%")
 
-            out.append({"symbol": sym, "last": last, "chg": chg, "rsi": rsi, "signals": signals})
+            out.append({
+                "symbol": sym,
+                "last": _finite(last),
+                "chg": _finite(chg),
+                "rsi": _finite(rsi),
+                "signals": signals,
+            })
         except Exception as exc:  # one bad ticker mustn't sink the brief
             out.append({"symbol": sym, "error": str(exc)[:60]})
     return out
@@ -79,9 +97,13 @@ def _format(rows: list[dict]) -> str:
         if r.get("error"):
             lines.append(f"• {r['symbol']}: {r['error']}")
             continue
-        arrow = "🔺" if r["chg"] > 0 else ("🔻" if r["chg"] < 0 else "▪")
+        last, chg = r.get("last"), r.get("chg")
+        if last is None or chg is None:  # non-finite data for this ticker
+            lines.append(f"• {r['symbol']}: data unavailable")
+            continue
+        arrow = "🔺" if chg > 0 else ("🔻" if chg < 0 else "▪")
         sig = ("  · " + " · ".join(r["signals"])) if r.get("signals") else ""
-        lines.append(f"{arrow} {r['symbol']}  {r['last']:.2f}  {r['chg']:+.1f}%{sig}")
+        lines.append(f"{arrow} {r['symbol']}  {last:.2f}  {chg:+.1f}%{sig}")
     return "\n".join(lines)
 
 
