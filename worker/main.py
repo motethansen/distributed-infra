@@ -16,6 +16,11 @@ MACHINE_NAME = os.getenv("MACHINE_NAME", "unknown-worker")
 TAILSCALE_IP = os.getenv("TAILSCALE_IP", "")
 WORKER_PORT = int(os.getenv("WORKER_PORT", "8001"))
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
+# Active-active failover (#20 Phase 3): comma-separated list of orchestrator
+# endpoints; the poller uses the first live one. Falls back to the single
+# ORCHESTRATOR_URL when unset.
+ORCHESTRATOR_URLS = [u.strip() for u in
+                     os.getenv("ORCHESTRATOR_URLS", ORCHESTRATOR_URL).split(",") if u.strip()]
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "0"))  # 0 = unlimited (#5b)
@@ -30,7 +35,7 @@ async def lifespan(app: FastAPI):
     global poller
     poller = Poller(
         machine_name=MACHINE_NAME,
-        orchestrator_url=ORCHESTRATOR_URL,
+        orchestrator_urls=ORCHESTRATOR_URLS,
         headers=HEADERS,
         interval=POLL_INTERVAL,
         max_concurrent=MAX_CONCURRENT,

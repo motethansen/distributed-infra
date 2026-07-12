@@ -15,7 +15,14 @@ from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
 
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
-from orchestrator import db
+
+# Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
+# (orchestrator.db). QUEUE_BACKEND=rqlite swaps in the Raft-cluster backend
+# (orchestrator.db_rqlite, same signatures) so the queue survives any one node.
+if os.getenv("QUEUE_BACKEND", "sqlite").lower() == "rqlite":
+    from orchestrator import db_rqlite as db
+else:
+    from orchestrator import db
 
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 MACHINE_NAME = os.getenv("MACHINE_NAME", "orchestrator")
@@ -106,6 +113,15 @@ def _tailscale_liveness() -> dict[str, dict]:
 
 
 app = FastAPI(title="Distributed Infra Queue", version="0.1.0")
+
+
+@app.on_event("startup")
+async def _init_backend() -> None:
+    # rqlite backend needs a one-time schema create; the aiosqlite backend
+    # ensures its schema per-call and has no ensure_schema (skipped).
+    init = getattr(db, "ensure_schema", None)
+    if init:
+        await init()
 
 
 def _check_auth(x_secret_key: str = "") -> None:
