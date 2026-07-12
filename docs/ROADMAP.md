@@ -4,11 +4,13 @@ Living roadmap for new agents and capabilities. Each track lists the smallest va
 
 ---
 
-## Status & resume point (2026-06-27)
+## Status & resume point (2026-07-12)
 
-Sprints **0–7 + the #18 capstone are shipped, deployed, and verified** across the fleet (orchestrator on **mac-mini** since 2026-06-30; workers on mac-mini + thinkpad-x1 + macbook-pro; WhatsApp bridge on mac-mini).
+Sprints **0–7 + the #18 capstone + the #20 HA infra work are shipped, deployed, and verified** across the fleet (orchestrator on **mac-mini** since 2026-06-30, now **active-active with thinkpad**; workers on mac-mini + thinkpad-x1 + macbook-pro; WhatsApp bridge on mac-mini).
 
 **Infra (2026-06-30):** orchestrator + queue relocated off the laptop to the always-on mac-mini, so the fleet no longer stalls when the MacBook sleeps. **#19 shipped** — `calendar`/`email`/`assist` now run on mac-mini too (assistant API + sync moved there; soft-pref with laptop overflow). Only `project` (#18) remains laptop-pinned.
+
+**Infra HA — #20 shipped (2026-07-12):** the orchestrator SPOF is gone. The queue lives in a **3-node rqlite (Raft) cluster** (mac-mini + Synology + thinkpad, tolerates any 1 node), the **orchestrator API is active-active** (mac-mini + thinkpad), and **workers + `da` do multi-endpoint failover**. Proven by a live full-fleet drill (primary taken fully down → fleet kept processing → rejoined on restore). The Phase-1 Litestream stopgap was decommissioned. See `docs/ARCHITECTURE.md` + [[rqlite-failover]].
 
 **Shipped & live** (WhatsApp commands from self-chat):
 - **#12 Weather** `weather [in <place>]`, `set-location` · **#6 DeepSeek** (`--agent deepseek`)
