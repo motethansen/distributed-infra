@@ -1,9 +1,12 @@
 """Orchestrator queue server — runs on MacBook Pro."""
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +32,78 @@ PREFER_PRIMARY_TYPES = {
 }
 
 _MACHINES_CONFIG = Path(__file__).parent.parent / "config" / "machines.yaml"
-_ONLINE_WINDOW_SECS = 30  # worker is "online" if it polled within this window
+_ONLINE_WINDOW_SECS = 30  # worker process is "active" if it polled within this window
 _last_seen: dict[str, float] = {}  # worker_name → unix ts of last claim poll
+
+
+# ── Tailscale liveness ───────────────────────────────────────────────────────
+# A machine's online/offline is derived from Tailscale's own view of the tailnet
+# (`tailscale status --json`), not from whether its worker happened to poll the
+# queue recently. This is the machine-reachability baseline; claim-poll recency is
+# kept separately as `worker_active` (process liveness). Falls back to the
+# claim-poll heuristic only when the Tailscale CLI is unavailable.
+_TS_TTL = 5.0  # seconds to cache a `tailscale status` probe
+_TS_CACHE: dict[str, Any] = {"ts": 0.0, "data": {}}
+_TS_BIN_CANDIDATES = (
+    "tailscale", "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+)
+
+
+def _tailscale_bin() -> str | None:
+    for c in _TS_BIN_CANDIDATES:
+        if "/" in c:
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        else:
+            found = shutil.which(c)
+            if found:
+                return found
+    return None
+
+
+def _parse_last_seen(s: str | None) -> datetime | None:
+    # Tailscale reports a zero timestamp (0001-01-01…) for currently-online peers.
+    if not s or s.startswith("0001-01-01"):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _tailscale_liveness() -> dict[str, dict]:
+    """Map tailscale_ip → {online: bool, last_seen: datetime|None}, cached briefly.
+    Returns an empty dict when the CLI is missing or errors, so callers fall back
+    to the claim-poll heuristic."""
+    now = time.time()
+    if now - _TS_CACHE["ts"] < _TS_TTL:
+        return _TS_CACHE["data"]
+    out: dict[str, dict] = {}
+    binp = _tailscale_bin()
+    if binp:
+        try:
+            proc = subprocess.run(
+                [binp, "status", "--json"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout or "{}")
+                nodes = []
+                if data.get("Self"):
+                    nodes.append(data["Self"])
+                nodes.extend((data.get("Peer") or {}).values())
+                for n in nodes:
+                    info = {"online": bool(n.get("Online")),
+                            "last_seen": _parse_last_seen(n.get("LastSeen"))}
+                    for ip in (n.get("TailscaleIPs") or []):
+                        out[ip] = info
+        except (subprocess.SubprocessError, ValueError, OSError):
+            out = {}
+    _TS_CACHE["ts"] = now
+    _TS_CACHE["data"] = out
+    return out
+
 
 app = FastAPI(title="Distributed Infra Queue", version="0.1.0")
 
@@ -138,30 +211,48 @@ async def list_machines(x_secret_key: str = Header(default="")):
     _check_auth(x_secret_key)
     machines = _load_machines()
     now = time.time()
+    ts = _tailscale_liveness()  # tailscale_ip → {online, last_seen}
 
     out = []
     for name, cfg in machines.items():
-        # Workers may register under any alias; take the freshest timestamp.
+        # Worker-process liveness: freshest claim poll under this name or an alias.
         last_ts = _last_seen.get(name)
         for alias in cfg.get("aliases", []) or []:
             alt = _last_seen.get(alias)
             if alt and (last_ts is None or alt > last_ts):
                 last_ts = alt
+        worker_active = last_ts is not None and (now - last_ts) < _ONLINE_WINDOW_SECS
 
         role = cfg.get("role", "worker")
-        online = True if role == "orchestrator" else (
-            last_ts is not None and (now - last_ts) < _ONLINE_WINDOW_SECS
-        )
+        ip = cfg.get("tailscale_ip")
+        tsinfo = ts.get(ip) if ip else None
+
+        # Machine online = Tailscale baseline. Fall back to the claim-poll
+        # heuristic only when Tailscale is unavailable.
+        if tsinfo is not None:
+            online = tsinfo["online"]
+        else:
+            online = True if role == "orchestrator" else worker_active
+
+        # last_seen age: Tailscale's LastSeen when the machine is offline,
+        # else the worker's last claim-poll age.
+        last_seen_ago = None
+        if tsinfo is not None and not tsinfo["online"] and tsinfo["last_seen"]:
+            last_seen_ago = int((datetime.now(timezone.utc) - tsinfo["last_seen"]).total_seconds())
+        elif last_ts:
+            last_seen_ago = int(now - last_ts)
 
         out.append({
             "name": name,
             "role": role,
-            "tailscale_ip": cfg.get("tailscale_ip"),
+            "tailscale_ip": ip,
             "capabilities": cfg.get("capabilities", []) or [],
             "agents": cfg.get("agents", []) or [],
             "aliases": cfg.get("aliases", []) or [],
-            "online": online,
-            "last_seen_ago_secs": int(now - last_ts) if last_ts else None,
+            "online": online,                # machine reachable on the tailnet
+            "tailscale_online": (tsinfo["online"] if tsinfo is not None else None),
+            "worker_active": worker_active,  # worker process polled within the window
+            "last_seen_ago_secs": last_seen_ago,
         })
     return out
 
