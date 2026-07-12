@@ -276,3 +276,45 @@ Ship **Phase 1 (Litestream)** now for immediate durability, then build **Phase 2
 witness node. The payoff is exactly the collaboration the original "orchestrator on
 every machine" idea wanted — active-active orchestrators — made safe by putting a
 single consistent, replicated queue underneath them.
+
+---
+
+## 11 — Phase 2 PoC results (2026-07-12)
+
+The rqlite backend adapter is built and **validated end-to-end** against a live
+rqlite v10.2.7 node.
+
+- **`orchestrator/db_rqlite.py`** — same function signatures as `orchestrator/db.py`
+  (drop-in via `QUEUE_BACKEND=rqlite`, wiring is a follow-up), talking to the rqlite
+  HTTP API: `/db/execute` (writes), `/db/query` (reads, with a consistency `level`),
+  `/db/request` for the atomic claim.
+- **`claim_next_task` refactored** to a single `UPDATE … WHERE id=(SELECT … LIMIT 1)
+  AND status='pending' RETURNING *` via `/db/request` — the SELECT-then-UPDATE race
+  is gone.
+- **`scripts/rqlite_poc_test.py`** — exercises schema/insert/get/list, placement
+  rules, and concurrency. **All checks pass**, including the one that matters:
+  **12 concurrent claims → exactly 12 unique tasks, zero double-claims**, with
+  priority order + hard-pin + soft-pref-grace all respected.
+
+### Deployment findings (feed into the cluster build)
+
+- **rqlite v10 ships NO macOS binary** (Linux/Windows only). So on **mac-mini** rqlite
+  must run as a **Docker container** (OrbStack is already there for WAHA). **thinkpad**
+  runs the native Linux binary. This does not affect the orchestrator process (it's an
+  HTTP client of rqlite).
+- **Witness = the Synology NAS** (already on the tailnet, always-on) as the 3rd voter,
+  running rqlite via Container Manager (Docker). Voters: **mac-mini + thinkpad +
+  Synology**; **macbook-pro** joins as a **non-voting read replica** so it can sleep.
+  This resolves the open witness decision at zero new hardware cost.
+- **Supervise rqlite with the platform's init**, not hand-backgrounding: `systemd`
+  on thinkpad (a `systemd-run --user` transient unit worked cleanly in the PoC),
+  Docker restart-policy on mac-mini + Synology.
+
+### Remaining for the cluster (next)
+
+1. Stand up the 3-node cluster (mac-mini Docker + thinkpad native + Synology Docker),
+   macbook as non-voter.
+2. Wire `QUEUE_BACKEND=rqlite` + `RQLITE_URL` into the orchestrator (one selector).
+3. Import existing tasks; run the orchestrator API active-active on the two reliable
+   voters behind a Tailscale MagicDNS name (Phase 3 discovery).
+4. Chaos-drill (kill each voter under load; assert no lost/double-claimed tasks).
