@@ -1,0 +1,19 @@
+# Litestream — continuous replication of the orchestrator queue DB.
+#
+# Phase 1 failover stopgap for the orchestrator SPOF (see docs/rqlite-failover.md
+# and docs/litestream-runbook.md). Runs on the PRIMARY (mac-mini) and streams the
+# live SQLite queue to the STANDBY (thinkpad) over SFTP on the Tailscale network,
+# so the queue survives losing mac-mini. Manual promote; see the runbook.
+#
+# Requires the DB in WAL mode:  sqlite3 <db> "PRAGMA journal_mode=WAL;"
+# Auth is SSH key (mac-mini's ~/.ssh/id_ed25519 must be in thinkpad's
+# authorized_keys); no password lives in this file.
+dbs:
+  - path: /Users/michaelhansen/Projects/distributed-infra/data/queue.db
+    replicas:
+      - type: sftp
+        host: REDACTED-THINKPAD-IP:22          # thinkpad-x1 (Tailscale)
+        user: michaelhansen
+        path: /home/michaelhansen/litestream-replicas/queue
+        key-path: /Users/michaelhansen/.ssh/id_ed25519
+        sync-interval: 1s

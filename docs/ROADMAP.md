@@ -525,7 +525,8 @@ Remove the last hard SPOF: the orchestrator + SQLite queue live only on mac-mini
 
 **Full design:** [[rqlite-failover]] (`docs/rqlite-failover.md`) — problem, rqlite-vs-alternatives, quorum topology (mac-mini + thinkpad + a small always-on **witness**; macbook as a non-voting read replica), the `claim_next_task` → atomic `UPDATE … RETURNING` refactor, failure matrix, and a staged migration (Phase 0 reconcile checkouts → Phase 1 Litestream stopgap → Phase 2 rqlite → Phase 3 client cutover).
 
-**Smallest slice:** Phase 1 (Litestream replica + scripted promote) for immediate durability with manual failover.
+**Phase 1 — ✅ shipped (2026-07-12):** Litestream v0.3.13 continuously replicates the live queue DB mac-mini → thinkpad over SFTP/Tailscale (launchd-supervised, 1s interval); DB switched to WAL; standby restore verified (thinkpad rebuilt the queue from its replica). Config `config/litestream.yml`, unit `services/litestream/…plist`, scripts `scripts/litestream-restore.sh` + `scripts/failover-promote.sh`, runbook [[litestream-runbook]]. Failover is manual by design.
+**Next (Phase 2):** rqlite cluster for *automatic* failover.
 **Open decision:** the witness node (Raspberry Pi vs cheap VPS vs accept manual failover) — gates true automatic 1-failure tolerance.
 **Depends on:** reconciling the two-checkout drift first ([[infra-deployment-topology]]); otherwise self-contained (DB layer + discovery, no change to workers/handlers/agents).
 
