@@ -519,6 +519,18 @@ Compositions of the agents above — high value-per-effort once the parts exist.
 
 ---
 
+## 20 — Orchestrator HA / failover (rqlite)  ·  `planned` (2026-07-12)
+
+Remove the last hard SPOF: the orchestrator + SQLite queue live only on mac-mini, so the whole fleet stalls if it's down/asleep/wedged. Move the queue from a single-node SQLite file to a **3-node rqlite (Raft-backed SQLite) cluster** so it survives any one machine, while keeping the pull-based claim model and SQL placement rules unchanged. Because the shared state becomes single + linearizable behind Raft, the orchestrator API can then run **active-active** on every node — the safe version of the "orchestrator on every machine" idea.
+
+**Full design:** [[rqlite-failover]] (`docs/rqlite-failover.md`) — problem, rqlite-vs-alternatives, quorum topology (mac-mini + thinkpad + a small always-on **witness**; macbook as a non-voting read replica), the `claim_next_task` → atomic `UPDATE … RETURNING` refactor, failure matrix, and a staged migration (Phase 0 reconcile checkouts → Phase 1 Litestream stopgap → Phase 2 rqlite → Phase 3 client cutover).
+
+**Smallest slice:** Phase 1 (Litestream replica + scripted promote) for immediate durability with manual failover.
+**Open decision:** the witness node (Raspberry Pi vs cheap VPS vs accept manual failover) — gates true automatic 1-failure tolerance.
+**Depends on:** reconciling the two-checkout drift first ([[infra-deployment-topology]]); otherwise self-contained (DB layer + discovery, no change to workers/handlers/agents).
+
+---
+
 ## Sprint plan (summary)
 
 Time-boxed groupings of the tracks above, in dependency + value order. Each sprint ships something usable.
