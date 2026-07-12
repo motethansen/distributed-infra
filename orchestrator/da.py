@@ -33,7 +33,13 @@ from rich import box
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-BASE_URL   = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
+# Active-active failover (#20 Phase 3): ORCHESTRATOR_URLS is a comma-separated list;
+# `da` uses the first orchestrator that answers /health, falling back to the single
+# ORCHESTRATOR_URL. Every orchestrator fronts the same rqlite queue.
+BASE_URLS  = [u.strip() for u in
+              os.getenv("ORCHESTRATOR_URLS",
+                        os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")).split(",") if u.strip()]
+_pref_idx  = 0  # index of the last orchestrator that answered
 SECRET     = os.getenv("SECRET_KEY", "")
 HEADERS    = {"x-secret-key": SECRET}
 CONFIG        = Path(__file__).parent.parent / "config" / "machines.yaml"
@@ -60,8 +66,24 @@ COMMANDS = [
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _pick_base_url() -> str:
+    """First orchestrator (starting from the last good one) that answers /health.
+    Falls back to the preferred URL if none answer, so callers surface the real error."""
+    global _pref_idx
+    n = len(BASE_URLS)
+    for k in range(n):
+        i = (_pref_idx + k) % n
+        try:
+            if httpx.get(f"{BASE_URLS[i]}/health", timeout=3).status_code == 200:
+                _pref_idx = i
+                return BASE_URLS[i]
+        except httpx.HTTPError:
+            continue
+    return BASE_URLS[_pref_idx]
+
+
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=BASE_URL, headers=HEADERS, timeout=10)
+    return httpx.Client(base_url=_pick_base_url(), headers=HEADERS, timeout=10)
 
 
 def _multiline_prompt(hint: str = "") -> str | None:
