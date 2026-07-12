@@ -205,9 +205,10 @@ login is a recurring failure mode ([[mac-mini-claude-oauth-keychain]]).
 **Rollback:** the pre-cutover SQLite snapshot (`~/Projects/distributed-infra/data/queue.db`)
 is untouched. Reverting = remove `QUEUE_BACKEND` from the orchestrator plist + bootout/bootstrap.
 
-**Superseded:** the Phase-1 Litestream replication ([[litestream-runbook]]) still runs on
-mac-mini but now mirrors the frozen pre-cutover SQLite file — obsolete once you trust the
-rqlite cluster; safe to decommission (`launchctl bootout … com.techstartups.litestream`).
+**Decommissioned (2026-07-12):** the Phase-1 Litestream replication (the stopgap before
+rqlite) has been removed now that the cluster is live — the `com.techstartups.litestream`
+launchd job on mac-mini is stopped and disabled, and the thinkpad replica deleted. The
+pre-cutover `queue.db` snapshot is kept for cold rollback.
 
 ---
 
