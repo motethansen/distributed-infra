@@ -42,8 +42,9 @@ async def _run_suggest() -> str:
         focus = (d.get("focus") or "").strip()
         if not focus:
             return ""
-        n = d.get("task_count", 0)
-        return f"🎯 Today's focus ({n} due/overdue)\n{focus}"
+        today, overdue = d.get("due_today", 0), d.get("overdue_total", 0)
+        hdr = f"🎯 Today's focus ({today} due today · {overdue} overdue)"
+        return f"{hdr}\n{focus}"
     except (httpx.HTTPError, ValueError):
         return ""
 
