@@ -19,11 +19,33 @@ from shared.models import Task
 
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
+# ai_agent_assistant API (runs on the mac-mini) — for the daily task focus.
+ASSISTANT_API_URL = os.getenv("ASSISTANT_API_URL", "http://REDACTED-MACMINI-IP:7890").rstrip("/")
+ASSISTANT_API_KEY = os.getenv("ASSISTANT_API_KEY", "")
 _PART_TIMEOUT = 120
 
 
 def _headers() -> dict:
     return {"x-secret-key": SECRET_KEY, "Content-Type": "application/json"}
+
+
+async def _run_suggest() -> str:
+    """The assistant's morning focus — today + overdue tasks distilled to a top-3
+    via its GET /suggest API. Returns '' on any error (brief degrades gracefully)."""
+    headers = {"x-api-key": ASSISTANT_API_KEY} if ASSISTANT_API_KEY else {}
+    try:
+        async with httpx.AsyncClient(timeout=45) as c:
+            r = await c.get(f"{ASSISTANT_API_URL}/suggest", headers=headers)
+        if r.status_code != 200:
+            return ""
+        d = r.json()
+        focus = (d.get("focus") or "").strip()
+        if not focus:
+            return ""
+        n = d.get("task_count", 0)
+        return f"🎯 Today's focus ({n} due/overdue)\n{focus}"
+    except (httpx.HTTPError, ValueError):
+        return ""
 
 
 async def _run_part(task_type: str, payload: dict) -> str:
@@ -59,16 +81,18 @@ async def _run_part(task_type: str, payload: dict) -> str:
 async def handle_morning_brief(task: Task) -> dict:
     email_limit = int(task.payload.get("email_limit", 3) or 3)
 
-    weather, market, calendar, email = await asyncio.gather(
+    weather, market, calendar, email, focus = await asyncio.gather(
         _run_part("weather", {"_target_machine": "mac-mini"}),
         _run_part("market_brief", {}),
         _run_part("calendar", {"_target_machine": "macbook-pro"}),
         _run_part("email_lookup", {"limit": email_limit, "_target_machine": "macbook-pro"}),
+        _run_suggest(),
     )
 
     date = datetime.now().strftime("%A, %d %b %Y")
     blocks = [f"☀️ Good morning — {date}"]
-    for part in (weather, calendar, market, email):
+    # focus first — the most actionable part of the brief
+    for part in (focus, weather, calendar, market, email):
         if part and part.strip():
             blocks.append(part.strip())
     return {"response": "\n\n".join(blocks)}
