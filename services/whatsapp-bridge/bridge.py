@@ -68,6 +68,8 @@ BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
 # for artifact download links. Default = Mac Mini Tailscale IP; override via env
 # (e.g. BRIDGE_PUBLIC_URL=http://mac-mini.REDACTED-TAILNET.ts.net:3001) if the IP changes.
 BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", f"http://REDACTED-MACMINI-IP:{BRIDGE_PORT}").rstrip("/")
+# Vantage service monitor (runs on the mac-mini alongside this bridge) — queried directly for `vantage`.
+VANTAGE_API_URL = os.getenv("VANTAGE_API_URL", "http://localhost:8055").rstrip("/")
 ARTIFACT_URL_TTL = int(os.getenv("ARTIFACT_URL_TTL", "86400"))  # download-link validity (seconds)
 
 # In-memory map: task_id → {chat_id, started_at}
@@ -576,6 +578,11 @@ def _parse(text: str) -> tuple[str, dict]:
     m = re.match(r"^/?(?:email|mail)(?:\s+(.+))?$", t, re.IGNORECASE)
     if m:
         return "email", {"query": (m.group(1) or "").strip()}
+
+    # vantage / monitor / estate [project]  →  live estate status from the Vantage monitor
+    m = re.match(r"^/?(?:vantage|monitor|estate)(?:\s+(.+))?$", t, re.IGNORECASE)
+    if m:
+        return "vantage", {"query": (m.group(1) or "").strip()}
 
     # assist <subcommand> [args]  →  assistant_run on macbook-pro
     if re.match(r"^/?assist(\s+|$)", t, re.IGNORECASE):
@@ -1125,6 +1132,52 @@ async def webhook(request: Request):
         else:
             await _send_wa(chat_id, "❌ Could not reach the queue.")
 
+    elif cmd == "vantage":
+        # Vantage runs on the mac-mini alongside this bridge → query it directly and
+        # reply synchronously (no queue task). `vantage` = estate summary;
+        # `vantage <project>` = that project's servers + services.
+        query = kwargs.get("query", "").strip()
+        emo = {"up": "🟢", "degraded": "🟡", "critical": "🟠", "down": "🔴", "unknown": "🔵", "disabled": "⚪"}
+        public = VANTAGE_API_URL.replace("localhost", "REDACTED-MACMINI-IP").replace("127.0.0.1", "REDACTED-MACMINI-IP")
+        try:
+            async with httpx.AsyncClient(timeout=12) as c:
+                if query:
+                    r = await c.get(f"{VANTAGE_API_URL}/api/platforms")
+                    r.raise_for_status()
+                    plats = r.json().get("platforms", [])
+                    q = query.lower()
+                    p = next((x for x in plats if q in x["id"].lower() or q in x["name"].lower()), None)
+                    if not p:
+                        names = ", ".join(x["name"] for x in plats)
+                        await _send_wa(chat_id, f"❓ No project matching “{query}”.\nTry: {names}")
+                        return Response(status_code=200)
+                    lines = [f"{emo.get(p['state'], '🔵')} {p['name']} — {p['state']} · risk {p['risk']}"]
+                    for n in p.get("nodes", []):
+                        lines.append(f"\n• {n['name']}")
+                        for s in n.get("services", []):
+                            lines.append(f"   {emo.get(s['state'], '🔵')} {s['name']} · {s['state']}")
+                    await _send_long(chat_id, "\n".join(lines))
+                else:
+                    r = await c.get(f"{VANTAGE_API_URL}/api/summary")
+                    r.raise_for_status()
+                    d = r.json()
+                    st = d.get("states", {})
+                    counts = " · ".join(f"{emo[k]} {st[k]} {k}"
+                                        for k in ("down", "critical", "degraded", "unknown", "up", "disabled")
+                                        if st.get(k))
+                    lines = ["🖥️ VANTAGE — estate", counts or "(no data)"]
+                    risks = [x for x in d.get("top_risks", []) if x.get("risk", 0) > 0][:5]
+                    if risks:
+                        lines.append("\n⚠️ Top risk:")
+                        lines += [f" {emo.get(x['state'], '🔵')} {x['name']} · {x['state']} ({x['risk']})" for x in risks]
+                    else:
+                        lines.append("✅ all clear")
+                    lines.append(f"\n🔗 {public}\n(send `vantage <project>` for detail)")
+                    await _send_long(chat_id, "\n".join(lines))
+        except httpx.HTTPError as e:
+            await _send_wa(chat_id, f"❌ Vantage unreachable: {str(e)[:100]}")
+        return Response(status_code=200)
+
     elif cmd == "help_ai":
         question = kwargs["question"]
         machines = await _list_machines()
@@ -1238,6 +1291,7 @@ async def webhook(request: Request):
             "\n"
             "🖥 FLEET\n"
             "  status · queue · review · failures\n"
+            "  vantage [project]  — live estate status (servers, services, risk)\n"
             "  family <add|remove|list> [number] [name]  — manage who can use the bot\n"
             "  assign <task> [--machine=X] [--agent=Y] [--type=Z]\n"
             "  run <agent> <prompt>              — low-level agent_run on mac-mini\n"
