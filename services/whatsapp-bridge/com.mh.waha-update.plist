@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Weekly WAHA image update on the mac-mini. Install to
+     ~/Library/LaunchAgents/com.mh.waha-update.plist and edit WAHA_API_KEY to
+     match the bridge's own key (same value as in com.techstartups.whatsapp-bridge).
+
+     Sunday 04:00 rather than daily: a pull that finds nothing is free, but one
+     that finds a new image recreates the container and restarts the WhatsApp
+     session (~50s of downtime). Weekly, at an hour nobody is messaging, keeps
+     the image fresh without making the bridge flap. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mh.waha-update</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/michaelhansen/Projects/distributed-infra/services/whatsapp-bridge/update-waha.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WAHA_COMPOSE_DIR</key>
+        <string>/Users/michaelhansen/Projects/distributed-infra/services/whatsapp-bridge</string>
+        <key>WAHA_URL</key>
+        <string>http://localhost:3000</string>
+        <key>WAHA_API_KEY</key>
+        <string>__WAHA_API_KEY__</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key><integer>0</integer>
+        <key>Hour</key><integer>4</integer>
+        <key>Minute</key><integer>0</integer>
+    </dict>
+
+    <!-- If the mini was asleep at 04:00 launchd runs this at the next wake.
+         RunAtLoad is off so installing it does not immediately restart WhatsApp. -->
+    <key>RunAtLoad</key><false/>
+
+    <key>Nice</key><integer>10</integer>
+    <key>LowPriorityIO</key><true/>
+    <key>ProcessType</key><string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/waha-update.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/waha-update.err</string>
+</dict>
+</plist>
