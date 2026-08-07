@@ -26,7 +26,7 @@ import httpx
 
 from shared.models import Task
 
-ASSISTANT_API_URL = os.getenv("ASSISTANT_API_URL", "http://REDACTED-ORCHESTRATOR-IP:7890")
+ASSISTANT_API_URL = os.getenv("ASSISTANT_API_URL", "http://localhost:7890")
 ASSISTANT_API_KEY = os.getenv("ASSISTANT_API_KEY", "")
 TIMEOUT_SECS = 60
 

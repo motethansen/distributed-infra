@@ -1,7 +1,7 @@
 // Live end-to-end check of the app's OrchestratorApi against the real orchestrator.
 // Runs the SAME networking code the UI uses (lib/orchestrator_api.dart).
 //
-//   ORCHESTRATOR_URL=http://REDACTED-ORCHESTRATOR-IP:8000 INFRA_SECRET_KEY=… \
+//   ORCHESTRATOR_URL=http://localhost:8000 INFRA_SECRET_KEY=… \
 //     dart run tool/verify_live.dart
 import 'dart:io';
 import 'dart:math';
@@ -19,7 +19,7 @@ String uuidV4() {
 }
 
 Future<void> main() async {
-  final base = Platform.environment['ORCHESTRATOR_URL'] ?? 'http://REDACTED-ORCHESTRATOR-IP:8000';
+  final base = Platform.environment['ORCHESTRATOR_URL'] ?? 'http://localhost:8000';
   final key = Platform.environment['INFRA_SECRET_KEY'] ?? '';
   if (key.isEmpty) {
     stderr.writeln('set INFRA_SECRET_KEY');

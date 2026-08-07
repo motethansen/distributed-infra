@@ -18,7 +18,7 @@ Today the orchestrator + queue are a **single point of failure** on mac-mini
 - `orchestrator/db.py` writes one SQLite file (`data/queue.db`) on mac-mini.
 - `orchestrator/main.py` (FastAPI, `:8000`) is the only process that reads/writes it.
 - Every client — the WhatsApp bridge, all workers (`worker/poller.py`), the `da`
-  CLI — hardcodes `ORCHESTRATOR_URL = http://REDACTED-MACMINI-IP:8000`.
+  CLI — hardcodes `ORCHESTRATOR_URL = http://<mac-mini-ip>:8000`.
 
 If mac-mini is down, asleep, or its process is wedged, the **entire fleet
 stalls**: no task can be created, claimed, or completed, and any queue state that
@@ -179,7 +179,7 @@ RETURNING *;
 ### 5.3 Discovery — kill the hardcoded `ORCHESTRATOR_URL`
 
 Clients (WhatsApp bridge, `worker/poller.py`, `da`, schedulers) must resolve the
-*current* orchestrator rather than `REDACTED-MACMINI-IP:8000`:
+*current* orchestrator rather than `<mac-mini-ip>:8000`:
 
 - **Preferred:** a stable **Tailscale MagicDNS name** — `orchestrator.<tailnet>.ts.net`
   — that maps to whichever voter is serving the API. With active-active API on both

@@ -68,7 +68,7 @@ Flutter (cross-platform iOS + Android + desktop), reusing existing Flutter skill
 ## Screens (MVP)
 1. **Chat** — agent dropdown, message list (mono, selectable), input, send; polls
    for the result; multi-turn for claude; "New session" + settings actions.
-2. **Settings** — orchestrator URL (default `http://REDACTED-ORCHESTRATOR-IP:8000`),
+2. **Settings** — orchestrator URL (default `http://<orchestrator-ip>:8000`),
    secret key, target machine (default `mac-mini`).
 
 ## Milestones (see scrum Sprint-11 / Epic E22)

@@ -19,7 +19,7 @@
 		<key>ORCHESTRATOR_URL</key>
 		<string>http://YOUR_MACBOOK_TAILSCALE_IP:8000</string>
 		<key>PATH</key>
-		<string>/Users/michaelhansen/flutter/bin:/Users/michaelhansen/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/local/share/flutter/bin:/usr/bin:/usr/sbin:/bin</string>
+		<string>/Users/YOUR_USERNAME/flutter/bin:/Users/YOUR_USERNAME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/local/share/flutter/bin:/usr/bin:/usr/sbin:/bin</string>
 		<key>POLL_INTERVAL_SECONDS</key>
 		<string>10</string>
 		<key>SECRET_KEY</key>
@@ -35,7 +35,7 @@
 	<string>com.techstartups.worker</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/michaelhansen/Projects/distributed-infra/.venv/bin/uvicorn</string>
+		<string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/uvicorn</string>
 		<string>worker.main:app</string>
 		<string>--host</string>
 		<string>0.0.0.0</string>
@@ -47,10 +47,10 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/michaelhansen/Projects/distributed-infra/logs/worker.err</string>
+	<string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/michaelhansen/Projects/distributed-infra/logs/worker.log</string>
+	<string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.log</string>
 	<key>WorkingDirectory</key>
-	<string>/Users/michaelhansen/Projects/distributed-infra</string>
+	<string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
 </dict>
 </plist>

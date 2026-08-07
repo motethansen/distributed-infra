@@ -12,7 +12,7 @@ Parse:
 - Everything else: the prompt
 
 Steps:
-1. POST to orchestrator at $ORCHESTRATOR_URL/tasks (default: http://REDACTED-ORCHESTRATOR-IP:8000):
+1. POST to orchestrator at $ORCHESTRATOR_URL/tasks (default: http://<orchestrator-ip>:8000):
    - type: agent_run
    - payload: { "agent": "<agent>", "prompt": "<prompt>", "_target_machine": "<machine>" }
    - notes: first 80 chars of prompt

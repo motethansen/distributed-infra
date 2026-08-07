@@ -11,7 +11,7 @@ Parse the arguments:
 - `--format=linkedin` (default) or `--format=twitter`
 
 Steps:
-1. POST to the orchestrator at $ORCHESTRATOR_URL/tasks (default: http://REDACTED-ORCHESTRATOR-IP:8000) with:
+1. POST to the orchestrator at $ORCHESTRATOR_URL/tasks (default: http://<orchestrator-ip>:8000) with:
    - type: write_post
    - payload: { "prompt": "<topic>", "format": "<linkedin|twitter>", "_target_machine": "mac-mini" }
    - notes: "post/<format>: <first 65 chars of topic>"

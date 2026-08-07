@@ -26,7 +26,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>ORCHESTRATOR_URL</key>
-    <string>http://REDACTED-ORCHESTRATOR-IP:8000</string>
+    <string>http://localhost:8000</string>
     <key>INFRA_SECRET_KEY</key>
     <string>YOUR_SECRET_KEY_HERE</string>
     <key>WAHA_URL</key>
@@ -35,6 +35,10 @@
     <string>YOUR_WAHA_API_KEY</string>
     <key>BRIDGE_PORT</key>
     <string>3001</string>
+    <!-- This machine's Tailscale IP or MagicDNS name. Artifact download links are
+         built from it, so leaving it empty yields links that only open here. -->
+    <key>PUBLIC_HOST</key>
+    <string>YOUR_TAILSCALE_IP_OR_MAGICDNS_NAME</string>
   </dict>
 
   <key>RunAtLoad</key>

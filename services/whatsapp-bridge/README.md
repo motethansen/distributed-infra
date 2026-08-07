@@ -75,14 +75,14 @@ bridge validates it and replies with a `📎` note giving the path, size, and a
 ```
 📎 File(s) created on mac-mini (tap to download over Tailscale):
 • /Users/.../wines.csv (1.2KB)
-  ⬇ http://REDACTED-MACMINI-IP:3001/artifact/<token>
+  ⬇ http://<mac-mini-ip>:3001/artifact/<token>
 ```
 
 The link hits `GET /artifact/{token}` on this bridge. Tokens are unguessable and
 time-limited (`ARTIFACT_URL_TTL`, default 24 h) and only ever map to files the
 bridge explicitly registered — there is **no arbitrary-path access**. Your phone
 must be on the tailnet. Set `BRIDGE_PUBLIC_URL` if the Mac Mini's Tailscale address
-changes (e.g. `http://mac-mini.REDACTED-TAILNET.ts.net:3001`).
+changes (e.g. `http://mac-mini.<tailnet>.ts.net:3001`).
 
 > The free WAHA NOWEB engine can't *attach* binaries in chat (`sendImage`/`sendFile`
 > → HTTP 422, Plus-only), so we hand back a download link instead.

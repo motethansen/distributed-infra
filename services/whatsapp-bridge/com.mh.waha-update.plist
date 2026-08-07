@@ -16,13 +16,13 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/michaelhansen/Projects/distributed-infra/services/whatsapp-bridge/update-waha.sh</string>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/update-waha.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>WAHA_COMPOSE_DIR</key>
-        <string>/Users/michaelhansen/Projects/distributed-infra/services/whatsapp-bridge</string>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge</string>
         <key>WAHA_URL</key>
         <string>http://localhost:3000</string>
         <key>WAHA_API_KEY</key>

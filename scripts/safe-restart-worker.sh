@@ -14,7 +14,7 @@
 #   scripts/safe-restart-worker.sh --orchestrator URL # override default orchestrator URL
 #
 # Env (read from .env if present):
-#   ORCHESTRATOR_URL  — default http://REDACTED-ORCHESTRATOR-IP:8000
+#   ORCHESTRATOR_URL  — default http://localhost:8000
 #   SECRET_KEY        — required to query queue
 #   MACHINE_NAME      — restricts the in_progress check to THIS machine's tasks
 
@@ -29,7 +29,7 @@ if [ -f .env ]; then
 fi
 
 FORCE=0
-ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://REDACTED-ORCHESTRATOR-IP:8000}"
+ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-http://localhost:8000}"
 
 while [ $# -gt 0 ]; do
   case "$1" in

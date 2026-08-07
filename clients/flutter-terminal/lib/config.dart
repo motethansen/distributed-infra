@@ -20,7 +20,7 @@ class AppConfig {
     final p = await SharedPreferences.getInstance();
     return AppConfig(
       // Default = MacBook orchestrator Tailscale IP (queue server on :8000)
-      baseUrl: p.getString(_kUrl) ?? 'http://REDACTED-ORCHESTRATOR-IP:8000',
+      baseUrl: p.getString(_kUrl) ?? 'http://localhost:8000',
       secretKey: p.getString(_kKey) ?? '',
       targetMachine: p.getString(_kMachine) ?? 'mac-mini',
     );

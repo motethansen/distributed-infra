@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 # ── Config ────────────────────────────────────────────────────────────────────
 WAHA_URL         = os.getenv("WAHA_URL", "http://localhost:3000")
 WAHA_API_KEY     = os.getenv("WAHA_API_KEY", "")
-ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://REDACTED-ORCHESTRATOR-IP:8000")
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET_KEY       = os.getenv("INFRA_SECRET_KEY", "")
 WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
@@ -64,10 +64,19 @@ def _save_family(members: dict) -> None:
     os.replace(tmp, _FAMILY_FILE)
 HELP_MACHINE     = os.getenv("HELP_MACHINE", "mac-mini")  # which worker answers help queries
 BRIDGE_PORT      = int(os.getenv("BRIDGE_PORT", "3001"))
-# Public base URL of THIS bridge, reachable from your phone over Tailscale — used
-# for artifact download links. Default = Mac Mini Tailscale IP; override via env
-# (e.g. BRIDGE_PUBLIC_URL=http://mac-mini.REDACTED-TAILNET.ts.net:3001) if the IP changes.
-BRIDGE_PUBLIC_URL = os.getenv("BRIDGE_PUBLIC_URL", f"http://REDACTED-MACMINI-IP:{BRIDGE_PORT}").rstrip("/")
+# Host of THIS machine as reachable from your phone over Tailscale — a Tailscale
+# IP or a MagicDNS name (e.g. mac-mini.<tailnet>.ts.net). Deliberately not
+# defaulted to a literal address: that hardcodes one machine's tailnet identity
+# into the repo, and it silently breaks the moment the address changes.
+PUBLIC_HOST = os.getenv("PUBLIC_HOST", "").strip()
+# Public base URL of THIS bridge — used for artifact download links, so it must
+# be resolvable from the phone, not from the bridge. Falls back to localhost,
+# which keeps the bridge running but yields links only openable on this machine;
+# set PUBLIC_HOST (or BRIDGE_PUBLIC_URL outright) for working phone links.
+BRIDGE_PUBLIC_URL = (
+    os.getenv("BRIDGE_PUBLIC_URL")
+    or f"http://{PUBLIC_HOST or 'localhost'}:{BRIDGE_PORT}"
+).rstrip("/")
 # Vantage service monitor (runs on the mac-mini alongside this bridge) — queried directly for `vantage`.
 VANTAGE_API_URL = os.getenv("VANTAGE_API_URL", "http://localhost:8055").rstrip("/")
 ARTIFACT_URL_TTL = int(os.getenv("ARTIFACT_URL_TTL", "86400"))  # download-link validity (seconds)
@@ -1138,7 +1147,12 @@ async def webhook(request: Request):
         # `vantage <project>` = that project's servers + services.
         query = kwargs.get("query", "").strip()
         emo = {"up": "🟢", "degraded": "🟡", "critical": "🟠", "down": "🔴", "unknown": "🔵", "disabled": "⚪"}
-        public = VANTAGE_API_URL.replace("localhost", "REDACTED-MACMINI-IP").replace("127.0.0.1", "REDACTED-MACMINI-IP")
+        # The bridge reaches Vantage on loopback, but the link goes to a phone, so
+        # swap loopback for this machine's tailnet host. Without PUBLIC_HOST the
+        # link stays loopback and simply won't open off-machine.
+        public = VANTAGE_API_URL
+        if PUBLIC_HOST:
+            public = public.replace("localhost", PUBLIC_HOST).replace("127.0.0.1", PUBLIC_HOST)
         try:
             async with httpx.AsyncClient(timeout=12) as c:
                 if query:

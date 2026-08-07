@@ -3,7 +3,12 @@ services:
     image: devlikeapro/waha
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      # Loopback only. "3000:3000" binds 0.0.0.0, publishing a live WhatsApp
+      # session to the whole tailnet and LAN. Every consumer (the bridge,
+      # start-waha-session.sh) reaches WAHA at localhost:3000, so nothing needs
+      # it off-host; the container still reaches the bridge via
+      # host.docker.internal, which is unaffected by this bind address.
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./waha-sessions:/app/.sessions
     environment:
@@ -18,6 +23,10 @@ services:
       # restarts the container, not the WhatsApp session) and the bridge goes dark.
       # The noweb credentials in ./waha-sessions let it reconnect with no new QR.
       WAHA_AUTO_START_SESSIONS: "default"
-      WAHA_DASHBOARD_USERNAME: "michaelhansen"
-      WAHA_DASHBOARD_PASSWORD: "REDACTED-WAHA-DASHBOARD-PASSWORD-ROTATE-THIS"
-      WAHA_API_KEY: "REDACTED-WAHA-API-KEY-ROTATE-THIS"
+      # Credentials come from the gitignored .env beside this file — never inline
+      # them here. WAHA holds a live WhatsApp session: whoever has the API key can
+      # read and send messages as you, and the dashboard login is a second way in.
+      # See .env.example for the keys to set.
+      WAHA_DASHBOARD_USERNAME: "${WAHA_DASHBOARD_USERNAME:?set in .env}"
+      WAHA_DASHBOARD_PASSWORD: "${WAHA_DASHBOARD_PASSWORD:?set in .env}"
+      WAHA_API_KEY: "${WAHA_API_KEY:?set in .env}"

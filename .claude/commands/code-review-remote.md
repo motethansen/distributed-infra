@@ -11,7 +11,7 @@ Parse the arguments:
 - Optional `--focus=<area>` (e.g. security, performance, architecture)
 
 Steps:
-1. POST to the orchestrator at $ORCHESTRATOR_URL/tasks (default: http://REDACTED-ORCHESTRATOR-IP:8000) with:
+1. POST to the orchestrator at $ORCHESTRATOR_URL/tasks (default: http://<orchestrator-ip>:8000) with:
    - type: code_review
    - payload: { "target": "<path>", "focus": "<focus or empty>", "_target_machine": "mac-mini" }
    - notes: "review: <target>"

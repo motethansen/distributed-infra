@@ -24,8 +24,8 @@ flutter run               # on a device/simulator that's on the Tailscale networ
 ```
 
 First launch → open **Settings** (gear icon) and set:
-- **Orchestrator URL** — `http://REDACTED-ORCHESTRATOR-IP:8000` (MacBook Tailscale IP), or the
-  MagicDNS name, e.g. `http://<macbook>.REDACTED-TAILNET.ts.net:8000`
+- **Orchestrator URL** — `http://<orchestrator-ip>:8000` (MacBook Tailscale IP), or the
+  MagicDNS name, e.g. `http://<macbook>.<tailnet>.ts.net:8000`
 - **Secret key** — the fleet `SECRET_KEY` (same value the workers/bridge use)
 - **Target machine** — `mac-mini`
 

@@ -18,7 +18,7 @@ from shared.models import Task
 
 ASSISTANT_DIR    = Path(os.getenv(
     "ASSISTANT_PROJECT_DIR",
-    "/Users/michaelhansen/Projects/github/ai_agent_assistant",
+    "/Users/YOUR_USERNAME/Projects/github/ai_agent_assistant",
 ))
 ASSISTANT_PYTHON = ASSISTANT_DIR / "venv" / "bin" / "python"
 TIMEOUT_SECS     = 60

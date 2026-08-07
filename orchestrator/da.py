@@ -1058,7 +1058,7 @@ def cmd_assistant(args: list[str]) -> None:
             k, v = a[2:].split("=", 1)
             params[k] = v
 
-    base_url = _os.getenv("ASSISTANT_API_URL", "http://REDACTED-ORCHESTRATOR-IP:7890")
+    base_url = _os.getenv("ASSISTANT_API_URL", "http://localhost:7890")
     api_key  = _os.getenv("ASSISTANT_API_KEY", "")
     headers  = {"x-api-key": api_key} if api_key else {}
 

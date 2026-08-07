@@ -20,7 +20,7 @@ from shared.models import Task
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 # ai_agent_assistant API (runs on the mac-mini) — for the daily task focus.
-ASSISTANT_API_URL = os.getenv("ASSISTANT_API_URL", "http://REDACTED-MACMINI-IP:7890").rstrip("/")
+ASSISTANT_API_URL = os.getenv("ASSISTANT_API_URL", "http://localhost:7890").rstrip("/")
 ASSISTANT_API_KEY = os.getenv("ASSISTANT_API_KEY", "")
 _PART_TIMEOUT = 120
 

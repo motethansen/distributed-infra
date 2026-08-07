@@ -24,17 +24,17 @@ Stack: FastAPI · httpx · Pydantic · **rqlite** (Raft-backed SQLite) · subscr
 
 ## 2 — Fleet topology
 
-Tailscale tailnet (`REDACTED-TAILNET.ts.net`). Auth between services is a shared
+Tailscale tailnet (`<tailnet>.ts.net`). Auth between services is a shared
 `SECRET_KEY` in an `x-secret-key` header. Machine liveness in `/machines` is derived
 from Tailscale itself (`tailscale status`), with worker-poll recency as a separate
 `worker_active` signal.
 
 | Machine | Tailscale IP | Role in the system | Supervision |
 |---|---|---|---|
-| **mac-mini** | REDACTED-MACMINI-IP | orchestrator + worker + **rqlite voter** + WhatsApp bridge + WAHA | launchd |
-| **thinkpad-x1** | REDACTED-THINKPAD-IP | orchestrator + worker + **rqlite voter** | systemd `--user` (lingering) |
-| **daffy** (Synology NAS) | REDACTED-NAS-IP | **rqlite voter** only | Docker `--restart` + DSM boot task |
-| **macbook-pro** | REDACTED-ORCHESTRATOR-IP | worker only (sleeps); canonical dev checkout | launchd |
+| **mac-mini** | <mac-mini-ip> | orchestrator + worker + **rqlite voter** + WhatsApp bridge + WAHA | launchd |
+| **thinkpad-x1** | <thinkpad-ip> | orchestrator + worker + **rqlite voter** | systemd `--user` (lingering) |
+| **daffy** (Synology NAS) | <nas-ip> | **rqlite voter** only | Docker `--restart` + DSM boot task |
+| **macbook-pro** | <orchestrator-ip> | worker only (sleeps); canonical dev checkout | launchd |
 
 - **mac-mini** is the always-on primary (orchestrator + bridge + a voter).
 - **thinkpad-x1** is the always-on secondary (2nd orchestrator + a voter).
@@ -140,7 +140,7 @@ claims by capability, with a concurrency cap (overflow to peers).
 **Multi-orchestrator failover (#20 Phase 3):** the poller takes `ORCHESTRATOR_URLS`
 (comma-separated), uses the last-known-good endpoint, and fails over to the next on any
 connection error — so a worker keeps claiming/reporting even if one orchestrator is
-down. Set to `http://REDACTED-MACMINI-IP:8000,http://REDACTED-THINKPAD-IP:8000` on the thinkpad +
+down. Set to `http://<mac-mini-ip>:8000,http://<thinkpad-ip>:8000` on the thinkpad +
 macbook workers. Demonstrated live: mac-mini orchestrator stopped → thinkpad worker
 kept processing via thinkpad's orchestrator.
 

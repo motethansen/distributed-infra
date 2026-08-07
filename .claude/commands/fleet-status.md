@@ -5,7 +5,7 @@ description: Show fleet health — all machines online/offline, active tasks, an
 Fetch and display fleet status from the distributed-infra orchestrator.
 
 Steps:
-1. GET $ORCHESTRATOR_URL/machines (default: http://REDACTED-ORCHESTRATOR-IP:8000) with INFRA_SECRET_KEY header
+1. GET $ORCHESTRATOR_URL/machines (default: http://<orchestrator-ip>:8000) with INFRA_SECRET_KEY header
 2. GET $ORCHESTRATOR_URL/tasks?limit=20
 3. Display:
    - Each machine: name, role, online status, last-seen if offline

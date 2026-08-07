@@ -15,5 +15,5 @@ Steps:
    - notes: "article: <first 70 chars of topic>"
 2. Print the task ID and confirm it was queued.
 
-If ORCHESTRATOR_URL is not set, default to http://REDACTED-ORCHESTRATOR-IP:8000.
+If ORCHESTRATOR_URL is not set, default to http://<orchestrator-ip>:8000.
 Use the secret key from INFRA_SECRET_KEY env var in the x-secret-key header.
