@@ -32,6 +32,8 @@ WAHA_SESSION     = "default"
 POLL_INTERVAL    = 8    # seconds between completion checks
 TASK_TIMEOUT     = 360  # seconds before giving up
 WAHA_CHECK_INTERVAL = int(os.getenv("WAHA_CHECK_INTERVAL", "60"))  # re-ensure session is up
+WAHA_RESTART_PAUSE  = float(os.getenv("WAHA_RESTART_PAUSE", "5"))  # settle time between stop/start and status re-reads
+WAHA_START_POLLS    = int(os.getenv("WAHA_START_POLLS", "6"))      # status re-reads before giving up on STARTING
 MORNING_BRIEF_TIME = os.getenv("MORNING_BRIEF_TIME", "")  # "07:00" (local) to enable daily brief; empty = off
 
 # Multi-user / family access (#17). Roster of approved non-owner numbers (gitignored
@@ -737,19 +739,40 @@ async def _ensure_waha_config() -> None:
         status = (session.get("status") or "").upper()
         if status in ("", "STOPPED", "FAILED"):
             try:
+                # A FAILED session MUST be stopped before it can be restarted. Waha
+                # answers /start on a FAILED session with "Session is already running"
+                # (201, a no-op), so a bare start leaves it FAILED and this watchdog
+                # loops forever while the bridge stays dark and every sendText hangs
+                # until it aborts. Cost a ~3-day outage (2026-08-09..12).
+                # STOPPED/absent sessions start fine without the extra call.
+                if status == "FAILED":
+                    await c.post(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}/stop",
+                        headers=_waha_headers(), timeout=10)
+                    await asyncio.sleep(WAHA_RESTART_PAUSE)
                 await c.post(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}/start",
                     headers=_waha_headers(), timeout=10)
                 print(f"[waha-config] started '{WAHA_SESSION}' session (was {status or 'absent'})", flush=True)
-                # re-read so we pick up me/status once it transitions to STARTING/WORKING
-                r = await c.get(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
-                    headers=_waha_headers(), timeout=5)
-                session = r.json() or {}
+                # Re-read until the session leaves STARTING. A start returns
+                # status=STARTING with me=null; reading only once would cache an
+                # empty _self_number below and scope the bridge to nothing.
+                for _ in range(WAHA_START_POLLS):
+                    r = await c.get(f"{WAHA_URL}/api/sessions/{WAHA_SESSION}",
+                        headers=_waha_headers(), timeout=5)
+                    session = r.json() or {}
+                    if (session.get("status") or "").upper() != "STARTING":
+                        break
+                    await asyncio.sleep(WAHA_RESTART_PAUSE)
+                print(f"[waha-config] '{WAHA_SESSION}' now {session.get('status')}", flush=True)
             except httpx.HTTPError as e:
-                print(f"[waha-config] session start failed: {e}", flush=True)
+                print(f"[waha-config] session restart failed: {e}", flush=True)
 
-        me      = session.get("me") or {}
-        _self_number = _digits(me.get("id", ""))
-        if _self_number:
+        # Only overwrite the cached number when Waha actually reports one. A session
+        # still coming up returns me=null, and blanking _self_number here would make
+        # the bridge ignore every message until the next watchdog pass.
+        me = session.get("me") or {}
+        number = _digits(me.get("id", ""))
+        if number and number != _self_number:
+            _self_number = number
             print(f"[waha-config] self-chat scope locked to {_self_number}", flush=True)
 
         cfg = session.get("config") or {}
