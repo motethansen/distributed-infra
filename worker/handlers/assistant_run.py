@@ -16,10 +16,15 @@ from pathlib import Path
 
 from shared.models import Task
 
-ASSISTANT_DIR    = Path(os.getenv(
-    "ASSISTANT_PROJECT_DIR",
-    "/Users/YOUR_USERNAME/Projects/github/ai_agent_assistant",
-))
+# Default to the conventional checkout under the current user's home. The old
+# default was a literal "/Users/YOUR_USERNAME/..." placeholder, which resolves on
+# no machine at all — so every `assist` command died with a confusing "venv not
+# found" pointing at a path nobody has. Neither worker sets ASSISTANT_PROJECT_DIR,
+# so the placeholder was always what ran. Set that env var when the checkout
+# lives somewhere other than ~/Projects/github/ai_agent_assistant.
+# `or` (not a getenv default) so an empty-string env var falls back too.
+ASSISTANT_DIR    = Path(os.getenv("ASSISTANT_PROJECT_DIR")
+                        or Path.home() / "Projects" / "github" / "ai_agent_assistant")
 ASSISTANT_PYTHON = ASSISTANT_DIR / "venv" / "bin" / "python"
 TIMEOUT_SECS     = 60
 
