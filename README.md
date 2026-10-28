@@ -498,6 +498,13 @@ Agents run non-interactively in the queue:
 
 ---
 
+### Use the fleet from any harness (MCP)
+
+`clients/fleet-mcp` is an MCP server that gives Claude Code, Codex, OpenCode, Antigravity and
+pi (and T3 Code threads running on them) the tools `fleet_ask`, `fleet_result`,
+`fleet_tasks` and `fleet_machines`. Agents run on the workers under their own logins, with
+automatic failover on usage limits. Setup and caveats: [clients/fleet-mcp/README.md](clients/fleet-mcp/README.md).
+
 ## Troubleshooting
 
 **Worker keeps showing "Poller error: ConnectError"**

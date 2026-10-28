@@ -167,6 +167,11 @@ deepseek, content, social** — the CLIs use their own login sessions, DeepSeek 
   reported (`data/agent_cooldowns.json`, per machine). Timeouts and real errors do not
   fail over. Multi-turn chats send their recent `history`, so the next agent picks up
   mid-conversation; the reply says who answered. See `agents/failover.py`.
+- **Harness access (`clients/fleet-mcp`):** a stdio MCP server registered in Claude Code (so
+  T3 Code's Claude threads), Codex, OpenCode and Antigravity gives them `fleet_ask` /
+  `fleet_result` / `fleet_tasks` / `fleet_machines`. It submits `agent_run` tasks, so the
+  failover above applies; named conversations are kept locally and can be continued from a
+  different harness.
 - **Opus is blocked** fleet-wide; all machines default to **Sonnet** (`~/.claude/settings.json`).
 
 Headless `claude` needs the workspace trusted + an active login on each worker; a lapsed

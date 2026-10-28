@@ -1,0 +1,3 @@
+# Client-side only (runs on the machine whose harness uses it, not on workers).
+mcp>=1.9,<2
+httpx>=0.27
