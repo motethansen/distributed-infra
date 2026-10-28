@@ -75,3 +75,20 @@ sensitive_values: [private, privacy, sensitive, personal, confidential, secret]
 non_private_agents: [deepseek]
 # Where privacy work goes when the guard trips (until #7's local model exists).
 privacy_fallback: { agent: claude, model: sonnet }
+
+# ── Failover (agents/failover.py) ──────────────────────────────────────────────
+# When the routed agent is UNAVAILABLE — usage/session limit, rate limit, quota,
+# overloaded, or not installed/logged in — the task moves to the next agent in
+# its class's list, in order. Other failures (timeouts, real errors) still stop
+# and wait for a human. A limited agent is skipped until the reset time it
+# reported. The privacy guard above applies to every fallback too, so `deepseek`
+# is never used for privacy-class work even if listed. Disable per task with
+# payload `failover: false`. A pinned agent with no task_kind uses `default`.
+fallbacks:
+  privacy:    [ { agent: codex }, { agent: agy } ]
+  coding:     [ { agent: codex }, { agent: agy } ]
+  planning:   [ { agent: codex }, { agent: agy } ]
+  reasoning:  [ { agent: claude, model: sonnet }, { agent: codex }, { agent: agy } ]
+  bulk:       [ { agent: claude, model: haiku }, { agent: codex }, { agent: agy } ]
+  mechanical: [ { agent: deepseek, model: deepseek-chat }, { agent: codex }, { agent: agy } ]
+  default:    [ { agent: codex }, { agent: agy }, { agent: deepseek, model: deepseek-chat } ]

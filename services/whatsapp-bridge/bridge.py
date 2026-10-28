@@ -109,8 +109,9 @@ _REPLY_PREFIXES = (
 
 # `agent <llm> <prompt>` launcher (BLI-050). Maps the user-facing LLM keyword to a
 # backend agent in the worker's runner (agents/runner.py AGENTS:
-# claude, agy, codex, groq, content, social). All are subscription CLI agents,
-# so no API keys are needed. Aliases let the user type natural names.
+# claude, agy, codex, deepseek, content, social). Aliases let the user type
+# natural names. If the chosen agent is unavailable (usage limit etc.) the worker
+# fails over to the next agent in config/routing.yaml — see agents/failover.py.
 _AGENT_ALIASES = {
     "claude":       "claude",   # Claude Code (`claude -p`)
     "code":         "claude",   # Claude Code is the claude CLI
@@ -119,7 +120,7 @@ _AGENT_ALIASES = {
     "antigravity":  "agy",
     "codex":        "codex",    # OpenAI Codex CLI
     "gpt":          "codex",
-    "groq":         "groq",
+    "deepseek":     "deepseek", # DeepSeek API (one-shot; never used for private work)
     "content":      "content",  # long-form content agent
     "social":       "social",   # social-post agent
 }
@@ -136,7 +137,9 @@ def _agent_choices() -> str:
 # user sends `end`. In-memory only — a bridge restart drops the mapping.
 _RESUMABLE_BACKENDS = {"claude"}
 SESSION_TTL = int(os.getenv("AGENT_SESSION_TTL", "1800"))  # seconds of idle before a session expires
-# chat_id → {agent, llm, session_id, last_active, turns}
+# chat_id → {agent, llm, session_id, last_active, turns, history}
+# `history` holds the recent turns so another agent can take over mid-conversation
+# when the session's agent hits its usage limit (sent with every continuation).
 _sessions: dict[str, dict] = {}
 
 
@@ -150,6 +153,49 @@ def _live_session(chat_id: str, now: float) -> dict | None:
         _save_sessions()
         return None
     return s
+
+
+HISTORY_MAX_TURNS = int(os.getenv("AGENT_HISTORY_TURNS", "20"))
+HISTORY_TURN_CHARS = int(os.getenv("AGENT_HISTORY_TURN_CHARS", "4000"))
+
+
+def _trim_history(history: list[dict]) -> list[dict]:
+    return history[-HISTORY_MAX_TURNS:]
+
+
+def _record_reply(chat_id: str, result: dict) -> None:
+    """Append the agent's answer to the chat's session history. If the session's
+    agent had to start a fresh session (it took over again after a failover),
+    remember the new session id so later turns resume it."""
+    sess = _sessions.get(chat_id)
+    if not sess:
+        return
+    answered = result.get("answered_by") or result.get("agent") or sess.get("agent")
+    text = str(result.get("response") or "")[:HISTORY_TURN_CHARS]
+    sess["history"] = _trim_history(list(sess.get("history") or [])
+                                    + [{"role": "assistant", "text": text, "agent": answered}])
+    if answered == sess.get("agent") and result.get("session_id"):
+        sess["session_id"] = result["session_id"]
+    _save_sessions()
+
+
+def _failover_note(result: dict) -> str:
+    """One line saying which agents were skipped and who answered, or ''."""
+    steps = result.get("failover") or []
+    if not steps:
+        return ""
+    bits = []
+    for f in steps:
+        why = "usage limit" if f.get("reason") == "limit" else "unavailable"
+        until = f.get("until")
+        if until:
+            try:
+                why += ", back " + datetime.fromisoformat(until).astimezone().strftime("%a %H:%M")
+            except ValueError:
+                pass
+        bits.append(f"{f.get('agent')} ({why})")
+    who = result.get("answered_by") or result.get("agent") or "another agent"
+    return f"↪ {', '.join(bits)} — answered by {who}\n"
 
 
 # Persist sessions to disk so multi-turn survives a bridge restart. The claude CLI
@@ -502,7 +548,7 @@ def _parse(text: str) -> tuple[str, dict]:
     if m:
         return "write_article", {"prompt": m.group(1).strip()}
 
-    # write post: <topic> [--format=twitter]  →  write_post task on mac-mini (social_agent / Groq)
+    # write post: <topic> [--format=twitter]  →  write_post task on mac-mini (social_agent, routed draft)
     m = re.match(r"^!?write\s+post:\s*(.+)", t, re.IGNORECASE)
     if m:
         body   = m.group(1).strip()
@@ -531,7 +577,7 @@ def _parse(text: str) -> tuple[str, dict]:
     if re.match(r"^/?run\s+", t, re.IGNORECASE):
         body  = re.sub(r"^/?run\s+", "", t, flags=re.IGNORECASE)
         parts = body.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() in ("claude", "agy", "codex", "groq", "content", "social"):
+        if len(parts) == 2 and parts[0].lower() in ("claude", "agy", "codex", "deepseek", "content", "social"):
             return "run", {"agent": parts[0].lower(), "prompt": parts[1]}
         return "run", {"agent": "claude", "prompt": body}
 
@@ -644,9 +690,12 @@ async def _poll_loop() -> None:
                 response_text = result.get("response") or result.get("error") or ""
 
                 if status == "done":
+                    if meta.get("session") and isinstance(result, dict):
+                        _record_reply(meta["chat_id"], result)
+                    note = _failover_note(result) if isinstance(result, dict) else ""
                     # full answer, chunked across messages if long
                     await _send_long(meta["chat_id"],
-                        f"✅ Done  [{task_id[:8]}]\n\n{response_text}")
+                        f"✅ Done  [{task_id[:8]}]\n{note}\n{response_text}")
                     # surface any files the agent produced and named in its reply
                     artifacts = (result.get("artifacts")
                                  if isinstance(result.get("artifacts"), list)
@@ -665,6 +714,8 @@ async def _poll_loop() -> None:
 
                 elif status == "needs_human":
                     notes = (task.get("notes") or "")[:400]
+                    if isinstance(result, dict) and result.get("failover"):
+                        notes = _failover_note(result) + notes
                     await _send_wa(meta["chat_id"],
                         f"👀 Needs input  [{task_id[:8]}]\n{notes}\n\nRun: da › review")
                     _pending.pop(task_id, None)
@@ -979,13 +1030,14 @@ async def webhook(request: Request):
             payload["session_id"] = sid
             payload["resume"] = False
             _sessions[chat_id] = {"agent": backend, "llm": llm, "session_id": sid,
-                                  "last_active": now, "turns": 1}
+                                  "last_active": now, "turns": 1,
+                                  "history": [{"role": "user", "text": prompt[:HISTORY_TURN_CHARS]}]}
         else:
             _sessions.pop(chat_id, None)  # non-resumable: clear any stale session
         _save_sessions()
         task_id = await _create_task("agent_run", payload, notes=f"agent/{backend}: {prompt[:60]}")
         if task_id:
-            _pending[task_id] = {"chat_id": chat_id, "started_at": now}
+            _pending[task_id] = {"chat_id": chat_id, "started_at": now, "session": resumable}
             tail = "  — just reply to continue (send `end` to stop)" if resumable else ""
             await _send_wa(chat_id, f"⏳ {backend}  [{task_id[:8]}]\n\"{prompt[:60]}\"{tail}")
         else:
@@ -1233,15 +1285,16 @@ async def webhook(request: Request):
             "command so they can copy-paste it.\n\n"
             "WhatsApp command syntax:\n"
             "  write article: <topic>  — long-form draft saved to ~/Articles/\n"
-            "  write post: <topic> [--format=twitter]  — LinkedIn or X post (Groq)\n"
+            "  write post: <topic> [--format=twitter]  — LinkedIn or X post (DeepSeek, with failover)\n"
             "  code review: <path> [--focus=security]  — repo code review\n"
-            "  agent <llm> <prompt>  — launch a CLI agent (claude, code, agy, codex, groq)\n"
+            "  agent <llm> <prompt>  — launch an agent (claude, code, agy, codex, deepseek); "
+            "if it hits a usage limit another agent takes over automatically\n"
             "  run <agent> <prompt>  — run on mac-mini immediately\n"
             "  assign <description> [--machine=X] [--agent=Y] [--type=Z]\n"
             "    task types: agent_run, write_article, write_post, code_review,\n"
             "                run_script, git_pull, ios_build, android_build,\n"
             "                npm_build, test_run, lint, assistant_run\n"
-            "    agents: claude, agy, codex, groq, content, social\n"
+            "    agents: claude, agy, codex, deepseek, content, social\n"
             "  assist <today|sync|status|plan [today|week]>  — AI assistant\n"
             "  weather [place]  — today's forecast (no place = last location)\n"
             "  set-location <place>  — remember a place for future weather lookups\n"
@@ -1300,7 +1353,10 @@ async def webhook(request: Request):
             "   • claude (or code) — Claude Code · multi-turn ✓\n"
             "   • agy — Google Antigravity · one-shot\n"
             "   • codex (or gpt) — OpenAI Codex · one-shot\n"
-            "   • groq, content, social\n"
+            "   • deepseek — DeepSeek API · one-shot\n"
+            "   • content, social — writing agents\n"
+            "  Usage limits: if the agent is out of usage, the next one takes over\n"
+            "  (claude → codex → agy) and the reply says who answered.\n"
             "  Multi-turn (claude only): after `agent claude …`, just reply normally\n"
             "  to continue the same conversation. Send `end` (or `reset`) to stop.\n"
             "  A session also expires after ~30 min idle, and survives a bridge restart.\n"
@@ -1311,7 +1367,7 @@ async def webhook(request: Request):
             "\n"
             "✍️ CONTENT\n"
             "  write article: <topic>            — long-form draft (Claude)\n"
-            "  write post: <topic> [--format=twitter]  — social post (Groq)\n"
+            "  write post: <topic> [--format=twitter]  — social post (DeepSeek)\n"
             "  code review: <path> [--focus=security]  — repo review\n"
             "\n"
             "🗓 ASSISTANT (on MacBook)\n"
@@ -1353,14 +1409,16 @@ async def webhook(request: Request):
         if sess:
             sess["last_active"] = now
             sess["turns"] += 1
-            _save_sessions()
+            history = list(sess.get("history") or [])
             payload = {"agent": sess["agent"], "prompt": body,
                        "session_id": sess["session_id"], "resume": True,
-                       "_target_machine": "mac-mini"}
+                       "history": history, "_target_machine": "mac-mini"}
+            sess["history"] = _trim_history(history + [{"role": "user", "text": body[:HISTORY_TURN_CHARS]}])
+            _save_sessions()
             task_id = await _create_task("agent_run", payload,
                                          notes=f"agent/{sess['agent']} cont: {body[:50]}")
             if task_id:
-                _pending[task_id] = {"chat_id": chat_id, "started_at": now}
+                _pending[task_id] = {"chat_id": chat_id, "started_at": now, "session": True}
                 await _send_wa(chat_id, f"⏳ {sess['agent']} (cont·{sess['turns']})  [{task_id[:8]}]")
             else:
                 await _send_wa(chat_id, "❌ Could not reach the queue.")

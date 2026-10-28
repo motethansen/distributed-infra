@@ -155,12 +155,18 @@ kept processing via thinkpad's orchestrator.
 ## 8 — Agents & model routing
 
 One runner (`agents/runner.py`) fronts subscription-CLI agents — **claude, codex, agy,
-deepseek, groq, content, social** — no API keys (they use their own login sessions;
-only `claude` is multi-turn). When a caller routes by `task_kind`/`sensitivity`,
+deepseek, content, social** — the CLIs use their own login sessions, DeepSeek uses
+`DEEPSEEK_API` (only `claude` is multi-turn). Groq was removed 2026-10-28. When a caller routes by `task_kind`/`sensitivity`,
 `config/routing.yaml` picks the cheapest agent+model:
 
 - privacy / coding / planning → `claude · sonnet` · reasoning/bulk → `deepseek` · mechanical → `claude · haiku`
 - **Privacy guard (hard):** email/finance/calendar/personal never leave to DeepSeek (China-hosted).
+- **Failover:** when the routed agent is unavailable (usage/session limit, rate limit, quota,
+  not logged in) the task moves down its class's `fallbacks` list in `routing.yaml`
+  (e.g. claude → codex → agy). The limited agent is skipped until the reset time it
+  reported (`data/agent_cooldowns.json`, per machine). Timeouts and real errors do not
+  fail over. Multi-turn chats send their recent `history`, so the next agent picks up
+  mid-conversation; the reply says who answered. See `agents/failover.py`.
 - **Opus is blocked** fleet-wide; all machines default to **Sonnet** (`~/.claude/settings.json`).
 
 Headless `claude` needs the workspace trusted + an active login on each worker; a lapsed

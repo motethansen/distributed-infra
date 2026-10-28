@@ -17,6 +17,9 @@ async def handle_agent_run(task: Task) -> dict:
       cwd: str      — working directory for the agent (e.g. ~/Projects/motethansen-site)
       session_id: str — optional multi-turn session id (resumable agents only)
       resume: bool  — continue an existing session_id rather than starting it
+      history: list — prior turns [{role: user|assistant, text, agent}] so another
+                      agent can take over mid-conversation (failover hand-over)
+      failover: bool — default true; false pins the task to its first agent
     """
     agent = task.payload.get("agent") or None
     prompt = task.payload.get("prompt", "")
@@ -27,6 +30,8 @@ async def handle_agent_run(task: Task) -> dict:
     timeout = task.payload.get("timeout")
     session_id = task.payload.get("session_id")
     resume = bool(task.payload.get("resume", False))
+    history = task.payload.get("history") if isinstance(task.payload.get("history"), list) else None
+    failover = task.payload.get("failover", True) is not False
 
     if not prompt:
         return {"needs_human": True, "notes": "prompt is required in payload"}
@@ -36,12 +41,14 @@ async def handle_agent_run(task: Task) -> dict:
     from agents.runner import run_agent
     result = await run_agent(agent=agent, prompt=prompt, model=model, cwd=cwd, timeout=timeout,
                              session_id=session_id, resume=resume,
-                             task_kind=task_kind, sensitivity=sensitivity)
+                             task_kind=task_kind, sensitivity=sensitivity,
+                             history=history, failover=failover)
 
     if not result.get("ok"):
         return {
             "needs_human": True,
             "notes": f"{result.get('agent') or agent or task_kind} agent failed: {result.get('error')}",
+            "failover": result.get("failover"),
         }
 
     return result

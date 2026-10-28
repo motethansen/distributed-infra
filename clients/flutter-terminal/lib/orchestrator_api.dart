@@ -18,7 +18,7 @@ class OrchestratorApi {
       };
 
   /// Enqueue an agent_run task. Returns the task id.
-  /// Send BACKEND agent names (claude/agy/codex/groq/content/social) — the
+  /// Send BACKEND agent names (claude/agy/codex/deepseek/content/social) — the
   /// WhatsApp `code`/`gpt` aliases are not understood by the worker runner.
   Future<String> submitAgentTask({
     required String agent,

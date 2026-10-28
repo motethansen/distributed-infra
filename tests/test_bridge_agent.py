@@ -77,7 +77,7 @@ def test_agent_does_not_shadow_other_commands():
     ("antigravity", "agy"),
     ("codex", "codex"),
     ("gpt", "codex"),
-    ("groq", "groq"),
+    ("deepseek", "deepseek"),
     ("content", "content"),
     ("social", "social"),
 ])
@@ -295,3 +295,28 @@ def test_serve_artifact_expired_token(tmp_path):
     p.write_bytes(b"data")
     bridge._artifact_tokens["t"] = {"path": str(p), "expires": 1.0}  # long expired
     assert asyncio.run(bridge.serve_artifact("t")).status_code == 404
+
+
+# ── Failover hand-over (history + notice) ───────────────────────────────────────
+def test_record_reply_appends_answer_and_tracks_who(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge, "_STATE_FILE", str(tmp_path / "s.json"))
+    bridge._sessions["c1"] = {"agent": "claude", "session_id": "s1", "last_active": time.time(),
+                              "turns": 1, "history": [{"role": "user", "text": "q1"}]}
+    bridge._record_reply("c1", {"ok": True, "agent": "codex", "response": "a1"})
+    assert bridge._sessions["c1"]["history"][-1] == {"role": "assistant", "text": "a1", "agent": "codex"}
+    assert bridge._sessions["c1"]["session_id"] == "s1"  # codex's answer must not touch claude's session
+    bridge._record_reply("c1", {"ok": True, "agent": "claude", "response": "a2", "session_id": "s2"})
+    assert bridge._sessions["c1"]["session_id"] == "s2"  # claude reopened a fresh session
+    bridge._sessions.pop("c1", None)
+
+
+def test_history_is_capped(monkeypatch):
+    monkeypatch.setattr(bridge, "HISTORY_MAX_TURNS", 3)
+    assert bridge._trim_history([{"n": i} for i in range(10)]) == [{"n": 7}, {"n": 8}, {"n": 9}]
+
+
+def test_failover_note():
+    assert bridge._failover_note({"agent": "claude"}) == ""
+    note = bridge._failover_note({"agent": "codex", "failover": [
+        {"agent": "claude", "reason": "limit", "until": "2026-09-06T12:50:00+00:00"}]})
+    assert note.startswith("↪ claude (usage limit, back ") and "answered by codex" in note

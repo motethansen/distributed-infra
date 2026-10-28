@@ -15,7 +15,7 @@ It receives messages via the Waha webhook, queues tasks on the orchestrator
 | `agent <llm> <prompt>` | **Launch a CLI agent** with a free-form prompt (BLI-050). |
 | `run <agent> <prompt>` | Lower-level alias — runs `agent_run` on mac-mini. |
 | `write article: <topic>` | Long-form draft (content agent / Claude). |
-| `write post: <topic> [--format=twitter]` | Social post (social agent / Groq). |
+| `write post: <topic> [--format=twitter]` | Social post (social agent — DeepSeek, with failover). |
 | `code review: <path> [--focus=security]` | Repo code review. |
 | `assign <description> [--machine=X] [--agent=Y] [--type=Z]` | Full control over machine / agent / task type. |
 | `assist <today\|sync\|status\|plan [today\|week]>` | Query the AI Assistant on the MacBook. |
@@ -43,7 +43,7 @@ agent codex fix the failing test in cart.py
 | `claude`, `code`, `claude-code` | `claude` | `claude -p` (Claude Code) |
 | `agy`, `antigravity` | `agy` | `agy -p` (Google Antigravity) |
 | `codex`, `gpt` | `codex` | OpenAI Codex CLI |
-| `groq` | `groq` | Groq |
+| `deepseek` | `deepseek` | DeepSeek API |
 | `content` | `content` | long-form content agent |
 | `social` | `social` | social-post agent |
 
