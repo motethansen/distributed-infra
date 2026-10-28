@@ -6,7 +6,7 @@ the orchestrator queue API over Tailscale** — independent of the WhatsApp brid
 See `../../docs/flutter-terminal.md` for the architecture.
 
 ## What it does (MVP)
-- Pick an agent (`claude`, `agy`, `codex`, `groq`, `content`, `social`), type a
+- Pick an agent (`claude`, `agy`, `codex`, `deepseek`, `content`, `social`), type a
   prompt, send → it enqueues an `agent_run` task and polls for the result.
 - **Multi-turn** for `claude`: replies continue the same conversation (a generated
   `session_id` with `resume`); "New session" or switching agent resets it.

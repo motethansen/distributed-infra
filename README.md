@@ -1,6 +1,6 @@
 # distributed-infra
 
-A distributed AI agent stack — task queue, worker fleet, and interactive CLI for running Claude, Gemini, Codex, and Groq across multiple machines over a private Tailscale network.
+A distributed AI agent stack — task queue, worker fleet, and interactive CLI for running Claude, Codex, Antigravity, and DeepSeek — with automatic failover when one hits its usage limit — across multiple machines over a private Tailscale network.
 
 **Three machines. Four AI agents. Two ways to work.**
 
@@ -246,7 +246,7 @@ da › skills create deploy                          # scaffold a new custom ski
 
 | Type | What it does | Typical machine |
 |---|---|---|
-| `agent_run` | Runs Claude / Gemini / Codex / Groq on a prompt | Any worker |
+| `agent_run` | Runs Claude / Codex / Antigravity / DeepSeek on a prompt, failing over on usage limits | Any worker |
 | `run_script` | Executes a shell script | Any worker |
 | `git_pull` | Pulls latest on a repo | Any worker |
 | `ios_build` | `xcodebuild` / Flutter / CocoaPods | macOS worker |
@@ -489,7 +489,7 @@ All four agents use their CLI tools — no API keys in config files. Each authen
 | Claude | `npm install -g @anthropic-ai/claude-code` | `claude login` |
 | Gemini | `npm install -g @google/gemini-cli` | `gemini login` |
 | Codex | `npm install -g @openai/codex` | `codex login` |
-| Groq | install via pip / npm | set `GROQ_API_KEY` in `.env` |
+| DeepSeek | none (HTTP API) | set `DEEPSEEK_API` in `.env` / plist |
 
 Agents run non-interactively in the queue:
 - Claude: `claude -p "<prompt>" --dangerously-skip-permissions`

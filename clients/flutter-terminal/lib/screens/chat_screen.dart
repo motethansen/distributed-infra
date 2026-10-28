@@ -7,7 +7,7 @@ import '../orchestrator_api.dart';
 import 'settings_screen.dart';
 
 // Backend agent names (worker agents/runner.py). NOT the WhatsApp aliases.
-const _agents = ['claude', 'agy', 'codex', 'groq', 'content', 'social'];
+const _agents = ['claude', 'agy', 'codex', 'deepseek', 'content', 'social'];
 const _resumable = {'claude'};
 
 class _Msg {

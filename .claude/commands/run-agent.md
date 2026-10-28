@@ -7,7 +7,7 @@ Queue an agent_run task with the following arguments:
 $ARGUMENTS
 
 Parse:
-- First word: agent name (claude | agy | codex | groq | content | social)
+- First word: agent name (claude | agy | codex | deepseek | content | social)
 - Optional `--machine=<name>` flag (default: mac-mini)
 - Everything else: the prompt
 

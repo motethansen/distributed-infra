@@ -46,7 +46,7 @@ Sprints **0–7 + the #18 capstone + the #20 HA infra work are shipped, deployed
 **What the code is today:**
 
 - **Control:** centralized. One orchestrator (`orchestrator/main.py`, MacBook) owns a SQLite queue; workers poll `/tasks/claim` every 10s (`worker/poller.py`). `claim_next_task` (`db.py:101`) is pure SQL — priority DESC, created_at ASC, capability + `_target_machine` filtering. Routing is fully deterministic.
-- **"Agents":** thin subprocess wrappers (`agents/claude_agent.py` shells out to `claude -p`, plus codex/groq/agy/content/social). They execute; they do **not** decompose, delegate, or call each other. The human is the planner today (via `da` CLI / WhatsApp self-chat).
+- **"Agents":** thin subprocess wrappers (`agents/claude_agent.py` shells out to `claude -p`, plus codex/agy/deepseek/content/social; groq removed 2026-10-28). They execute; they do **not** decompose, delegate, or call each other. The human is the planner today (via `da` CLI / WhatsApp self-chat).
 - **Orchestration:** `worker/handlers/dispatch()` auto-discovers `handle_<type>(task)` by filename. A dispatcher, not an inter-agent hand-off mechanism.
 - **Memory:** durable task state in SQLite (good short-term/state persistence). Claude multi-turn via `--session-id`/`--resume`. No vector DB, no cross-agent message history — and that's deliberate (the ChromaDB layer was cut from `ai_agent_assistant` for being over-engineered).
 - **Failure handling:** per-call timeouts (1800s default), try/except → `fail` or `needs_human` escalation with a macOS notification (`main.py:165`). A real human-in-the-loop gate already exists.

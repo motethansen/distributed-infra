@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Social agent — Groq-backed short-form writing for LinkedIn and X/Twitter.
-Fast inference via Groq; optimised for punchy posts under 280 characters or
+Social agent — short-form writing for LinkedIn and X/Twitter.
+Routed as a `draft` task (bulk class: DeepSeek first, then Claude Haiku, Codex,
+Antigravity on failover); optimised for punchy posts under 280 characters or
 short LinkedIn updates under 1300 characters.
 
 CLI usage:
@@ -42,12 +43,12 @@ async def run(
     format: str = "linkedin",
 ) -> dict:
     try:
-        from agents.groq_agent import run as groq_run
+        from agents.runner import run_agent
     except ImportError:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from agents.groq_agent import run as groq_run
+        from agents.runner import run_agent
 
     full_prompt = (
         f"{_SOCIAL_SYSTEM_PROMPT}\n\n"
@@ -55,12 +56,14 @@ async def run(
         f"Topic: {prompt}"
     )
 
-    result = await groq_run(
+    result = await run_agent(
+        task_kind="draft",
         prompt=full_prompt,
-        model=model or "",
-        timeout=timeout or 60,
+        model=model or None,
+        timeout=timeout or 180,
     )
     if result.get("ok"):
+        result["answered_by"] = result.get("agent")
         result["agent"] = "social"
         result["format"] = format
     return result

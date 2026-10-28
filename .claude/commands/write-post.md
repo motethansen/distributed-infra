@@ -1,5 +1,5 @@
 ---
-description: Generate a short social post via social_agent (Groq). Supports LinkedIn (default) or Twitter/X thread format.
+description: Generate a short social post via social_agent (DeepSeek, with failover). Supports LinkedIn (default) or Twitter/X thread format.
 ---
 
 Queue a write_post task on mac-mini for the following topic:

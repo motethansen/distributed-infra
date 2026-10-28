@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Content agent — Claude-backed long-form writing for Medium and Substack.
-Wraps claude_agent with a writing system prompt.
+Content agent — long-form writing for Medium and Substack.
+Runs Claude with a writing system prompt; fails over to Codex, then Antigravity,
+when Claude is unavailable (usage limit etc. — see agents/failover.py). Only
+agents that can save files are used, because the article is written to disk.
 
 Output is saved to CONTENT_OUTPUT_DIR (default ~/Articles/) as a markdown file,
 and the article text is also returned in the response for WhatsApp previews.
@@ -44,12 +46,12 @@ async def run(
     timeout: int | None = None,
 ) -> dict:
     try:
-        from agents.claude_agent import run as claude_run
+        from agents.runner import run_agent
     except ImportError:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from agents.claude_agent import run as claude_run
+        from agents.runner import run_agent
 
     output_dir = os.path.expanduser(cwd or CONTENT_OUTPUT_DIR)
     os.makedirs(output_dir, exist_ok=True)
@@ -57,13 +59,16 @@ async def run(
     system = _WRITING_SYSTEM_PROMPT.format(output_dir=output_dir)
     full_prompt = f"{system}\n\nWrite an article about: {prompt}"
 
-    result = await claude_run(
+    result = await run_agent(
+        agent="claude",
         prompt=full_prompt,
         model=model or "sonnet",
         cwd=output_dir,
         timeout=timeout or 600,
+        exclude={"deepseek"},  # API-only: cannot save the article file
     )
     if result.get("ok"):
+        result["answered_by"] = result.get("agent")
         result["agent"] = "content"
     return result
 

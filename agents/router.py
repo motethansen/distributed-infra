@@ -38,6 +38,7 @@ _DEFAULTS = {
     "sensitive_values": ["private", "privacy", "sensitive", "personal", "confidential", "secret"],
     "non_private_agents": ["deepseek"],
     "privacy_fallback": {"agent": "claude", "model": "sonnet"},
+    "fallbacks": {},
 }
 
 
@@ -108,6 +109,53 @@ def route(task_kind: str | None = None, sensitivity: str | None = None,
     return chosen_agent, chosen_model
 
 
+def route_chain(task_kind: str | None = None, sensitivity: str | None = None,
+                agent: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
+    """Ordered (agent, model) candidates: the routed choice first, then its fallbacks.
+
+    The next candidate is only used when the one before it is unavailable (usage
+    limit, quota, not logged in) — see agents/failover.py. Fallbacks come from the
+    class's entry in `fallbacks` (routing.yaml); a caller-pinned agent with no
+    task_kind uses the `default` class's list. The privacy guard is applied to
+    every candidate, so sensitive work never fails over to a non-private provider.
+    """
+    first = route(task_kind=task_kind, sensitivity=sensitivity, agent=agent, model=model)
+    p = _load_policy()
+    kinds = p.get("task_kinds", {})
+    sensitive_values = set(p.get("sensitive_values", []))
+    privacy_classes = set(p.get("privacy_classes", ["privacy"]))
+    non_private = set(p.get("non_private_agents", ["deepseek"]))
+
+    is_sensitive = (sensitivity or "").strip().lower() in sensitive_values
+    if is_sensitive:
+        cls = "privacy"
+    else:
+        cls = kinds.get((task_kind or "").strip().lower(), p.get("default_class", "default"))
+    fallbacks = p.get("fallbacks", {}) or {}
+    extra = fallbacks.get(cls)
+    if extra is None:
+        extra = fallbacks.get(p.get("default_class", "default"), [])
+    # The class's own primary is a fallback too when the caller pinned another agent.
+    cls_primary = (p.get("classes", {}).get(cls) or {})
+    candidates = [first]
+    if cls_primary.get("agent"):
+        candidates.append((cls_primary["agent"].strip().lower(), (cls_primary.get("model") or "").strip().lower()))
+    for c in extra or []:
+        if isinstance(c, dict) and c.get("agent"):
+            candidates.append((c["agent"].strip().lower(), (c.get("model") or "").strip().lower()))
+
+    chain: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for a, m in candidates:
+        if a in seen:
+            continue
+        if (is_sensitive or cls in privacy_classes) and a in non_private:
+            continue
+        seen.add(a)
+        chain.append((a, m))
+    return chain
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Resolve a routing decision")
@@ -116,6 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--agent", default=None)
     parser.add_argument("--model", default=None)
     args = parser.parse_args()
-    a, m = route(task_kind=args.task_kind, sensitivity=args.sensitivity,
-                 agent=args.agent, model=args.model)
-    print(f"agent={a} model={m or '(agent default)'}")
+    chain = route_chain(task_kind=args.task_kind, sensitivity=args.sensitivity,
+                        agent=args.agent, model=args.model)
+    for i, (a, m) in enumerate(chain):
+        print(f"{'agent' if i == 0 else 'fallback'}={a} model={m or '(agent default)'}")

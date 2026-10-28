@@ -35,7 +35,7 @@ Auth: header `x-secret-key: <SECRET_KEY>` on every call.
 - `GET /machines` → fleet roster + liveness (for a status view)
 
 **Important:** submit **backend** agent names, not the WhatsApp aliases. Valid
-backends (worker `agents/runner.py`): `claude, agy, codex, groq, content, social`.
+backends (worker `agents/runner.py`): `claude, agy, codex, deepseek, content, social`.
 (`code`/`gpt` are WhatsApp-only aliases handled by the bridge — not the orchestrator.)
 
 ## Multi-turn

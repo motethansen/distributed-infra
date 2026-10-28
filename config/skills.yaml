@@ -44,18 +44,18 @@ skills:
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 
-  groq:
-    description: "Groq API — fast LLM inference via Groq LPU (requires GROQ_API_KEY)"
+  deepseek:
+    description: "DeepSeek API — cheap reasoning/bulk drafting (requires DEEPSEEK_API); never used for privacy-class work"
     category: ai-agent
-    check: "python3 -c 'import httpx' && test -n \"$GROQ_API_KEY\""
+    check: "python3 -c 'import httpx' && test -n \"$DEEPSEEK_API\""
     install:
-      macos: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker plist'"
-      linux: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker .env'"
+      macos: "pip3 install httpx && echo 'Set DEEPSEEK_API in worker plist'"
+      linux: "pip3 install httpx && echo 'Set DEEPSEEK_API in worker .env'"
     task_types: [agent_run]
     handler: worker/handlers/agent.py
 
   content:
-    description: "Content agent — Claude-backed long-form writing (articles for Medium/Substack)"
+    description: "Content agent — long-form writing (Claude, failing over to Codex/Antigravity)"
     category: ai-agent
     check: "claude --version"
     install:
@@ -65,12 +65,12 @@ skills:
     handler: worker/handlers/write_article.py
 
   social:
-    description: "Social agent — Groq-backed short posts for LinkedIn and X/Twitter"
+    description: "Social agent — short posts for LinkedIn and X/Twitter (routed draft: DeepSeek, then failover)"
     category: ai-agent
-    check: "python3 -c 'import httpx' && test -n \"$GROQ_API_KEY\""
+    check: "python3 -c 'import httpx' && test -n \"$DEEPSEEK_API\""
     install:
-      macos: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker plist'"
-      linux: "pip3 install httpx && echo 'Set GROQ_API_KEY in worker .env'"
+      macos: "pip3 install httpx && echo 'Set DEEPSEEK_API in worker plist'"
+      linux: "pip3 install httpx && echo 'Set DEEPSEEK_API in worker .env'"
     task_types: [write_post]
     handler: worker/handlers/write_post.py
 

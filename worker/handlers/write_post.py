@@ -1,4 +1,4 @@
-"""Write-post handler — generates a short social post via social_agent (Groq)."""
+"""Write-post handler — generates a short social post via social_agent (routed draft, with failover)."""
 from __future__ import annotations
 
 from shared.models import Task
@@ -9,7 +9,7 @@ async def handle_write_post(task: Task) -> dict:
     payload:
       prompt: str    — post topic / brief
       format: str    — linkedin | twitter (default: linkedin)
-      model:  str    — optional Groq model override
+      model:  str    — optional model override for the first agent in the chain
     """
     prompt = task.payload.get("prompt", "")
     format = task.payload.get("format", "linkedin")
