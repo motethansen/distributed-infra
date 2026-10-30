@@ -198,3 +198,20 @@ async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
     stmt = [f"UPDATE tasks SET {set_clause} WHERE id=?", *fields.values(), task_id]
     await _execute([stmt])
     return await get_task(task_id)
+
+
+async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
+    """Move tasks stuck in claimed/in_progress since before `cutoff_iso` (naive UTC
+    ISO, same format as updated_at) to needs_human, keeping their result and adding
+    `note`. One conditional UPDATE, so two orchestrators reaping at once is harmless.
+    Returns [{id, type, assigned_to}] for the tasks it moved."""
+    now = datetime.utcnow().isoformat()
+    results = await _request([[
+        """UPDATE tasks
+              SET status='needs_human', updated_at=?,
+                  notes = CASE WHEN notes IS NULL OR notes='' THEN ? ELSE notes || ' | ' || ? END
+            WHERE status IN ('claimed','in_progress') AND updated_at < ?
+        RETURNING id, type, assigned_to""",
+        now, note, note, cutoff_iso,
+    ]])
+    return _rows(results[0]) if results else []

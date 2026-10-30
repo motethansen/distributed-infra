@@ -1,12 +1,14 @@
 """Orchestrator queue server — runs on MacBook Pro."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,8 @@ if os.getenv("QUEUE_BACKEND", "sqlite").lower() == "rqlite":
     from orchestrator import db_rqlite as db
 else:
     from orchestrator import db
+
+log = logging.getLogger(__name__)
 
 SECRET_KEY = os.getenv("SECRET_KEY", "")
 MACHINE_NAME = os.getenv("MACHINE_NAME", "orchestrator")
@@ -115,6 +119,31 @@ def _tailscale_liveness() -> dict[str, dict]:
 app = FastAPI(title="Distributed Infra Queue", version="0.1.0")
 
 
+# A task claimed/in_progress with no update for this long has lost its worker (the
+# worker died, restarted, or could not report). It moves to needs_human, with its
+# result and notes intact, rather than sitting in the queue forever. Must exceed the
+# longest legitimate task (builds run well under an hour).
+STALE_TASK_SECS = int(os.getenv("STALE_TASK_SECS", str(6 * 3600)))
+_REAP_EVERY_SECS = 600
+
+
+async def reap_once() -> list[dict]:
+    cutoff = (datetime.utcnow() - timedelta(seconds=STALE_TASK_SECS)).isoformat()
+    note = (f"STALE: no update for over {STALE_TASK_SECS // 3600}h while claimed/in_progress — "
+            f"worker lost or could not report; reaped {datetime.utcnow().isoformat(timespec='seconds')}Z")
+    return await db.reap_stale(cutoff, note)
+
+
+async def _reaper_loop() -> None:
+    while True:
+        try:
+            for t in await reap_once():
+                log.warning("reaped stale task %s (%s, was on %s)", str(t["id"])[:8], t["type"], t.get("assigned_to"))
+        except Exception as exc:  # noqa: BLE001 — never let the reaper die
+            log.warning("reaper: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(_REAP_EVERY_SECS)
+
+
 @app.on_event("startup")
 async def _init_backend() -> None:
     # rqlite backend needs a one-time schema create; the aiosqlite backend
@@ -122,6 +151,7 @@ async def _init_backend() -> None:
     init = getattr(db, "ensure_schema", None)
     if init:
         await init()
+    asyncio.create_task(_reaper_loop())
 
 
 def _check_auth(x_secret_key: str = "") -> None:
@@ -133,7 +163,30 @@ def _check_auth(x_secret_key: str = "") -> None:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "machine": MACHINE_NAME, "role": "orchestrator"}
+    """Readiness, not just 'the process answers': the orchestrator is useless without
+    its queue, so a failing queue read is a 503 (callers such as da.py and Vantage
+    then move to the other orchestrator instead of trusting this one)."""
+    try:
+        await asyncio.wait_for(db.list_tasks(limit=1), timeout=5)
+        queue = "ok"
+    except Exception as exc:  # noqa: BLE001 — any failure means the queue is unusable
+        return Response(
+            content=json.dumps({"status": "degraded", "machine": MACHINE_NAME, "role": "orchestrator",
+                                "queue": f"error: {type(exc).__name__}: {exc}"[:300]}),
+            status_code=503, media_type="application/json")
+    return {"status": "ok", "machine": MACHINE_NAME, "role": "orchestrator", "queue": queue}
+
+
+@app.post("/workers/heartbeat", status_code=204)
+async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(default="")):
+    """A worker announcing it is alive without claiming (it polls ONE orchestrator, but
+    liveness is kept per orchestrator process, and a busy worker does not claim)."""
+    _check_auth(x_secret_key)
+    name = str(body.get("worker_name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="worker_name required")
+    _last_seen[name] = time.time()
+    return Response(status_code=204)
 
 
 # ── Task CRUD ────────────────────────────────────────────────────────────────

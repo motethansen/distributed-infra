@@ -18,9 +18,18 @@ classes:
   # privacy: email / finance / calendar / personal — Claude cloud only for now;
   # routes to the local model once #7 (dedicated LLM machine) lands.
   privacy:    { agent: claude,   model: sonnet }
-  # coding / planning — quality matters, use Sonnet.
+  # coding (WRITES files) / planning — quality matters, use Sonnet.
   coding:     { agent: claude,   model: sonnet }
   planning:   { agent: claude,   model: sonnet }
+  # review — Sonnet reads the code and the repo and reports; read-only work.
+  review:     { agent: claude,   model: sonnet }
+  # verify — an INDEPENDENT second opinion on someone else's change or answer.
+  # Codex is a different model family (so it does not share Sonnet's blind spots)
+  # and runs in a read-only sandbox, which is exactly right for checking, not editing.
+  verify:     { agent: codex }
+  # research — long documents, many sources, broad synthesis: Gemini (agy) has the
+  # largest context. Non-sensitive research may fall to DeepSeek; private never does.
+  research:   { agent: agy }
   # cheap reasoning / bulk summarization — DeepSeek (non-sensitive only).
   reasoning:  { agent: deepseek, model: deepseek-reasoner }
   bulk:       { agent: deepseek, model: deepseek-chat }
@@ -36,8 +45,14 @@ task_kinds:
   coding: coding
   fix: coding
   refactor: coding
-  review: coding
-  code_review: coding
+  implement: coding
+  review: review
+  code_review: review
+  verify: verify
+  second_opinion: verify
+  debug: verify
+  explain: verify
+  audit: verify
   plan: planning
   planning: planning
   decompose: planning
@@ -45,7 +60,9 @@ task_kinds:
   reason: reasoning
   reasoning: reasoning
   analyze: reasoning
-  research: reasoning
+  research: research
+  long_context: research
+  docs: research
   bulk: bulk
   summarize: bulk
   summarise: bulk
@@ -86,8 +103,13 @@ privacy_fallback: { agent: claude, model: sonnet }
 # payload `failover: false`. A pinned agent with no task_kind uses `default`.
 fallbacks:
   privacy:    [ { agent: codex }, { agent: agy } ]
-  coding:     [ { agent: codex }, { agent: agy } ]
+  # coding WRITES files: agy can (permissions bypassed like Claude), codex runs
+  # read-only here, so it goes last — it would answer without making the change.
+  coding:     [ { agent: agy }, { agent: codex } ]
   planning:   [ { agent: codex }, { agent: agy } ]
+  review:     [ { agent: codex }, { agent: agy } ]
+  verify:     [ { agent: claude, model: sonnet }, { agent: agy } ]
+  research:   [ { agent: deepseek, model: deepseek-reasoner }, { agent: claude, model: sonnet }, { agent: codex } ]
   reasoning:  [ { agent: claude, model: sonnet }, { agent: codex }, { agent: agy } ]
   bulk:       [ { agent: claude, model: haiku }, { agent: codex }, { agent: agy } ]
   mechanical: [ { agent: deepseek, model: deepseek-chat }, { agent: codex }, { agent: agy } ]
