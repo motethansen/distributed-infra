@@ -20,6 +20,8 @@ async def handle_agent_run(task: Task) -> dict:
       history: list — prior turns [{role: user|assistant, text, agent}] so another
                       agent can take over mid-conversation (failover hand-over)
       failover: bool — default true; false pins the task to its first agent
+      role: str     — Scrum role (config/roles.yaml). The orchestrator resolves it when the task is
+                      queued: it fills agent/model and sets `_allow_opus` for a role allowed Opus.
     """
     agent = task.payload.get("agent") or None
     prompt = task.payload.get("prompt", "")
@@ -32,6 +34,7 @@ async def handle_agent_run(task: Task) -> dict:
     resume = bool(task.payload.get("resume", False))
     history = task.payload.get("history") if isinstance(task.payload.get("history"), list) else None
     failover = task.payload.get("failover", True) is not False
+    allow_opus = task.payload.get("_allow_opus") is True      # set by the orchestrator only
 
     if not prompt:
         return {"needs_human": True, "notes": "prompt is required in payload"}
@@ -42,7 +45,7 @@ async def handle_agent_run(task: Task) -> dict:
     result = await run_agent(agent=agent, prompt=prompt, model=model, cwd=cwd, timeout=timeout,
                              session_id=session_id, resume=resume,
                              task_kind=task_kind, sensitivity=sensitivity,
-                             history=history, failover=failover)
+                             history=history, failover=failover, allow_opus=allow_opus)
 
     if not result.get("ok"):
         return {

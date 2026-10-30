@@ -1,6 +1,8 @@
 # Agent roster, LLM switching and chat access
 
-Status: PLAN (2026-10-30). Nothing below is built yet unless it says "exists".
+Status: build in progress (2026-10-30). Built so far: roles.yaml + resolver, Opus allow-list with a
+monthly cap, DeepSeek project limit, `role` tag and column, `role`/`project`/`sprint`/`story` on
+`fleet_ask`. Not yet built: agent definition files, client model selector, auto-queued review.
 Inputs: the 5-role Scrum roster proposed by Michael, the live Scrum board
 (`/scrum.html` on Vantage), and the fleet as it runs today.
 
@@ -12,7 +14,7 @@ Inputs: the 5-role Scrum roster proposed by Michael, the live Scrum board
 | Pick a specific agent per call | exists: `payload.agent`, `payload.model`, `payload.failover=false` (also `fleet_ask(agent=...)`) |
 | Failover chain + hand-over of the conversation | exists |
 | Executor and token tracking per task | exists (tasks table, `GET /scrum/usage`, Scrum board) |
-| Opus | **blocked** in `agents/claude_agent.py` (`BLOCKED_MODEL_SUBSTRINGS`) |
+| Opus | blocked in `agents/claude_agent.py` unless the orchestrator grants it to a role in `roles.yaml` (exists) |
 | Scrum roles | `~/.claude/agents/{scrum-master,project-orchestrator,sprint-developer}.md`; scrum-master is pinned to `opus` |
 | `scrum.py` (cheersfriends_cc) | never ran; its own header says so. The "5-agent limit" does not exist in any running code |
 | Story/sprint tag on fleet tasks | exists as a column, but **nothing sets it**: every sprint on the board shows "agents involved: none recorded" |
@@ -40,15 +42,15 @@ Changes against the proposal:
    in the IDE.
 2. **Opus is allowed per role, not globally.** Replace the blanket block with an
    allow-list (`roles.yaml: allow_opus: true` only for Product Owner) and a
-   monthly cap counted from the tasks table. Anything else asking for Opus is
+   monthly cost cap (the Claude CLI's own estimate, summed from the tasks table). Anything else asking for Opus is
    still refused.
 3. **DeepSeek never sees private repos or secrets.** The routing privacy guard
    already forbids it. The payment example in the proposal (webhook
    verification) is exactly the code that must not be handed over with real
    keys or private data. Dev 2 receives a spec plus interfaces and writes
    against fixtures; secrets and live payloads never go in the prompt. Security
-   code gets a Sonnet or Codex review plus a human look before merge. Projects
-   marked private fall back to Claude for Dev 2 automatically.
+   code gets a Sonnet or Codex review plus a human look before merge. DeepSeek runs only for projects listed in
+   `deepseek_projects` (empty today, so every project falls back to Claude until you list one).
 4. **Model versions are config, not roles.** Whether Dev 1 is Sonnet 5 or 5.5 is
    a one-line change in `roles.yaml`; decide it by the numbers in section 5, not
    in advance. (Check that `claude --model` accepts the exact id before pinning;
@@ -60,7 +62,7 @@ Changes against the proposal:
 
 ```yaml
 roles:
-  product_owner:  { agent: claude,   model: opus,            allow_opus: true, monthly_token_cap: 2_000_000 }
+  product_owner:  { agent: claude,   model: opus,            allow_opus: true, monthly_cost_cap_usd: 50 }
   scrum_master:   { agent: claude,   model: sonnet }
   analyst:        { agent: agy,      read_only: true }
   dev_frontend:   { agent: claude,   model: sonnet }
@@ -69,7 +71,7 @@ roles:
 ```
 
 Resolution order for any task: explicit `payload.agent` > project override in
-the sprint file front-matter > role default > task-class routing. The privacy
+(not built) > role default > task-class routing. The privacy
 guard still wins over all of them.
 
 ### 3.2 Launching a sprint (the loop)

@@ -69,7 +69,7 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         for col in ("agent", "model"):
             await db.execute(f"UPDATE tasks SET {col}=json_extract(result,'$.{col}') WHERE {col} IS NULL "
                              f"AND result IS NOT NULL AND json_valid(result) AND json_extract(result,'$.{col}') IS NOT NULL")
-        for col in ("project", "sprint", "story"):
+        for col in ("project", "sprint", "story", "role"):
             await db.execute(f"UPDATE tasks SET {col}=json_extract(payload,'$.{col}') WHERE {col} IS NULL "
                              f"AND json_valid(payload) AND json_extract(payload,'$.{col}') IS NOT NULL")
         await db.execute("UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL "
@@ -85,15 +85,15 @@ async def insert_task(task: Task) -> Task:
         tags = tracking.from_payload(task.payload)
         await db.execute(
             """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at,
-                                  project,sprint,story)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  project,sprint,story,role)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task.id, task.type, task.status, task.priority,
                 json.dumps(task.payload), task.created_by, task.assigned_to,
                 json.dumps(task.result) if task.result else None,
                 task.notes,
                 task.created_at.isoformat(), task.updated_at.isoformat(),
-                tags.get("project"), tags.get("sprint"), tags.get("story"),
+                tags.get("project"), tags.get("sprint"), tags.get("story"), tags.get("role"),
             ),
         )
         await db.commit()
@@ -246,7 +246,7 @@ async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
 
 
 _USAGE_COLS = ("id,type,status,assigned_to,agent,model,tokens_in,tokens_out,tokens_total,cost_usd,"
-               "started_at,finished_at,created_at,project,sprint,story")
+               "started_at,finished_at,created_at,project,sprint,story,role")
 
 
 async def usage_rows(since: str | None = None, until: str | None = None,

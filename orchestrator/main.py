@@ -16,6 +16,7 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
 
+from agents import roles as scrum_roles
 from shared import scrum, tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
@@ -204,6 +205,40 @@ async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(de
 
 # ── Task CRUD ────────────────────────────────────────────────────────────────
 
+async def _month_opus_cost() -> float:
+    """This calendar month's Opus spend (the Claude CLI's cost estimate), from the task rows."""
+    start = datetime.utcnow().strftime("%Y-%m-01")
+    rows = await db.usage_rows(since=start)
+    return sum(r.get("cost_usd") or 0.0 for r in rows if scrum_roles.is_opus(r.get("model")))
+
+
+async def _apply_role(payload: dict) -> None:
+    """Resolve payload.role (config/roles.yaml) into agent/model and the Opus grant.
+
+    `_allow_opus` is policy, never input: whatever the caller sent is discarded first. An explicit
+    payload.agent/model still wins over the role's choice, as with task-class routing."""
+    payload.pop("_allow_opus", None)
+    role = payload.get("role")
+    if not role:
+        return
+    try:
+        month = await _month_opus_cost() if scrum_roles.is_opus(
+            ((scrum_roles.load_policy().get("roles") or {}).get(str(role).strip().lower()) or {}).get("model")) else 0.0
+        r = scrum_roles.resolve(str(role), project=payload.get("project"),
+                                sensitivity=payload.get("sensitivity"), month_opus_cost=month)
+    except scrum_roles.RoleError as e:
+        raise HTTPException(status_code=429 if "cap reached" in str(e) else 422, detail=str(e))
+    payload["role"] = str(role).strip().lower()
+    if not payload.get("agent"):
+        payload["agent"] = r["agent"]
+        if r["model"] and not payload.get("model"):
+            payload["model"] = r["model"]
+    if r["allow_opus"] and scrum_roles.is_opus(payload.get("model")):
+        payload["_allow_opus"] = True
+    if r["note"]:
+        payload["_role_note"] = r["note"]
+
+
 @app.post("/tasks", response_model=Task, status_code=201)
 async def create_task(body: TaskCreate, x_secret_key: str = Header(default=""),
                       x_client: str = Header(default="")):
@@ -213,6 +248,7 @@ async def create_task(body: TaskCreate, x_secret_key: str = Header(default=""),
     # where work was initiated. A caller-supplied _origin wins; the header fills the gap.
     if x_client.strip() and not payload.get("_origin"):
         payload["_origin"] = x_client.strip()[:60]
+    await _apply_role(payload)
     # Default an agent-style task to prefer the primary box, unless the caller
     # already pinned it (_target_machine) or set its own preference.
     if (body.type in PREFER_PRIMARY_TYPES
@@ -283,7 +319,7 @@ async def claim_task(body: ClaimRequest, x_secret_key: str = Header(default=""))
 
 # ── Scrum / usage summaries ──────────────────────────────────────────────────
 
-_GROUPS = ("agent", "machine", "project", "sprint", "type", "day")
+_GROUPS = ("agent", "machine", "project", "sprint", "role", "type", "day")
 
 
 @app.get("/scrum/usage")
@@ -383,7 +419,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
         "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO)},
         "projects": projects,
         "fleet": {"totals": (tracking.summarise(rows, "all") or [{}])[0],
-                  "by_agent": tracking.summarise(rows, "agent"), "by_machine": tracking.summarise(rows, "machine")},
+                  "by_agent": tracking.summarise(rows, "agent"), "by_machine": tracking.summarise(rows, "machine"),
+                  "by_role": tracking.summarise([r for r in rows if r.get("role")], "role")},
         "recent_tasks": [{"id": t.id[:8], "type": t.type.value if hasattr(t.type, "value") else str(t.type),
                           "status": t.status.value if hasattr(t.status, "value") else str(t.status),
                           "machine": t.assigned_to, "agent": t.agent, "model": t.model,
@@ -391,7 +428,7 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
                           ((t.tokens_in or 0) + (t.tokens_out or 0) or None),
                           "origin": (t.payload or {}).get("_origin") or None,        # None = not recorded (created_by is just the orchestrator)
                           "via": t.created_by,
-                          "project": t.project, "sprint": t.sprint, "story": t.story,
+                          "project": t.project, "sprint": t.sprint, "story": t.story, "role": t.role,
                           "started_at": t.started_at, "finished_at": t.finished_at,
                           "created_at": t.created_at.isoformat(timespec="seconds")} for t in recent],
         "notes": ["Story status comes from the product backlog when it knows the ID (it carries the evidence), "

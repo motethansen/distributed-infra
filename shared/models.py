@@ -77,6 +77,7 @@ class Task(BaseModel):
     project: str | None = None
     sprint: str | None = None
     story: str | None = None
+    role: str | None = None
 
 
 class TaskCreate(BaseModel):
