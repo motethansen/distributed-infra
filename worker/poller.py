@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import httpx
 
 from shared.models import ClaimRequest, Task, TaskStatus
+from shared.netinfo import lan_ips
 from worker.handlers import CAPABILITIES, dispatch
 
 log = logging.getLogger(__name__)
@@ -106,11 +107,12 @@ class Poller:
         """Tell orchestrators this worker is alive. Liveness is kept per orchestrator
         process, so a worker polling one would look dead through the other; this
         announces it to the rest (and to all of them while at the concurrency cap,
-        when no claim is made). Best effort."""
+        when no claim is made), with this machine's current LAN addresses. Best effort."""
         for url in (urls if urls is not None else self.urls):
             try:
                 async with httpx.AsyncClient(base_url=url, headers=self.headers, timeout=3) as c:
-                    await c.post("/workers/heartbeat", json={"worker_name": self.machine_name})
+                    await c.post("/workers/heartbeat",
+                                 json={"worker_name": self.machine_name, "lan_ips": lan_ips()})
             except httpx.HTTPError:
                 pass
 
@@ -141,8 +143,9 @@ class Poller:
             log.debug("At concurrency cap (%d/%d) — not claiming", len(self.active_tasks), self.max_concurrent)
             self._heartbeat()   # busy is not dead
             return
-        # Claim goes to one orchestrator; announce to the others so liveness is cluster-wide.
-        self._heartbeat([u for i, u in self._ordered() if i != self._pref])
+        # Claim goes to one orchestrator; announce to ALL so liveness and the machine's
+        # current LAN addresses are cluster-wide (they drift; /machines shows them).
+        self._heartbeat()
         resp = await self._send(
             "POST", "/tasks/claim", timeout=10,
             json=ClaimRequest(worker_name=self.machine_name, capabilities=CAPABILITIES).model_dump(),
