@@ -229,3 +229,78 @@ def test_dev_backend_that_fell_back_to_claude_wrote_its_own_files_so_no_integrat
     q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
     _run(q, [_t("api", "dev_backend")])
     assert [p["role"] for p in q.payloads()] == ["dev_backend", "reviewer"]
+
+
+# ── machines, repo preamble, approval, review ────────────────────────────────
+
+MACHINES = {"mac-mini", "thinkpad-x1"}
+
+
+def test_plan_machine_must_be_a_known_one_and_required_needs_a_machine():
+    ok = sf.parse_plan(_plan({**_t("a"), "machine": "thinkpad-x1", "machine_required": True}), ROLES, MACHINES)
+    assert ok[0]["machine"] == "thinkpad-x1" and ok[0]["machine_required"] is True
+    with pytest.raises(sf.PlanError, match="machine 'macbook-pro'"):
+        sf.parse_plan(_plan({**_t("a"), "machine": "macbook-pro"}), ROLES, MACHINES)
+    no_machine = sf.parse_plan(_plan({**_t("a"), "machine_required": True}), ROLES, MACHINES)
+    assert no_machine[0]["machine"] is None and no_machine[0]["machine_required"] is False
+
+
+def test_machine_choice_reaches_the_queue_soft_or_hard():
+    q = Queue(agent_for=lambda p: "claude")
+    _run(q, [{**_t("a", "dev_frontend"), "machine": "mac-mini"},
+             {**_t("b", "dev_frontend"), "machine": "thinkpad-x1", "machine_required": True}])
+    a = next(p for p in q.payloads() if p.get("flow_key") == "a")
+    b = next(p for p in q.payloads() if p.get("flow_key") == "b")
+    assert a["_preferred_machine"] == "mac-mini" and "_target_machine" not in a
+    assert b["_target_machine"] == "thinkpad-x1" and "_preferred_machine" not in b
+
+
+CFG = {"repo": "git@github.com:x/y.git", "dir": "y", "note": "careful"}
+
+
+def test_dev_tasks_and_the_integrator_are_told_where_the_code_is_but_reviews_are_not():
+    q = Queue()
+    _run(q, [_t("api", "dev_backend")], project_cfg=CFG)
+    by_role = {p["role"]: p["prompt"] for p in q.payloads()}
+    for role in ("dev_backend", "integrator"):
+        assert "git@github.com:x/y.git" in by_role[role] and "dis/BA-201-api" in by_role[role] and "careful" in by_role[role]
+    assert "never merge" in by_role["dev_backend"]
+    assert "git@github.com:x/y.git" not in by_role["reviewer"]
+    q2 = Queue()
+    _run(q2, [_t("api", "dev_backend")])                       # no project config -> prompt untouched
+    assert q2.payloads()[0]["prompt"] == "do it"
+
+
+def test_approval_binds_to_the_exact_tasks_and_editing_voids_it(tmp_path):
+    f = tmp_path / "p.plan.json"
+    f.write_text(json.dumps({"project": "x", "sprint": "S", "story": STORY, "tasks": [_t("a")]}))
+    assert sf.is_approved(json.loads(f.read_text())) is False
+    plan = sf.approve_plan(f, "michael", "2026-10-30T12:00:00+00:00")
+    assert sf.is_approved(plan) and sf.is_approved(json.loads(f.read_text()))
+    edited = json.loads(f.read_text())
+    edited["tasks"][0]["prompt"] = "something else"
+    assert sf.is_approved(edited) is False
+    unapproved_by = json.loads(f.read_text())
+    unapproved_by["approval"]["by"] = ""
+    assert sf.is_approved(unapproved_by) is False
+
+
+def test_sprint_review_counts_only_this_sprints_tasks_and_surfaces_prs_and_stuck_work():
+    def t(i, sprint="S6", project="budgetapp", status="done", role="dev_frontend", agent="claude", out=10, resp=""):
+        return {"id": f"{i:08d}xx", "status": status, "role": role, "agent": agent, "assigned_to": "mac-mini",
+                "tokens_in": 100, "tokens_out": out, "cost_usd": 0.5, "notes": "stuck here" if status != "done" else None,
+                "payload": {"project": project, "sprint": sprint}, "result": {"response": resp}}
+    rows = [t(1, resp="Opened https://github.com/o/r/pull/7 done"), t(2, role="reviewer", agent="codex", out=5),
+            t(3, status="needs_human"), t(4, sprint="S5"), t(5, project="other")]
+    data, md = sf.sprint_review(rows, "budgetapp", "S6", {"points_done": 3, "points_total": 8, "points_remaining": 5})
+    assert data["tasks"] == 3 and data["tokens_out"] == 25 and data["cost_usd"] == 1.5
+    assert data["by_role"] == {"dev_frontend": 2, "reviewer": 1} and data["by_status"] == {"done": 2, "needs_human": 1}
+    assert data["pull_requests"] == ["https://github.com/o/r/pull/7"]
+    assert data["needs_attention"][0]["notes"] == "stuck here"
+    assert "3 of 8 points done" in md and "pull/7" in md and "stuck here" in md
+
+
+def test_analyst_tasks_get_no_repo_instructions():
+    q = Queue(agent_for=lambda p: "agy")
+    _run(q, [_t("doc", "analyst")], project_cfg=CFG)
+    assert q.payloads()[0]["prompt"] == "do it"

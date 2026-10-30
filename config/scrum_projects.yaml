@@ -1,0 +1,21 @@
+# Projects the Scrum flow can work on, and the machines that can be assigned. Tracked, no secrets.
+# `repo` is the clone URL a worker uses when it has no checkout yet; `dir` is the folder name to look for.
+# Workers keep clones in different places (~/Projects/<dir>, ~/Projects/github/<org>/<dir>), so the
+# task prompt tells the agent to find an existing clone before cloning.
+
+machines:
+  mac-mini:    "macOS, always on. iOS/Xcode/Flutter builds, the orchestrator, WhatsApp bridge, Docker. Prefer for anything Apple or long-running."
+  thinkpad-x1: "Linux. Android, Python, Node, Docker; second orchestrator. Prefer for Linux/Android work and to spread load."
+# macbook-pro is Michael's own machine: no work is assigned to it.
+
+projects:
+  distributed-infra: { repo: "git@github.com:motethansen/distributed-infra.git", dir: distributed-infra }
+  vantage:           { repo: "git@github.com:motethansen/service-monitor.git",   dir: service-monitor }
+  motethansen:       { repo: "git@github.com:motethansen/motethansen-site.git",  dir: motethansen-site }
+  simtrader:         { repo: "git@github.com:motethansen/simtrader.git",         dir: simtrader }
+  budgetapp:         { repo: "git@github.com:motethansen/budgetapp.git",         dir: budgetapp }
+  cheersfriends:     { repo: "git@github.com:motethansen/cheersfriends.git",     dir: cheersfriends_cc, note: "backend/ and webfrontend/ are dead code; read the sprint file first" }
+  winedragons:      { repo: "git@github.com:motethansen/winedragons_asia.git",  dir: winedragons_asia }
+  academictool:      { repo: "git@github.com:motethansen/academictool.git", dir: academictool }
+  vizneo:            { repo: "git@gitlab.com:vizneo/vizneowebsite.git", dir: vizneowebsite, note: "GitLab, deployed as a Cloudflare Worker by hand; verify the remote before cloning" }
+  urbanlife:         { repo: "git@github.com:motethansen/urbanlife_works.git",   dir: urbanlife_works, note: "isolated: separate repo, deployed by hand" }

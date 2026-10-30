@@ -156,3 +156,116 @@ async def test_aliases_are_folded_and_open_only_backlogs_are_flagged(api, tmp_pa
     sp = await api.scrum_sprints(x_secret_key="k")
     flags = {p["project"]: (p["backlog_open_work_only"], p["complete_pct"]) for p in sp["projects"]}
     assert flags["vantage"] == (True, None) and flags["demo"] == (False, 50.0)
+
+
+# ── trends: velocity + S-curve inputs ────────────────────────────────────────
+
+def test_green_done_and_a_title_cell_marker_count_as_closed():
+    bl = ("| ID | Story | Pri | Status |\n|---|---|---|---|\n"
+          "| DI-1 | **Rotated the key** | High | 🟢 done 2026-08-07 |\n"
+          "| DI-2 | ✅ **Updated the plists** | High | evidence only |\n"
+          "| DI-3 | Plain | High | 🔵 planned |\n")
+    from shared import scrum
+    assert scrum.parse_backlog(bl) == {"DI-1": "done", "DI-2": "done", "DI-3": "planned"}
+
+
+def test_dates_come_only_from_the_status_cell_of_closed_rows():
+    from shared import scrum
+    bl = ("| ID | Story | Status | Evidence |\n|---|---|---|---|\n"
+          "| AB-1 | one | ✅ done 2026-08-07 | merged 2026-08-01 |\n"
+          "| AB-2 | two | ✅ done | merged 2026-08-02 |\n"
+          "| AB-3 | three | 🔵 planned 2026-09-09 | x |\n")
+    assert scrum.parse_backlog_dates(bl) == {"AB-1": "2026-08-07"}
+
+
+def _git(cwd, *a, date=None):
+    import os
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    if date:
+        env["GIT_COMMITTER_DATE"] = env["GIT_AUTHOR_DATE"] = date
+    subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, env=env)
+
+
+def test_git_history_dates_a_story_when_it_first_appears_closed_and_skips_bulk_imports(tmp_path):
+    from shared import scrum
+    proj = tmp_path / "p"
+    proj.mkdir()
+    f = proj / "product-backlog.md"
+    hdr = "| ID | Story | Status |\n|---|---|---|\n"
+    _git(tmp_path, "init", "-q")
+    # commit 1: an import of 31 already-closed stories + one open one -> bulk, undated
+    f.write_text(hdr + "".join(f"| PQ-{i:02d} | s | ✅ done |\n" for i in range(31)) + "| PQ-90 | open | 🔵 planned |\n")
+    _git(tmp_path, "add", "."); _git(tmp_path, "commit", "-qm", "import", date="2026-08-02T10:00:00+00:00")
+    # commit 2: PQ-90 closes on 2026-09-05
+    f.write_text(f.read_text().replace("| PQ-90 | open | 🔵 planned |", "| PQ-90 | open | ✅ done |"))
+    _git(tmp_path, "add", "."); _git(tmp_path, "commit", "-qm", "close", date="2026-09-05T10:00:00+00:00")
+    # commit 3: later edit of the same row must not move its date
+    f.write_text(f.read_text().replace("| PQ-90 | open |", "| PQ-90 | open, reworded |"))
+    _git(tmp_path, "add", "."); _git(tmp_path, "commit", "-qm", "edit", date="2026-09-20T10:00:00+00:00")
+    dates = scrum.git_closure_dates(tmp_path, "p/product-backlog.md", "head-1")
+    assert dates == {"PQ-90": "2026-09-05"}                       # the 31 imported ones are NOT dated
+    # one fewer than the threshold is a real day's work and is dated
+    assert scrum.BULK == 30
+
+
+def test_trends_builds_a_cumulative_curve_and_per_sprint_velocity():
+    from shared import scrum
+    backlog = {"AB-1": "done", "AB-2": "done", "AB-3": "done", "AB-4": "planned"}
+    dates = {"AB-1": "2026-10-01", "AB-2": "2026-10-01", "AB-3": "2026-10-03"}
+    sprints = [{"sprint": "1", "started": "2026-10-01", "updated": "2026-10-03", "points_done": 5.0, "points_total": 8.0,
+                "burndown": [{"date": "2026-10-02", "remaining": 3, "recorded": True}, {"date": "2026-10-09", "remaining": 3, "recorded": False}],
+                "stories": [{"id": "AB-1", "points": 2.0, "status": "done"}, {"id": "AB-2", "points": 3.0, "status": "done"},
+                            {"id": "AB-4", "points": 3.0, "status": "planned"}]}]
+    t = scrum.trends(backlog, dates, sprints)
+    c = t["scurve"]
+    assert [(x["date"], x["closed_stories"], x["closed_points"]) for x in c["curve"]] == [("2026-10-01", 2, 5.0), ("2026-10-03", 3, 5.0)]
+    assert c["scope_stories"] == 4 and c["scope_points"] == 8.0 and c["points_known_for"] == 3
+    assert c["dated_closed"] == 3 and c["undated_closed"] == 0
+    assert t["velocity"] == [{"sprint": "1", "ended": "2026-10-02", "started": "2026-10-01", "points_done": 5.0,
+                              "points_total": 8.0, "stories_done": 2}]
+    t2 = scrum.trends(backlog, {"AB-1": "2026-10-01"}, sprints)
+    assert t2["scurve"]["undated_closed"] == 2 and len(t2["scurve"]["curve"]) == 1       # undated are counted, not plotted
+
+
+def _repo_with(tmp_path, commits):
+    """commits: [(date, {path: text})] -> a git repo laid out like vizneoprojects."""
+    _git(tmp_path, "init", "-q")
+    for date, files in commits:
+        for rel, text in files.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text)
+        _git(tmp_path, "add", "."); _git(tmp_path, "commit", "-qm", "c", date=date)
+
+
+def _rows(n, status="✅ done", start=0):
+    return "".join(f"| QQ-{i:02d} | s | {status} |\n" for i in range(start, start + n))
+
+
+HDR = "| ID | Story | Status |\n|---|---|---|\n"
+
+
+def test_bulk_threshold_is_exactly_thirty(tmp_path):
+    from shared import scrum
+    _repo_with(tmp_path, [("2026-08-02T10:00:00+00:00", {"p/product-backlog.md": HDR + _rows(scrum.BULK - 1)})])
+    assert len(scrum.git_closure_dates(tmp_path, "p/product-backlog.md", "h-a")) == scrum.BULK - 1
+    other = tmp_path / "b"
+    other.mkdir()
+    _repo_with(other, [("2026-08-02T10:00:00+00:00", {"p/product-backlog.md": HDR + _rows(scrum.BULK)})])
+    assert scrum.git_closure_dates(other, "p/product-backlog.md", "h-b") == {}
+
+
+def test_a_bulk_imported_story_edited_later_stays_undated(tmp_path):
+    from shared import scrum
+    body = HDR + _rows(scrum.BULK)
+    _repo_with(tmp_path, [("2026-08-02T10:00:00+00:00", {"p/product-backlog.md": body}),
+                          ("2026-09-09T10:00:00+00:00", {"p/product-backlog.md": body.replace("QQ-00 | s", "QQ-00 | reworded")})])
+    assert "QQ-00" not in scrum.git_closure_dates(tmp_path, "p/product-backlog.md", "h-c")
+
+
+def test_load_prefers_the_date_written_in_the_status_cell_over_the_commit_date(tmp_path):
+    from shared import scrum
+    text = HDR + "| QQ-01 | s | ✅ done 2026-07-01 |\n| QQ-02 | s | ✅ done |\n"
+    _repo_with(tmp_path, [("2026-09-01T10:00:00+00:00", {"proj/product-backlog.md": text})])
+    curve = scrum.load(tmp_path)["projects"][0]["scurve"]["curve"]
+    assert [(c["date"], c["day_stories"]) for c in curve] == [("2026-07-01", 1), ("2026-09-01", 1)]

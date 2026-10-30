@@ -1,0 +1,8 @@
+#!/bin/sh
+# dis-agent: the distributed agents from any terminal. Resolves its own repo, even through a symlink.
+self="$0"; while [ -L "$self" ]; do d=$(cd "$(dirname "$self")" && pwd); self=$(readlink "$self"); case "$self" in /*) ;; *) self="$d/$self";; esac; done
+repo=$(cd "$(dirname "$self")/.." && pwd)
+for py in "$repo/.venv/bin/python" "$repo/venv/bin/python" python3; do
+  if "$py" -c 'import httpx, yaml' 2>/dev/null; then exec "$py" "$repo/scripts/dis_agent.py" "$@"; fi
+done
+echo "dis-agent: need python with httpx and pyyaml (pip install -r $repo/requirements.txt)" >&2; exit 1
