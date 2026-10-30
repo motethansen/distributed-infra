@@ -233,3 +233,31 @@ dead + data lost* — is closed and demonstrated closed.
 mac-mini orchestrator; both fail together) and the `da` CLI are single-endpoint. A Tailscale
 MagicDNS name for the orchestrator would be a convenience but isn't required — client-side
 failover already covers it.
+
+### Queue cluster layout (verified 2026-10-30)
+
+Three Raft voters, all addressed by **Tailscale IP** (LAN addresses drift; see `/machines` for each
+machine's current LAN IPs and whether Tailscale reaches it direct or via a relay):
+
+| node | where | address | run as |
+|---|---|---|---|
+| `mac-mini` | home | `100.76.214.54:4001/4002` | docker `rqlite` (launchd-managed host) |
+| `thinkpad` | home | `100.112.241.6:4001/4002` | systemd user unit `rqlite-node.service` |
+| `vizneo-docker` | DigitalOcean droplet | `100.100.42.31:4001/4002` | docker `rqlite-voter`, published **only** on the Tailscale IP |
+
+Quorum is 2 of 3, so any one node can be down and the queue keeps working, including when the home
+internet or router is down (mac-mini + thinkpad are still 2 of 3). A leader election after losing
+the leader took 4 s in the live test. The Synology voter is gone (decommissioned).
+
+- **Check:** `curl -s "http://100.76.214.54:4001/nodes?nonvoters&timeout=3s"` — expect 3 voters, all
+  reachable. (`timeout=3s` matters: without it `/nodes` waits on any unreachable member.)
+- **Version:** all nodes run rqlite v10.2.7. v10.2.7 has **no promote/demote command**: to change a
+  node between voter and non-voter, `DELETE /remove` it, then restart it with/without
+  `-raft-non-voter` and `-join <other-node>:4002` (it re-syncs from a snapshot in about a second).
+- **Changing a node's advertised address:** restart it with the new `-raft-adv-addr` and `-join`
+  while a quorum is running (this is how mac-mini's stale `192.168.0.105` entry was fixed).
+- **Before any membership change:** `curl localhost:4001/db/backup -o ~/Backups/rqlite-queue-<date>.sqlite`.
+- **Do not** publish 4001/4002 on a public interface: rqlite here has no authentication.
+- Leadership currently sits wherever the last election put it (it may be the droplet); it does not
+  matter for correctness. `.stepdown <node>` in the rqlite CLI asks for a move, but it did not take
+  effect on 2026-10-30 (the leader stayed), so do not rely on it.
