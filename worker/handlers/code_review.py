@@ -1,4 +1,4 @@
-"""Code-review handler — runs a claude code review on a local repo path."""
+"""Code-review handler — runs an agent code review on a local repo path (routed `review`: Claude Sonnet, falling back to Codex/agy on a usage limit)."""
 from __future__ import annotations
 
 import os
@@ -40,10 +40,11 @@ async def handle_code_review(task: Task) -> dict:
         "End with a brief summary: overall health, top 3 priorities to fix."
     )
 
-    from agents.claude_agent import run as claude_run
-    result = await claude_run(
+    from agents.runner import run_agent
+    result = await run_agent(
         prompt=prompt,
-        model=model or "sonnet",
+        task_kind="review",
+        model=model or None,
         cwd=expanded,
         timeout=600,
     )
@@ -51,8 +52,10 @@ async def handle_code_review(task: Task) -> dict:
     if not result.get("ok"):
         return {
             "needs_human": True,
-            "notes": f"claude code review failed: {result.get('error')}",
+            "notes": f"{result.get('agent') or 'review'} code review failed: {result.get('error')}",
+            "failover": result.get("failover"),
         }
-    result["agent"] = "code_review"
+    # `agent` stays the agent that actually did the review (proof of who ran it).
+    result["handler"] = "code_review"
     result["target"] = target
     return result

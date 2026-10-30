@@ -38,11 +38,14 @@ def _find_node() -> str | None:
 
 
 def _find_cli() -> str | None:
+    # User installs first: a service's PATH is minimal and can resolve a stale system
+    # copy (thinkpad's worker ran /usr/bin/codex 0.57, which picks a model ChatGPT
+    # accounts reject, while the 0.16x install in ~/.npm-global was never reached).
     candidates = [
-        shutil.which("codex"),
         os.path.expanduser("~/.local/bin/codex"),
         os.path.expanduser("~/.npm-global/bin/codex"),
         os.path.expanduser("~/.npm/bin/codex"),
+        shutil.which("codex"),
         "/usr/local/bin/codex",
         "/opt/homebrew/bin/codex",
         "/usr/bin/codex",

@@ -91,8 +91,13 @@ def test_mark_limited_defaults_and_expires():
 
 
 # ── routing chain ──────────────────────────────────────────────────────────────
-def test_chain_for_coding_fails_over_to_codex_then_agy():
-    assert [a for a, _ in route_chain(task_kind="code")] == ["claude", "codex", "agy"]
+def test_chain_for_coding_fails_over_to_agy_then_codex():
+    # coding writes files: agy can, codex is read-only here, so it goes last
+    assert [a for a, _ in route_chain(task_kind="code")] == ["claude", "agy", "codex"]
+
+
+def test_chain_for_planning_fails_over_to_codex_then_agy():
+    assert [a for a, _ in route_chain(task_kind="plan")] == ["claude", "codex", "agy"]
 
 
 def test_privacy_chain_never_includes_deepseek():
@@ -110,7 +115,7 @@ def test_pinned_agent_gets_default_fallbacks():
 def test_limit_fails_over_and_reports_it(monkeypatch):
     calls = _fake_agents(monkeypatch, {"claude": LIMITED, "codex": OK("codex"), "agy": OK("agy"),
                                        "deepseek": OK("deepseek")})
-    r = asyncio.run(runner.run_agent(task_kind="code", prompt="fix it"))
+    r = asyncio.run(runner.run_agent(task_kind="plan", prompt="plan it"))
     assert r["ok"] and r["agent"] == "codex"
     assert [c[0] for c in calls] == ["claude", "codex"]
     assert r["failover"][0]["agent"] == "claude" and r["failover"][0]["reason"] == "limit"

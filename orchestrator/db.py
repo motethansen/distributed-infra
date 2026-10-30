@@ -186,3 +186,25 @@ async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
         await db.execute(f"UPDATE tasks SET {set_clause} WHERE id=?", values)
         await db.commit()
     return await get_task(task_id)
+
+
+async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
+    """Move tasks stuck in claimed/in_progress since before `cutoff_iso` (naive UTC
+    ISO, same format as updated_at) to needs_human, keeping their result and adding
+    `note`. Returns [{id, type, assigned_to}] for the tasks it moved."""
+    now = datetime.utcnow().isoformat()
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(
+            "SELECT id, type, assigned_to FROM tasks "
+            "WHERE status IN ('claimed','in_progress') AND updated_at < ?", (cutoff_iso,))
+        stuck = [dict(r) for r in await cur.fetchall()]
+        for t in stuck:
+            await db.execute(
+                "UPDATE tasks SET status='needs_human', updated_at=?, "
+                "notes = CASE WHEN notes IS NULL OR notes='' THEN ? ELSE notes || ' | ' || ? END "
+                "WHERE id=? AND status IN ('claimed','in_progress')",
+                (now, note, note, t["id"]))
+        await db.commit()
+    return stuck
