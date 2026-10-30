@@ -1,6 +1,6 @@
 # Agent roster, LLM switching and chat access
 
-Status: build in progress (2026-10-30). Built so far: roles.yaml + resolver, Opus allow-list with a
+Status: build in progress (2026-10-30). Built so far: Scrum flow CLI (`scripts/scrum_cli.py`), agent files, integrator role, DeepSeek allowed on listed projects, isolated projects, Opus cap fallback, roles.yaml + resolver, Opus allow-list with a
 monthly cap, DeepSeek project limit, `role` tag and column, `role`/`project`/`sprint`/`story` on
 `fleet_ask`. Not yet built: agent definition files, client model selector, auto-queued review.
 Inputs: the 5-role Scrum roster proposed by Michael, the live Scrum board
@@ -118,6 +118,27 @@ front of it; do not adopt a second agent runtime as the hub.**
 Why not make pi or T3 Code the hub: both execute agents on the machine they run
 on. The value of this system is that the queue assigns work to the right machine
 and records who ran it. A client-side runtime would bypass that record.
+
+## 3.5 Asking the Product Owner and Scrum Master (built)
+
+```
+python scripts/scrum_cli.py roles                                   # who holds which role + live usage
+python scripts/scrum_cli.py po   -p budgetapp -s S6 "request..."    # PO (Opus) proposes stories; nothing is queued
+python scripts/scrum_cli.py plan -p budgetapp -s S6 --story BA-201  # SM (Sonnet) assigns roles, orders tasks
+python scripts/scrum_cli.py dispatch --plan data/scrum/budgetapp/S6/BA-201.plan.json        # dry run
+python scripts/scrum_cli.py dispatch --plan ... --go --cwd ~/Projects/<repo>                # queue it
+```
+
+Gates: `po` and `plan` write files under `data/scrum/<project>/<sprint>/` for a human to read and edit;
+`dispatch` queues nothing without `--go`; the run stops at the first failed task. Reviews are added
+after every dev task and an integrator after every DeepSeek result (DeepSeek returns text and cannot
+edit files). `--as agy|codex|claude` hands the PO or SM role to another agent when Claude is near its
+limit; the task keeps its role tag. The same tags work from chat: `fleet_ask(role=..., project=..., sprint=..., story=...)`.
+
+DeepSeek runs for every project in `deepseek_projects` except isolated ones, never for sensitive work
+and never for a prompt that looks like it carries a credential. `urbanlife` is isolated: every task
+needs `--approved`. When the Opus cap is spent the Product Owner runs on `cap_fallback` (Sonnet), and
+from 80% of the cap each task is flagged.
 
 ## 4. Build order
 

@@ -1,0 +1,344 @@
+"""The Scrum flow as code: Product Owner proposes stories, a human approves, the Scrum Master breaks a
+story into role-tagged tasks, and the dispatcher queues them in dependency order.
+
+Every task is queued with project / sprint / story / role, so the Scrum board can show which agent
+worked which story. The pure parts (prompts, JSON parsing, plan validation, ordering) have no
+network; `FleetClient` and `dispatch` talk to the orchestrator and take an injectable sleep so
+they are testable against a fake queue.
+
+Human gates: `po` and `plan` only write proposal files; `dispatch` queues nothing without `go=True`.
+DeepSeek answers are text only, so a deepseek dev task is followed by an `integrator` task
+(Claude Sonnet applies it, runs the tests, opens the PR). Every dev task is followed by a
+`reviewer` task pinned away from the author's model family where it can be.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+import httpx
+
+TERMINAL = {"done", "failed", "needs_human"}
+DEV_ROLES = {"dev_frontend", "dev_backend"}
+PLANNABLE = {"analyst", "dev_frontend", "dev_backend"}        # roles the Scrum Master may assign
+MAX_TASKS = 10
+CARRY_CHARS = 4000                                             # of each dependency's result handed on
+
+
+class PlanError(ValueError):
+    """The model's output is not a plan we are willing to run."""
+
+
+# ── prompts ──────────────────────────────────────────────────────────────────
+
+def po_prompt(project: str, sprint: str, request: str, context: str = "") -> str:
+    ctx = ("\nContext (existing backlog / sprint, read-only):\n" + context.strip()) if context.strip() else ""
+    return f"""You are the Product Owner for the project "{project}" (sprint {sprint}).
+
+Business request:
+{request.strip()}
+{ctx}
+
+Write user stories a developer can build and a reviewer can check. For each story give one
+user-visible outcome small enough for one sprint, points (1,2,3,5,8), observable acceptance criteria
+(a response, a screen, a passing test — not "works well"), the edge cases in and out of scope, and
+dependencies. Mark stories that need a human-only step (payment dashboard, app-store console).
+Never include a secret. Spend your effort on trade-offs, not on restating the request.
+
+Answer with ONLY a JSON object, no prose:
+{{"stories":[{{"id":"S-1","title":"...","points":3,"acceptance":["..."],"edge_cases":["..."],
+"out_of_scope":["..."],"depends_on":[],"human_only":false}}]}}"""
+
+
+def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str]) -> str:
+    table = "\n".join(f"- {r}: {roles[r]}" for r in sorted(roles) if r in PLANNABLE)
+    return f"""You are the Scrum Master for the project "{project}" (sprint {sprint}).
+Break this story into atomic tasks for the roles below. Do not plan reviews or integration: the
+dispatcher adds a reviewer after every dev task, and an integrator after every dev_backend task.
+
+Story:
+{json.dumps(story, indent=2)}
+
+Roles you may assign:
+{table}
+
+Rules:
+- Each task prompt must be self-contained: the agent sees only its prompt plus the results of the
+  tasks it depends on. Name files, interfaces and acceptance checks. NEVER include a secret,
+  token, password or connection string; refer to a credential by variable name.
+- dev_backend returns code as text (it cannot edit files). Ask it for each file as a fenced block
+  preceded by a line `FILE: relative/path`.
+- Put the API contract first (a dev_backend task), then UI work depending on it, so they can
+  proceed in parallel against the contract. Use depends_on for real ordering only.
+- At most {MAX_TASKS} tasks. Choose the role by what it is best at; give dev_backend only
+  self-contained logic.
+
+Answer with ONLY a JSON object, no prose:
+{{"tasks":[{{"key":"t1","title":"...","role":"dev_backend","depends_on":[],"prompt":"..."}}]}}"""
+
+
+# ── parsing ──────────────────────────────────────────────────────────────────
+
+def extract_json(text: str) -> Any:
+    """The first JSON object/array in a model's reply, tolerating fences and surrounding prose."""
+    if not text or not text.strip():
+        raise PlanError("empty reply")
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"[\[{]", text):
+        try:
+            obj, _ = dec.raw_decode(text[m.start():])
+        except json.JSONDecodeError:
+            continue
+        return obj
+    raise PlanError("no JSON found in the reply")
+
+
+def parse_stories(text: str) -> list[dict]:
+    obj = extract_json(text)
+    stories = obj.get("stories") if isinstance(obj, dict) else obj
+    if not isinstance(stories, list) or not stories:
+        raise PlanError("expected a non-empty list of stories")
+    out = []
+    for i, s in enumerate(stories, 1):
+        if not isinstance(s, dict) or not str(s.get("title") or "").strip():
+            raise PlanError(f"story {i} has no title")
+        acc = s.get("acceptance")
+        if not isinstance(acc, list) or not [a for a in acc if str(a).strip()]:
+            raise PlanError(f"story {s.get('id') or i}: no acceptance criteria")
+        out.append({**s, "id": str(s.get("id") or f"S-{i}")})
+    return out
+
+
+def parse_plan(text: str, known_roles: set[str]) -> list[dict]:
+    """Validate the Scrum Master's task list. Unknown roles are refused, not guessed."""
+    obj = extract_json(text)
+    tasks = obj.get("tasks") if isinstance(obj, dict) else obj
+    if not isinstance(tasks, list) or not tasks:
+        raise PlanError("expected a non-empty list of tasks")
+    if len(tasks) > MAX_TASKS:
+        raise PlanError(f"{len(tasks)} tasks; the limit is {MAX_TASKS}")
+    out, keys = [], set()
+    for i, t in enumerate(tasks, 1):
+        if not isinstance(t, dict):
+            raise PlanError(f"task {i} is not an object")
+        key = str(t.get("key") or "").strip()
+        if not key or len(key) > 40 or key in keys:
+            raise PlanError(f"task {i}: key {key!r} is missing, too long or repeated")
+        role = str(t.get("role") or "").strip().lower()
+        if role not in known_roles:
+            raise PlanError(f"task {key}: unknown role {role!r}")
+        if role not in PLANNABLE:
+            raise PlanError(f"task {key}: role {role!r} is not assigned by the Scrum Master "
+                            f"(reviews and integration are added by the dispatcher)")
+        if not str(t.get("prompt") or "").strip():
+            raise PlanError(f"task {key}: empty prompt")
+        deps = t.get("depends_on") or []
+        if not isinstance(deps, list):
+            raise PlanError(f"task {key}: depends_on must be a list")
+        keys.add(key)
+        out.append({"key": key, "title": str(t.get("title") or key)[:120], "role": role,
+                    "depends_on": [str(d) for d in deps], "prompt": str(t["prompt"])})
+    for t in out:
+        for d in t["depends_on"]:
+            if d not in keys:
+                raise PlanError(f"task {t['key']}: depends on unknown task {d!r}")
+            if d == t["key"]:
+                raise PlanError(f"task {t['key']}: depends on itself")
+    waves(out)                                                   # raises on a cycle
+    return out
+
+
+def waves(tasks: list[dict]) -> list[list[dict]]:
+    """Dependency layers: every task in layer n depends only on layers before n."""
+    remaining, done, layers = list(tasks), set(), []
+    while remaining:
+        layer = [t for t in remaining if all(d in done for d in t["depends_on"])]
+        if not layer:
+            raise PlanError("dependency cycle among: " + ", ".join(t["key"] for t in remaining))
+        layers.append(layer)
+        done |= {t["key"] for t in layer}
+        remaining = [t for t in remaining if t["key"] not in done]
+    return layers
+
+
+# ── orchestrator client ──────────────────────────────────────────────────────
+
+class FleetClient:
+    """Minimal sync client; tries each orchestrator in turn on connection errors and 5xx."""
+
+    def __init__(self, urls: list[str], key: str, transport: httpx.BaseTransport | None = None,
+                 client: str = "scrum-cli"):
+        self.urls, self.key, self.transport, self.client = [u.rstrip("/") for u in urls], key, transport, client
+
+    def _call(self, method: str, path: str, **kw) -> Any:
+        errs = []
+        for base in self.urls:
+            try:
+                with httpx.Client(timeout=20, transport=self.transport) as c:
+                    r = c.request(method, base + path, headers={"x-secret-key": self.key, "x-client": self.client}, **kw)
+            except httpx.HTTPError as e:
+                errs.append(f"{base}: {type(e).__name__}")
+                continue
+            if r.status_code >= 500:
+                errs.append(f"{base}: HTTP {r.status_code}")
+                continue
+            if r.status_code >= 400:
+                raise PlanError(f"{method} {path}: HTTP {r.status_code} {r.text[:300]}")
+            return r.json()
+        raise PlanError("no orchestrator reachable — " + "; ".join(errs))
+
+    def queue(self, payload: dict, notes: str) -> dict:
+        return self._call("POST", "/tasks", json={"type": "agent_run", "payload": payload, "notes": notes[:80]})
+
+    def get(self, task_id: str) -> dict:
+        return self._call("GET", f"/tasks/{task_id}")
+
+    def usage(self, group_by: str) -> dict:
+        return self._call("GET", "/scrum/usage", params={"group_by": group_by})
+
+    def wait(self, task_ids: list[str], timeout: float = 1800, poll: float = 3,
+             sleep: Callable[[float], None] = time.sleep) -> dict[str, dict]:
+        end, left, out = time.monotonic() + timeout, set(task_ids), {}
+        while left:
+            for tid in sorted(left):
+                t = self.get(tid)
+                if t.get("status") in TERMINAL:
+                    out[tid] = t
+                    left.discard(tid)
+            if left:
+                if time.monotonic() > end:
+                    raise PlanError("timed out waiting for: " + ", ".join(sorted(left)))
+                sleep(poll)
+        return out
+
+
+def answer(task: dict) -> str:
+    r = task.get("result") or {}
+    return str(r.get("response") or r.get("output") or "")
+
+
+def tags(project: str, sprint: str, story: str | None, role: str, approved: bool, as_agent: str | None,
+         cwd: str | None, **extra) -> dict:
+    p = {"project": project, "sprint": sprint, "role": role}
+    if story:
+        p["story"] = story
+    if approved:
+        p["approved"] = True
+    if as_agent:
+        p["agent"] = as_agent
+    if cwd:
+        p["cwd"] = cwd
+    p.update(extra)
+    return p
+
+
+# ── the three steps ──────────────────────────────────────────────────────────
+
+def propose_stories(c: FleetClient, project: str, sprint: str, request: str, context: str = "",
+                    approved: bool = False, as_agent: str | None = None, sleep=time.sleep) -> tuple[list[dict], dict]:
+    t = c.queue(tags(project, sprint, None, "product_owner", approved, as_agent, None,
+                     prompt=po_prompt(project, sprint, request, context), timeout=900), f"PO {project} {sprint}")
+    done = c.wait([t["id"]], sleep=sleep)[t["id"]]
+    if done["status"] != "done":
+        raise PlanError(f"product owner task {done['status']}: {done.get('notes') or ''}")
+    return parse_stories(answer(done)), done
+
+
+def plan_story(c: FleetClient, project: str, sprint: str, story: dict, roles: dict[str, str],
+               approved: bool = False, as_agent: str | None = None, sleep=time.sleep) -> tuple[list[dict], dict]:
+    t = c.queue(tags(project, sprint, story["id"], "scrum_master", approved, as_agent, None,
+                     prompt=sm_prompt(project, sprint, story, roles), timeout=900), f"SM {project} {story['id']}")
+    done = c.wait([t["id"]], sleep=sleep)[t["id"]]
+    if done["status"] != "done":
+        raise PlanError(f"scrum master task {done['status']}: {done.get('notes') or ''}")
+    return parse_plan(answer(done), set(roles)), done
+
+
+def _carry(results: dict[str, str], deps: list[str]) -> str:
+    if not deps:
+        return ""
+    parts = [f"--- result of task {d} ---\n{results.get(d, '')[:CARRY_CHARS]}" for d in deps]
+    return "\n\nResults of the tasks this one depends on:\n" + "\n\n".join(parts)
+
+
+def integrate_prompt(story: dict, code: str) -> str:
+    return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text. "
+            "Apply it to a new branch in this repository (create the files at the FILE: paths, adapting imports to the "
+            "repo's conventions), run the tests, fix only what is needed to make the story's acceptance criteria hold, "
+            "commit, push and open a PR. Do not merge or deploy. Report the PR URL, the test output, and anything you "
+            f"changed from the returned code.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
+            f"Returned code:\n{code[:20000]}")
+
+
+def review_prompt(story: dict, author: str, material: str) -> str:
+    return (f"Independent review of work on story {story['id']}: {story['title']}. The author was {author}; you did not "
+            "write it and must not edit anything. Check it against the acceptance criteria, run the tests if there is a "
+            "branch or PR, and report findings ranked by consequence (wrong behaviour, missing test, security, style). "
+            f"Say what you could not verify.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
+            f"Material to review (PR URL / returned code):\n{material[:12000]}")
+
+
+def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list[dict], *, go: bool,
+             approved: bool = False, cwd: str | None = None, sleep=time.sleep, say=print) -> list[dict]:
+    """Queue the plan wave by wave; add integrator/reviewer steps; stop at the first failed task.
+
+    Returns a log of {key, role, task_id, status, agent}. With go=False nothing is queued."""
+    layers = waves(tasks)
+    if not go:
+        for i, layer in enumerate(layers, 1):
+            say(f"wave {i}: " + ", ".join(f"{t['key']}[{t['role']}]" for t in layer))
+        say("dry run: nothing queued. Re-run with --go to queue these (reviews and integration are added automatically).")
+        return []
+    log: list[dict] = []
+    results: dict[str, str] = {}
+    for layer in layers:
+        queued = {}
+        for t in layer:
+            prompt = t["prompt"] + _carry(results, t["depends_on"])
+            r = c.queue(tags(project, sprint, story["id"], t["role"], approved, None, cwd, prompt=prompt, timeout=1800,
+                             flow_key=t["key"]), f"{t['role']} {story['id']} {t['key']}")
+            queued[r["id"]] = t
+            say(f"queued {t['key']} [{t['role']}] -> {r['id'][:8]}")
+        for tid, done in c.wait(list(queued), sleep=sleep).items():
+            t = queued[tid]
+            ran = done.get("agent") or (done.get("result") or {}).get("agent")
+            log.append({"key": t["key"], "role": t["role"], "task_id": tid, "status": done["status"], "agent": ran})
+            say(f"{t['key']} [{t['role']}] {done['status']} on {ran or '?'}")
+            if done["status"] != "done":
+                raise PlanError(f"task {t['key']} ended {done['status']}: {done.get('notes') or ''} — stopped; fix and re-run")
+            results[t["key"]] = answer(done)
+            material = answer(done)
+            if t["role"] == "dev_backend" and ran == "deepseek":
+                i = c.queue(tags(project, sprint, story["id"], "integrator", approved, None, cwd,
+                                 prompt=integrate_prompt(story, answer(done)), timeout=1800), f"integrate {story['id']} {t['key']}")
+                idone = c.wait([i["id"]], sleep=sleep)[i["id"]]
+                iran = idone.get("agent") or (idone.get("result") or {}).get("agent")
+                log.append({"key": t["key"] + ":integrate", "role": "integrator", "task_id": i["id"],
+                            "status": idone["status"], "agent": iran})
+                say(f"{t['key']}:integrate [integrator] {idone['status']} on {iran or '?'}")
+                if idone["status"] != "done":
+                    raise PlanError(f"integration of {t['key']} ended {idone['status']}: {idone.get('notes') or ''}")
+                material = answer(idone)
+            if t["role"] in DEV_ROLES:
+                pin = {"as_agent": "claude"} if ran == "codex" else {}
+                rv = c.queue(tags(project, sprint, story["id"], "reviewer", approved, pin.get("as_agent"), cwd,
+                                  prompt=review_prompt(story, ran or "unknown", material), timeout=1800), f"review {story['id']} {t['key']}")
+                rdone = c.wait([rv["id"]], sleep=sleep)[rv["id"]]
+                rran = rdone.get("agent") or (rdone.get("result") or {}).get("agent")
+                log.append({"key": t["key"] + ":review", "role": "reviewer", "task_id": rv["id"],
+                            "status": rdone["status"], "agent": rran, "author": ran,
+                            "same_family": bool(ran and rran and ran == rran)})
+                say(f"{t['key']}:review [reviewer] {rdone['status']} on {rran or '?'}"
+                    + (" (SAME model family as the author)" if ran and rran and ran == rran else ""))
+    return log
+
+
+def save(base: Path, project: str, sprint: str, name: str, data: Any) -> Path:
+    d = base / "data" / "scrum" / project / sprint
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    return p

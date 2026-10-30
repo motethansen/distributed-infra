@@ -13,7 +13,9 @@ from shared.models import Task, TaskStatus, TaskType
 
 POLICY = {
     "roles": {
-        "product_owner": {"agent": "claude", "model": "opus", "allow_opus": True, "monthly_cost_cap_usd": 50},
+        "product_owner": {"agent": "claude", "model": "opus", "allow_opus": True, "monthly_cost_cap_usd": 50,
+                          "warn_at": 0.8, "cap_fallback": {"agent": "agy"}},
+        "strict_po": {"agent": "claude", "model": "opus", "allow_opus": True, "monthly_cost_cap_usd": 10},
         "scrum_master": {"agent": "claude", "model": "sonnet"},
         "sneaky": {"agent": "claude", "model": "opus"},                      # opus without allow_opus
         "dev_backend": {"agent": "deepseek", "model": "deepseek-chat",
@@ -21,6 +23,7 @@ POLICY = {
         "reviewer": {"agent": "codex"},
     },
     "deepseek_projects": ["Open-Thing"],
+    "isolated_projects": ["Walled"],
 }
 
 
@@ -44,9 +47,32 @@ def test_opus_needs_allow_opus_on_the_role():
 
 
 def test_opus_cap_stops_the_role_at_the_limit_not_after():
-    assert roles.resolve("product_owner", month_opus_cost=49.99, policy=POLICY)["allow_opus"]
-    with pytest.raises(roles.RoleError, match="monthly Opus cap reached"):
-        roles.resolve("product_owner", month_opus_cost=50.0, policy=POLICY)
+    assert roles.resolve("strict_po", month_opus_cost=9.99, policy=POLICY)["allow_opus"]
+    with pytest.raises(roles.RoleError, match="monthly Opus cap reached"):     # no fallback: refuse
+        roles.resolve("strict_po", month_opus_cost=10.0, policy=POLICY)
+
+
+def test_spent_cap_runs_the_role_on_its_fallback_instead_of_stopping():
+    r = roles.resolve("product_owner", month_opus_cost=50.0, policy=POLICY)
+    assert (r["agent"], r["allow_opus"]) == ("agy", False) and "opus cap reached" in r["note"]
+    ok = roles.resolve("product_owner", month_opus_cost=49.0, policy=POLICY)
+    assert ok["agent"] == "claude" and ok["allow_opus"] and "98%" in ok["note"]          # near the cap: warned
+    assert roles.resolve("product_owner", month_opus_cost=10.0, policy=POLICY)["note"] == ""
+
+
+def test_isolated_project_needs_explicit_approval():
+    with pytest.raises(roles.RoleError, match="isolated"):
+        roles.resolve("scrum_master", project="walled", policy=POLICY)
+    assert roles.resolve("scrum_master", project="Walled", approved=True, policy=POLICY)["agent"] == "claude"
+
+
+def test_a_prompt_that_carries_a_credential_never_reaches_deepseek():
+    for leak in ("use sk_live_abcdefgh12345678 here", "password = hunter2hunter2", "-----BEGIN RSA PRIVATE KEY-----",
+                 "AKIAABCDEFGHIJKLMNOP"):
+        r = roles.resolve("dev_backend", project="open-thing", prompt=leak, policy=POLICY)
+        assert r["agent"] == "claude" and "credential" in r["note"], leak
+    assert roles.resolve("dev_backend", project="open-thing", prompt="write a FastAPI route for /health",
+                         policy=POLICY)["agent"] == "deepseek"
 
 
 def test_deepseek_only_for_listed_projects_and_never_for_sensitive_work():
@@ -59,10 +85,13 @@ def test_deepseek_only_for_listed_projects_and_never_for_sensitive_work():
 def test_shipped_policy_is_loadable_and_safe_by_default():
     p = roles.load_policy()
     assert set(roles.role_names()) >= {"product_owner", "scrum_master", "analyst", "dev_frontend", "dev_backend", "reviewer"}
-    assert p["deepseek_projects"] == []                                       # DeepSeek sees no project until listed
+    assert "urbanlife" not in p["deepseek_projects"] and "urbanlife" in p["isolated_projects"]
+    with pytest.raises(roles.RoleError, match="isolated"):
+        roles.resolve("dev_backend", project="urbanlife")
     opus_roles = [n for n, s in p["roles"].items() if roles.is_opus(s.get("model"))]
     assert opus_roles == ["product_owner"] and p["roles"]["product_owner"]["allow_opus"] is True
-    assert roles.resolve("dev_backend", project="budgetapp")["agent"] == "claude"
+    assert roles.resolve("dev_backend", project="budgetapp")["agent"] == "deepseek"
+    assert roles.resolve("dev_backend", project="budgetapp", sensitivity="private")["agent"] == "claude"
 
 
 # ── Opus gate in the agent ───────────────────────────────────────────────────
@@ -157,9 +186,11 @@ async def test_product_owner_gets_the_grant_until_the_cap_is_spent(api):
     spent = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="t", payload={"role": "product_owner"}))
     await api.db.update_task(spent.id, {"status": TaskStatus.done, "result": {
         "agent": "claude", "model": "opus", "usage": {"tokens_in": 1, "tokens_out": 1, "cost_usd": 50.5}}})
+    t = await _queue(api, {"role": "product_owner", "prompt": "more stories"})            # cap spent -> fallback
+    assert t.payload["agent"] == "agy" and "_allow_opus" not in t.payload and "cap reached" in t.payload["_role_note"]
     with pytest.raises(HTTPException) as e:
-        await _queue(api, {"role": "product_owner", "prompt": "more stories"})
-    assert e.value.status_code == 429 and "cap reached" in e.value.detail
+        await _queue(api, {"role": "strict_po", "prompt": "more"})
+    assert e.value.status_code == 422 and "cap reached" in e.value.detail
     # other roles are unaffected by the Opus cap
     assert (await _queue(api, {"role": "scrum_master", "prompt": "x"})).payload["agent"] == "claude"
 
@@ -173,6 +204,10 @@ async def test_unknown_role_is_422_and_dev_backend_defaults_to_claude_for_unlist
     assert t.payload["agent"] == "claude" and "deepseek not used" in t.payload["_role_note"]
     t = await _queue(api, {"role": "dev_backend", "project": "open-thing", "prompt": "route"})
     assert t.payload["agent"] == "deepseek"
+    with pytest.raises(HTTPException) as e:                                              # isolated project
+        await _queue(api, {"role": "scrum_master", "project": "walled", "prompt": "x"})
+    assert e.value.status_code == 422
+    assert (await _queue(api, {"role": "scrum_master", "project": "walled", "approved": True, "prompt": "x"})).payload["agent"] == "claude"
 
 
 def test_role_is_a_summary_group():
