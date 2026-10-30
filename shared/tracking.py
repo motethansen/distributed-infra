@@ -78,6 +78,7 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
         "sprint": lambda r: r.get("sprint") or "(untagged)",
         "type": lambda r: r.get("type") or "(none)",
         "day": lambda r: (r.get("created_at") or "")[:10] or "(none)",
+        "story": lambda r: r.get("story") or "(untagged)",
         "all": lambda r: "all",
     }[group_by]
     groups: dict[str, dict[str, Any]] = {}

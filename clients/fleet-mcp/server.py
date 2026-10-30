@@ -87,7 +87,7 @@ class Fleet:
             try:
                 async with httpx.AsyncClient(timeout=15, transport=self._transport) as c:
                     r = await c.request(method, f"{base}{path}",
-                                        headers={"x-secret-key": self.cfg["secret"]}, **kw)
+                                        headers={"x-secret-key": self.cfg["secret"], "x-client": f"fleet-mcp@{socket.gethostname().split('.')[0]}"}, **kw)
                 if r.status_code >= 500:
                     errors.append(f"{base}: HTTP {r.status_code}")
                     continue  # try the other orchestrator (active-active)
