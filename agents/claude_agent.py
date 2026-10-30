@@ -34,25 +34,27 @@ def _find_cli() -> str | None:
 DEFAULT_TIMEOUT_SECS = int(os.environ.get("CLAUDE_AGENT_TIMEOUT_SECS", "1800"))
 
 # Cost policy: default to Sonnet (coding/dev planning); allow per-call override to
-# Haiku (testing / mechanical work). Opus is blocked entirely — too expensive for
-# our dispatch volume. Override the default with CLAUDE_AGENT_DEFAULT_MODEL.
+# Haiku (testing / mechanical work). Opus is blocked unless the orchestrator grants it to a
+# role in config/roles.yaml (too expensive for general dispatch volume). Override the default with CLAUDE_AGENT_DEFAULT_MODEL.
 DEFAULT_MODEL = os.environ.get("CLAUDE_AGENT_DEFAULT_MODEL", "sonnet")
 BLOCKED_MODEL_SUBSTRINGS = ("opus",)
 
 
-def _resolve_model(requested: str) -> str | None:
+def _resolve_model(requested: str, allow_opus: bool = False) -> str | None:
     """Pick the effective model for a call. Returns the alias to pass to claude
-    --model, or None if Opus was requested (caller should treat as error)."""
+    --model, or None if Opus was requested (caller should treat as error).
+    `allow_opus` is only ever set by the orchestrator for a role that config/roles.yaml
+    permits (see agents/roles.py); a caller cannot grant it through the task payload."""
     chosen = (requested or DEFAULT_MODEL or "").strip().lower()
     if not chosen:
         return ""  # let claude CLI use its own default
-    if any(blocked in chosen for blocked in BLOCKED_MODEL_SUBSTRINGS):
+    if not allow_opus and any(blocked in chosen for blocked in BLOCKED_MODEL_SUBSTRINGS):
         return None
     return chosen
 
 
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None,
-              session_id: str = "", resume: bool = False) -> dict:
+              session_id: str = "", resume: bool = False, allow_opus: bool = False) -> dict:
     cli = _find_cli()
     if not cli:
         return {
@@ -64,7 +66,7 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
             "ok": False,
         }
 
-    effective_model = _resolve_model(model)
+    effective_model = _resolve_model(model, allow_opus)
     if effective_model is None:
         return {
             "error": f"opus blocked by cost policy (requested model={model!r}); use 'sonnet' or 'haiku'",

@@ -1,0 +1,37 @@
+# Scrum roles -> agent/model. Fleet-wide policy, no secrets, tracked in git.
+# Read by agents/roles.py; the orchestrator resolves `payload.role` when a task is queued.
+#
+# Precedence for one task: explicit payload.agent/model > role > task-class routing
+# (config/routing.yaml). The privacy guard in routing.yaml still applies to every one.
+#
+# allow_opus: Opus is blocked fleet-wide (agents/claude_agent.py). Only a role with
+#   allow_opus: true may use it, and only while this month's Opus spend stays under
+#   monthly_cost_cap_usd (the Claude CLI's own estimate; subscription logins are not billed
+#   per token, so this is a usage yardstick, not an invoice).
+# deepseek_projects: DeepSeek is a non-private provider. A role whose agent is deepseek only
+#   runs it for the projects listed here (and never for sensitive work); everything else
+#   goes to private_fallback. Empty = DeepSeek never gets a project's code.
+
+roles:
+  product_owner:
+    agent: claude
+    model: opus
+    allow_opus: true
+    monthly_cost_cap_usd: 50
+  scrum_master:
+    agent: claude
+    model: sonnet
+  analyst:
+    agent: agy
+  dev_frontend:
+    agent: claude
+    model: sonnet
+  dev_backend:
+    agent: deepseek
+    model: deepseek-chat
+    private_fallback: { agent: claude, model: sonnet }
+  reviewer:
+    agent: codex
+    fallback: { agent: claude, model: sonnet }
+
+deepseek_projects: []

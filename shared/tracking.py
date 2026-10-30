@@ -24,6 +24,7 @@ TRACK_COLUMNS: dict[str, str] = {
     "project": "TEXT",        # from the payload, so sprints/projects can be summed in SQL
     "sprint": "TEXT",
     "story": "TEXT",
+    "role": "TEXT",           # Scrum role the task was queued for (product_owner, dev_backend, ...)
 }
 TERMINAL = ("done", "failed", "needs_human")
 
@@ -63,14 +64,14 @@ def from_result(result: Any) -> dict[str, Any]:
 
 
 def from_payload(payload: Any) -> dict[str, Any]:
-    """project / sprint / story tags a caller put on the task payload."""
+    """project / sprint / story / role tags a caller put on the task payload."""
     if not isinstance(payload, dict):
         return {}
-    return {k: str(payload[k])[:120] for k in ("project", "sprint", "story") if payload.get(k) not in (None, "")}
+    return {k: str(payload[k])[:120] for k in ("project", "sprint", "story", "role") if payload.get(k) not in (None, "")}
 
 
 def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]:
-    """Group task rows and total them. group_by: agent | machine | project | sprint | day | type."""
+    """Group task rows and total them. group_by: agent | machine | project | sprint | role | day | type."""
     keyfn = {
         "agent": lambda r: r.get("agent") or "(none)",
         "machine": lambda r: r.get("assigned_to") or "(none)",
@@ -79,6 +80,7 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
         "type": lambda r: r.get("type") or "(none)",
         "day": lambda r: (r.get("created_at") or "")[:10] or "(none)",
         "story": lambda r: r.get("story") or "(untagged)",
+        "role": lambda r: r.get("role") or "(untagged)",
         "all": lambda r: "all",
     }[group_by]
     groups: dict[str, dict[str, Any]] = {}

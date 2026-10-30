@@ -227,13 +227,15 @@ class Tools:
     async def ask(self, prompt: str, agent: str | None = None, task_kind: str | None = None,
                   sensitivity: str | None = None, machine: str | None = None, cwd: str | None = None,
                   conversation: str | None = None, wait_seconds: float = 90, timeout: int = 1800,
-                  failover: bool = True) -> dict:
+                  failover: bool = True, role: str | None = None, project: str | None = None,
+                  sprint: str | None = None, story: str | None = None) -> dict:
         if not prompt.strip():
             return {"error": "prompt is empty"}
-        if not agent and not task_kind and not sensitivity:
+        if not agent and not task_kind and not sensitivity and not role:
             task_kind = "default"
         payload: dict[str, Any] = {"prompt": prompt, "timeout": int(timeout), "failover": bool(failover)}
-        for k, v in (("agent", agent), ("task_kind", task_kind), ("sensitivity", sensitivity), ("cwd", cwd)):
+        for k, v in (("agent", agent), ("task_kind", task_kind), ("sensitivity", sensitivity), ("cwd", cwd),
+                     ("role", role), ("project", project), ("sprint", sprint), ("story", story)):
             if v:
                 payload[k] = v
         if machine:
@@ -251,7 +253,8 @@ class Tools:
             else:
                 payload["resume"] = True
                 payload["history"] = list(conv.get("history", []))
-            payload.setdefault("agent", conv["agent"])
+            if not role:        # a role picks the agent itself (the orchestrator resolves it)
+                payload.setdefault("agent", conv["agent"])
             payload["session_id"] = conv["session_id"]
             conv["history"] = _trim(conv.get("history", []) + [{"role": "user", "text": prompt[:TURN_CHARS]}])
             conv["updated"] = time.time()
@@ -324,7 +327,9 @@ def build_server():
     async def fleet_ask(prompt: str, agent: str | None = None, task_kind: str | None = None,
                         sensitivity: str | None = None, machine: str | None = None,
                         cwd: str | None = None, conversation: str | None = None,
-                        wait_seconds: float = 90, timeout: int = 1800, failover: bool = True) -> dict:
+                        wait_seconds: float = 90, timeout: int = 1800, failover: bool = True,
+                        role: str | None = None, project: str | None = None,
+                        sprint: str | None = None, story: str | None = None) -> dict:
         """Run a prompt on a fleet agent and return its answer.
 
         agent: claude | codex | agy | deepseek | content | social (omit to route by task_kind).
@@ -335,9 +340,12 @@ def build_server():
         conversation: a name to continue a multi-turn chat (history kept on this machine).
         wait_seconds: how long to wait (max 110); if still running you get a task_id.
         failover: false pins the task to its first agent.
+        role: Scrum role (product_owner, scrum_master, analyst, dev_frontend, dev_backend, reviewer)
+              picks the agent and model from config/roles.yaml; an explicit agent still wins.
+        project / sprint / story: tag the work so the Scrum board can show which agents worked it.
         """
         return await tools.ask(prompt, agent, task_kind, sensitivity, machine, cwd, conversation,
-                               wait_seconds, timeout, failover)
+                               wait_seconds, timeout, failover, role, project, sprint, story)
 
     @mcp.tool()
     async def fleet_result(task_id: str, wait_seconds: float = 60) -> dict:

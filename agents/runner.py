@@ -53,8 +53,10 @@ WRAPPERS = {"content", "social"}
 
 
 async def _run_one(agent: str, model: str, prompt: str, cwd: str | None, timeout: int | None,
-                   session_id: str | None, resume: bool) -> dict:
+                   session_id: str | None, resume: bool, allow_opus: bool = False) -> dict:
     kwargs = {"prompt": prompt}
+    if allow_opus and agent == "claude":
+        kwargs["allow_opus"] = True
     if model:
         kwargs["model"] = model
     if cwd:
@@ -72,7 +74,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
                     session_id: str | None = None, resume: bool = False,
                     task_kind: str | None = None, sensitivity: str | None = None,
                     history: list[dict] | None = None, failover: bool = True,
-                    exclude: set[str] | None = None) -> dict:
+                    exclude: set[str] | None = None, allow_opus: bool = False) -> dict:
     """Run a prompt on the routed agent, failing over down the chain when an agent
     is unavailable (usage limit, quota, not logged in). See agents/failover.py.
 
@@ -138,7 +140,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
                 sid, res = session_id, resume
         elif a != primary or history:
             p = fo.handover_prompt(prompt, history, attempts)
-        result = await _run_one(a, m, p, cwd, timeout, sid, res)
+        result = await _run_one(a, m, p, cwd, timeout, sid, res, allow_opus)
         last = result
         if result.get("ok"):
             fo.clear(a)

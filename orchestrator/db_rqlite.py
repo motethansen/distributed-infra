@@ -135,6 +135,8 @@ async def ensure_schema() -> None:
         "AND json_extract(payload,'$.sprint') IS NOT NULL",
         "UPDATE tasks SET story=json_extract(payload,'$.story') WHERE story IS NULL AND json_valid(payload) "
         "AND json_extract(payload,'$.story') IS NOT NULL",
+        "UPDATE tasks SET role=json_extract(payload,'$.role') WHERE role IS NULL AND json_valid(payload) "
+        "AND json_extract(payload,'$.role') IS NOT NULL",
         "UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL AND status IN ('done','failed','needs_human')",
     ):
         await _execute([[sql]])
@@ -145,13 +147,13 @@ async def insert_task(task: Task) -> Task:
     tags = tracking.from_payload(task.payload)
     await _execute([[
         """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at,
-                              project,sprint,story)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              project,sprint,story,role)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         task.id, task.type, task.status, task.priority,
         json.dumps(task.payload), task.created_by, task.assigned_to,
         json.dumps(task.result) if task.result else None,
         task.notes, task.created_at.isoformat(), task.updated_at.isoformat(),
-        tags.get("project"), tags.get("sprint"), tags.get("story"),
+        tags.get("project"), tags.get("sprint"), tags.get("story"), tags.get("role"),
     ]])
     return task
 
@@ -257,7 +259,7 @@ async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
 
 
 _USAGE_COLS = ("id,type,status,assigned_to,agent,model,tokens_in,tokens_out,tokens_total,cost_usd,"
-               "started_at,finished_at,created_at,project,sprint,story")
+               "started_at,finished_at,created_at,project,sprint,story,role")
 
 
 async def usage_rows(since: str | None = None, until: str | None = None,

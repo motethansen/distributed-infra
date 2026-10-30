@@ -136,3 +136,20 @@ def test_secret_comes_from_dotenv_not_harness_config(tmp_path):
 
 def test_wait_is_capped():
     assert server.MAX_WAIT <= 110
+
+
+def test_role_and_scrum_tags_reach_the_queue_without_a_forced_task_kind(tmp_path):
+    q = FakeQueue()
+    r = asyncio.run(_tools(tmp_path, q).ask("review it", role="reviewer", project="budgetapp", sprint="S5",
+                                            story="BA-1", conversation="rev"))
+    assert r["status"] == "done"
+    p = q.created[0]["payload"]
+    assert (p["role"], p["project"], p["sprint"], p["story"]) == ("reviewer", "budgetapp", "S5", "BA-1")
+    assert "task_kind" not in p and "agent" not in p      # the orchestrator resolves the role, nothing pre-empts it
+
+
+def test_without_a_role_the_default_route_is_unchanged(tmp_path):
+    q = FakeQueue()
+    asyncio.run(_tools(tmp_path, q).ask("hello"))
+    p = q.created[0]["payload"]
+    assert p["task_kind"] == "default" and "role" not in p
