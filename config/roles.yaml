@@ -4,34 +4,65 @@
 # Precedence for one task: explicit payload.agent/model > role > task-class routing
 # (config/routing.yaml). The privacy guard in routing.yaml still applies to every one.
 #
-# allow_opus: Opus is blocked fleet-wide (agents/claude_agent.py). Only a role with
-#   allow_opus: true may use it, and only while this month's Opus spend stays under
-#   monthly_cost_cap_usd (the Claude CLI's own estimate; subscription logins are not billed
-#   per token, so this is a usage yardstick, not an invoice).
-# deepseek_projects: DeepSeek is a non-private provider. A role whose agent is deepseek only
-#   runs it for the projects listed here (and never for sensitive work); everything else
-#   goes to private_fallback. Empty = DeepSeek never gets a project's code.
+# best_for        what the role is for (shown by `scripts/scrum_cli.py roles`, used in the
+#                 Scrum Master's breakdown prompt).
+# allow_opus      Opus is blocked fleet-wide (agents/claude_agent.py). Only a role with
+#                 allow_opus: true may use it, and only while this month's Opus spend (the Claude
+#                 CLI's own estimate; subscription logins are not billed per token) is under
+#                 monthly_cost_cap_usd.
+# cap_fallback    what the role runs on once the cap is spent (and from warn_at of the cap the
+#                 task is flagged `_role_note`). The work never stops because a budget did.
+# private_fallback  DeepSeek is a non-private provider and an API-only agent (it returns text; it
+#                 cannot edit files). It runs for projects in `deepseek_projects`, never for
+#                 sensitive work, never for a prompt that looks like it carries a secret; everything
+#                 else uses private_fallback.
+# isolated_projects  need explicit human approval on every task (payload.approved: true).
 
 roles:
   product_owner:
+    best_for: "turn a business need into stories + acceptance criteria; groom the backlog. Few, high-value calls."
     agent: claude
     model: opus
     allow_opus: true
     monthly_cost_cap_usd: 50
+    warn_at: 0.8
+    cap_fallback: { agent: claude, model: sonnet }
   scrum_master:
+    best_for: "break stories into atomic tasks, order dependencies, assign roles, synthesise progress."
     agent: claude
     model: sonnet
   analyst:
+    best_for: "tokens, cost and velocity analysis; cross-repo patterns; long documents."
     agent: agy
   dev_frontend:
+    best_for: "UI and anything that edits files: Flutter, React/Vite, state, tests, refactors."
     agent: claude
     model: sonnet
   dev_backend:
+    best_for: "self-contained API routes, schemas, scripts, webhook handlers. Returns code as text."
     agent: deepseek
     model: deepseek-chat
     private_fallback: { agent: claude, model: sonnet }
+  integrator:
+    best_for: "apply another agent's returned code to a branch, run the tests, open the PR."
+    agent: claude
+    model: sonnet
   reviewer:
+    best_for: "independent read-only check of a change; different model family from the author."
     agent: codex
     fallback: { agent: claude, model: sonnet }
 
-deepseek_projects: []
+# Projects DeepSeek may receive prompts about. urbanlife is isolated and deliberately absent.
+deepseek_projects:
+  - academictool
+  - budgetapp
+  - cheersfriends
+  - distributed-infra
+  - motethansen
+  - simtrader
+  - vantage
+  - vizneo
+  - winedragons
+
+isolated_projects:
+  - urbanlife

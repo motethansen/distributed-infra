@@ -225,9 +225,10 @@ async def _apply_role(payload: dict) -> None:
         month = await _month_opus_cost() if scrum_roles.is_opus(
             ((scrum_roles.load_policy().get("roles") or {}).get(str(role).strip().lower()) or {}).get("model")) else 0.0
         r = scrum_roles.resolve(str(role), project=payload.get("project"),
-                                sensitivity=payload.get("sensitivity"), month_opus_cost=month)
+                                sensitivity=payload.get("sensitivity"), month_opus_cost=month,
+                                prompt=str(payload.get("prompt") or ""), approved=payload.get("approved") is True)
     except scrum_roles.RoleError as e:
-        raise HTTPException(status_code=429 if "cap reached" in str(e) else 422, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e))
     payload["role"] = str(role).strip().lower()
     if not payload.get("agent"):
         payload["agent"] = r["agent"]
