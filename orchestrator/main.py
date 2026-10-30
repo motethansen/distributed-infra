@@ -357,7 +357,7 @@ _SCRUM_TTL = 30
 
 # Per vizneoprojects/README.md: these three backlogs list OPEN work only (shipped work is prose),
 # so closed/total says nothing about completion. Reported, but flagged.
-_OPEN_ONLY_BACKLOGS = {"distributed-infra", "vantage", "motethansen"}
+_OPEN_ONLY_BACKLOGS = {"vantage", "motethansen"}
 
 
 def _canon_machines(rows: list[dict]) -> list[dict]:

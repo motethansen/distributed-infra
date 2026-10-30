@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-STATUS = {"✅": "done", "⛔": "superseded", "🏃": "in_progress", "🔍": "in_review", "🚧": "blocked", "🔵": "planned"}
+STATUS = {"✅": "done", "🟢": "done", "⛔": "superseded", "🏃": "in_progress", "🔍": "in_review", "🚧": "blocked", "🔵": "planned"}
 CLOSED = ("done", "superseded")
 _ID = re.compile(r"\b([A-Z]{2,6}-\d{1,4}[a-z]?)\b")
 _EMOJI = re.compile("|".join(map(re.escape, STATUS)))
@@ -73,9 +74,31 @@ def parse_backlog(text: str) -> dict[str, str]:
             m = _ID.search(re.sub(r"[*_`]", "", r[0]))
             if not m or m.group(1) in out:
                 continue
-            st = next((s for s in (_status_in(c) for c in r[1:]) if s), None)
+            # the status cell wins; a marker only on the title cell ("✅ **Rotated the key**") is the fallback
+            st = next((s for s in (_status_in(c) for c in r[1:]) if s), None) or _status_in(r[0])
             if st:
                 out[m.group(1)] = st
+    return out
+
+
+_DATE = re.compile(r"\b(20\d{2}-\d{2}-\d{2})\b")
+
+
+def parse_backlog_dates(text: str) -> dict[str, str]:
+    """{story id: YYYY-MM-DD} for closed stories whose STATUS cell carries a date ("🟢 done 2026-08-07").
+    A date elsewhere in the row (evidence, notes) is not taken: it may be a decision or review date."""
+    out: dict[str, str] = {}
+    for header, rows in _tables(text):
+        for r in rows:
+            m = _ID.search(re.sub(r"[*_`]", "", r[0])) if r else None
+            if not m or m.group(1) in out:
+                continue
+            for c in r[1:]:
+                if _status_in(c) in CLOSED:
+                    d = _DATE.search(c)
+                    if d:
+                        out[m.group(1)] = d.group(1)
+                    break
     return out
 
 
@@ -133,6 +156,94 @@ def parse_sprint(text: str, backlog: dict[str, str], filename: str = "") -> dict
     }
 
 
+BULK = 30            # a single commit closing this many stories is an import/restructure, not a day's work
+_GIT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+
+
+def git_closure_dates(repo: Path, rel: str, head: str) -> dict[str, str]:
+    """{story id: YYYY-MM-DD} = the commit date on which the row first appears closed in `rel`.
+    This is when the NOTE was committed, which can trail the real completion. Commits that close
+    BULK or more stories at once are skipped (their date says nothing about when work finished)."""
+    key = (str(repo / rel), head)
+    if key in _GIT_CACHE:
+        return _GIT_CACHE[key]
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "log", "--reverse", "--format=@@%cI", "-p", "--no-color", "-U0", "--", rel],
+                             capture_output=True, text=True, timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    seen: dict[str, str] = {}
+    day, batch = "", {}
+    commits: list[tuple[str, dict[str, str]]] = []
+    for line in out.splitlines():
+        if line.startswith("@@") and not line.startswith("@@ "):
+            if day:
+                commits.append((day, batch))
+            day, batch = line[2:12], {}
+        elif line.startswith("+|") and day:
+            cells = _cells(line[1:])
+            m = _ID.search(re.sub(r"[*_`]", "", cells[0])) if cells else None
+            if m and m.group(1) not in batch:
+                st = next((x for x in (_status_in(c) for c in cells[1:]) if x), None) or _status_in(cells[0])
+                if st in CLOSED:
+                    batch[m.group(1)] = day
+    if day:
+        commits.append((day, batch))
+    for day, batch in commits:
+        if len(batch) >= BULK:
+            seen.update({i: "" for i in batch})            # remember them as closed-by-import
+            continue
+        for i in batch:
+            seen.setdefault(i, day)
+    result = {i: d for i, d in seen.items() if d}
+    _GIT_CACHE[key] = result
+    return result
+
+
+def trends(backlog: dict[str, str], dates: dict[str, str], sprints: list[dict]) -> dict[str, Any]:
+    """Velocity and S-curve inputs, from what the files actually record.
+
+    scurve: cumulative closed stories (and points, where a sprint table gave the story points) by the
+    date written in the backlog status cell, against today's scope. Closed stories with no date are
+    counted in `undated_closed` and NOT placed on the curve. velocity: points done per sprint."""
+    pts: dict[str, float] = {}
+    for sp in sprints:
+        for st in sp["stories"]:
+            if st["id"] and st["points"]:
+                pts[st["id"]] = st["points"]
+    closed_ids = [i for i, st in backlog.items() if st in CLOSED]
+    by_day: dict[str, dict[str, float]] = {}
+    for i in closed_ids:
+        if i in dates:
+            day = by_day.setdefault(dates[i], {"stories": 0, "points": 0.0})
+            day["stories"] += 1
+            day["points"] += pts.get(i, 0.0)
+    curve, cs, cp = [], 0, 0.0
+    for day in sorted(by_day):
+        cs += by_day[day]["stories"]
+        cp += by_day[day]["points"]
+        curve.append({"date": day, "closed_stories": cs, "closed_points": cp,
+                      "day_stories": by_day[day]["stories"], "day_points": by_day[day]["points"]})
+    velocity = []
+    for sp in sprints:
+        recorded = [b["date"] for b in sp["burndown"] if b.get("recorded")]
+        velocity.append({"sprint": sp["sprint"], "ended": (recorded[-1] if recorded else None) or (sp["updated"] or None),
+                         "started": sp["started"], "points_done": sp["points_done"], "points_total": sp["points_total"],
+                         "stories_done": sum(1 for st in sp["stories"] if st["status"] in CLOSED)})
+    return {"scurve": {"scope_stories": len(backlog), "scope_points": sum(pts.get(i, 0.0) for i in backlog) or None,
+                       "points_known_for": sum(1 for i in backlog if i in pts), "curve": curve,
+                       "dated_closed": sum(1 for i in closed_ids if i in dates),
+                       "undated_closed": sum(1 for i in closed_ids if i not in dates)},
+            "velocity": velocity}
+
+
+def _head(root: Path) -> str:
+    try:
+        return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
 def load(repo: str | Path) -> dict[str, Any]:
     """All projects: backlog counts + every sprint. Missing/unreadable files are skipped, not fatal."""
     root = Path(os.path.expanduser(str(repo)))
@@ -158,7 +269,15 @@ def load(repo: str | Path) -> dict[str, Any]:
             s["file"] = f.name
             sprints.append(s)
         closed = counts["done"] + counts["superseded"]
+        try:
+            dates = parse_backlog_dates(bl_file.read_text(encoding="utf-8")) if bl_file.exists() else {}
+        except OSError:
+            dates = {}
+        if bl_file.exists():
+            head = _head(root)
+            for i, d_ in git_closure_dates(root, f"{d.name}/product-backlog.md", head).items():
+                dates.setdefault(i, d_)                    # an explicit date in the status cell wins
         projects.append({"project": d.name, "stories": len(backlog), "counts": counts, "closed": closed,
                          "complete_pct": round(100 * closed / len(backlog), 1) if backlog else None,
-                         "sprints": sprints})
+                         "sprints": sprints, **trends(backlog, dates, sprints)})
     return {"repo": str(root), "projects": projects}

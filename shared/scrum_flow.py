@@ -53,8 +53,12 @@ Answer with ONLY a JSON object, no prose:
 "out_of_scope":["..."],"depends_on":[],"human_only":false}}]}}"""
 
 
-def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str]) -> str:
+def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str],
+              machines: dict[str, str] | None = None) -> str:
     table = "\n".join(f"- {r}: {roles[r]}" for r in sorted(roles) if r in PLANNABLE)
+    mach = ("\nMachines you may prefer for a task (leave `machine` out to let the queue choose):\n"
+            + "\n".join(f"- {m}: {d}" for m, d in machines.items())
+            + "\nSet `machine_required: true` only when the task cannot run elsewhere (iOS build, Android build).\n") if machines else ""
     return f"""You are the Scrum Master for the project "{project}" (sprint {sprint}).
 Break this story into atomic tasks for the roles below. Do not plan reviews or integration: the
 dispatcher adds a reviewer after every dev task, and an integrator after every dev_backend task.
@@ -64,7 +68,7 @@ Story:
 
 Roles you may assign:
 {table}
-
+{mach}
 Rules:
 - Each task prompt must be self-contained: the agent sees only its prompt plus the results of the
   tasks it depends on. Name files, interfaces and acceptance checks. NEVER include a secret,
@@ -77,7 +81,7 @@ Rules:
   self-contained logic.
 
 Answer with ONLY a JSON object, no prose:
-{{"tasks":[{{"key":"t1","title":"...","role":"dev_backend","depends_on":[],"prompt":"..."}}]}}"""
+{{"tasks":[{{"key":"t1","title":"...","role":"dev_backend","machine":"thinkpad-x1","depends_on":[],"prompt":"..."}}]}}"""
 
 
 # ── parsing ──────────────────────────────────────────────────────────────────
@@ -112,7 +116,7 @@ def parse_stories(text: str) -> list[dict]:
     return out
 
 
-def parse_plan(text: str, known_roles: set[str]) -> list[dict]:
+def parse_plan(text: str, known_roles: set[str], known_machines: set[str] | None = None) -> list[dict]:
     """Validate the Scrum Master's task list. Unknown roles are refused, not guessed."""
     obj = extract_json(text)
     tasks = obj.get("tasks") if isinstance(obj, dict) else obj
@@ -138,9 +142,13 @@ def parse_plan(text: str, known_roles: set[str]) -> list[dict]:
         deps = t.get("depends_on") or []
         if not isinstance(deps, list):
             raise PlanError(f"task {key}: depends_on must be a list")
+        machine = str(t.get("machine") or "").strip() or None
+        if machine and known_machines is not None and machine not in known_machines:
+            raise PlanError(f"task {key}: machine {machine!r} is not one of {sorted(known_machines)}")
         keys.add(key)
         out.append({"key": key, "title": str(t.get("title") or key)[:120], "role": role,
-                    "depends_on": [str(d) for d in deps], "prompt": str(t["prompt"])})
+                    "depends_on": [str(d) for d in deps], "prompt": str(t["prompt"]),
+                    "machine": machine, "machine_required": bool(t.get("machine_required")) and bool(machine)})
     for t in out:
         for d in t["depends_on"]:
             if d not in keys:
@@ -221,7 +229,7 @@ def answer(task: dict) -> str:
 
 
 def tags(project: str, sprint: str, story: str | None, role: str, approved: bool, as_agent: str | None,
-         cwd: str | None, **extra) -> dict:
+         cwd: str | None, machine: str | None = None, machine_required: bool = False, **extra) -> dict:
     p = {"project": project, "sprint": sprint, "role": role}
     if story:
         p["story"] = story
@@ -231,6 +239,8 @@ def tags(project: str, sprint: str, story: str | None, role: str, approved: bool
         p["agent"] = as_agent
     if cwd:
         p["cwd"] = cwd
+    if machine:
+        p["_target_machine" if machine_required else "_preferred_machine"] = machine
     p.update(extra)
     return p
 
@@ -248,13 +258,14 @@ def propose_stories(c: FleetClient, project: str, sprint: str, request: str, con
 
 
 def plan_story(c: FleetClient, project: str, sprint: str, story: dict, roles: dict[str, str],
-               approved: bool = False, as_agent: str | None = None, sleep=time.sleep) -> tuple[list[dict], dict]:
+               approved: bool = False, as_agent: str | None = None, sleep=time.sleep,
+               machines: dict[str, str] | None = None) -> tuple[list[dict], dict]:
     t = c.queue(tags(project, sprint, story["id"], "scrum_master", approved, as_agent, None,
-                     prompt=sm_prompt(project, sprint, story, roles), timeout=900), f"SM {project} {story['id']}")
+                     prompt=sm_prompt(project, sprint, story, roles, machines), timeout=900), f"SM {project} {story['id']}")
     done = c.wait([t["id"]], sleep=sleep)[t["id"]]
     if done["status"] != "done":
         raise PlanError(f"scrum master task {done['status']}: {done.get('notes') or ''}")
-    return parse_plan(answer(done), set(roles)), done
+    return parse_plan(answer(done), set(roles), set(machines) if machines else None), done
 
 
 def _carry(results: dict[str, str], deps: list[str]) -> str:
@@ -281,8 +292,21 @@ def review_prompt(story: dict, author: str, material: str) -> str:
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 
 
+def repo_preamble(project: str, cfg: dict | None, story_id: str, key: str) -> str:
+    """Tell the agent where the code is: workers keep clones in different places, so find before cloning."""
+    if not cfg:
+        return ""
+    note = f" Note: {cfg['note']}." if cfg.get("note") else ""
+    return (f"Repository for project {project}: {cfg['repo']} (folder name `{cfg['dir']}`). First look for an existing clone "
+            f"on this machine (`find ~/Projects -maxdepth 4 -type d -name {cfg['dir']} -exec test -d {{}}/.git \\; -print`); "
+            f"if there is none, clone it into ~/Projects/{cfg['dir']}. `git pull --ff-only` before you start and work on a "
+            f"new branch `dis/{story_id}-{key}`. Open a PR when done; never merge, never deploy, never touch a live database."
+            f"{note}\n\n")
+
+
 def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list[dict], *, go: bool,
-             approved: bool = False, cwd: str | None = None, sleep=time.sleep, say=print) -> list[dict]:
+             approved: bool = False, cwd: str | None = None, sleep=time.sleep, say=print,
+             project_cfg: dict | None = None) -> list[dict]:
     """Queue the plan wave by wave; add integrator/reviewer steps; stop at the first failed task.
 
     Returns a log of {key, role, task_id, status, agent}. With go=False nothing is queued."""
@@ -297,8 +321,10 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
     for layer in layers:
         queued = {}
         for t in layer:
-            prompt = t["prompt"] + _carry(results, t["depends_on"])
-            r = c.queue(tags(project, sprint, story["id"], t["role"], approved, None, cwd, prompt=prompt, timeout=1800,
+            prompt = (repo_preamble(project, project_cfg, story["id"], t["key"]) if t["role"] in DEV_ROLES else "") \
+                + t["prompt"] + _carry(results, t["depends_on"])
+            r = c.queue(tags(project, sprint, story["id"], t["role"], approved, None, cwd, t.get("machine"),
+                             t.get("machine_required", False), prompt=prompt, timeout=1800,
                              flow_key=t["key"]), f"{t['role']} {story['id']} {t['key']}")
             queued[r["id"]] = t
             say(f"queued {t['key']} [{t['role']}] -> {r['id'][:8]}")
@@ -313,7 +339,8 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
             material = answer(done)
             if t["role"] == "dev_backend" and ran == "deepseek":
                 i = c.queue(tags(project, sprint, story["id"], "integrator", approved, None, cwd,
-                                 prompt=integrate_prompt(story, answer(done)), timeout=1800), f"integrate {story['id']} {t['key']}")
+                                 prompt=repo_preamble(project, project_cfg, story["id"], t["key"]) + integrate_prompt(story, answer(done)),
+                                 timeout=1800), f"integrate {story['id']} {t['key']}")
                 idone = c.wait([i["id"]], sleep=sleep)[i["id"]]
                 iran = idone.get("agent") or (idone.get("result") or {}).get("agent")
                 log.append({"key": t["key"] + ":integrate", "role": "integrator", "task_id": i["id"],
@@ -342,3 +369,53 @@ def save(base: Path, project: str, sprint: str, name: str, data: Any) -> Path:
     p = d / name
     p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     return p
+
+
+# ── human approval of a plan ─────────────────────────────────────────────────
+
+def approve_plan(path: Path, who: str, now: str) -> dict:
+    """Record that a human approved this exact plan. Editing the tasks afterwards voids it."""
+    plan = json.loads(path.read_text())
+    plan["approval"] = {"by": who, "at": now, "digest": plan_digest(plan)}
+    path.write_text(json.dumps(plan, indent=2, ensure_ascii=False))
+    return plan
+
+
+def plan_digest(plan: dict) -> str:
+    import hashlib
+    return hashlib.sha256(json.dumps([plan.get("story"), plan.get("tasks")], sort_keys=True).encode()).hexdigest()[:16]
+
+
+def is_approved(plan: dict) -> bool:
+    a = plan.get("approval")
+    return bool(a and a.get("by") and a.get("digest") == plan_digest(plan))
+
+
+# ── sprint review ────────────────────────────────────────────────────────────
+
+_PR = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+
+
+def sprint_review(tasks: list[dict], project: str, sprint: str, board_sprint: dict | None = None) -> tuple[dict, str]:
+    """What the fleet did for one sprint, from the queue rows tagged with it. Returns (data, markdown)."""
+    mine = [t for t in tasks if (t.get("payload") or {}).get("project") == project and str((t.get("payload") or {}).get("sprint")) == sprint]
+    by = lambda f: {k: sum(1 for t in mine if f(t) == k) for k in sorted({f(t) for t in mine}, key=str)}   # noqa: E731
+    prs = sorted({m for t in mine for m in _PR.findall(json.dumps(t.get("result") or {}))})
+    tok_out = sum(t.get("tokens_out") or 0 for t in mine)
+    tok_in = sum(t.get("tokens_in") or 0 for t in mine)
+    cost = round(sum(t.get("cost_usd") or 0 for t in mine), 4)
+    stuck = [t for t in mine if t.get("status") in ("failed", "needs_human")]
+    data = {"project": project, "sprint": sprint, "tasks": len(mine), "by_role": by(lambda t: t.get("role") or "(none)"),
+            "by_agent": by(lambda t: t.get("agent") or "(none)"), "by_machine": by(lambda t: t.get("assigned_to") or "(none)"),
+            "by_status": by(lambda t: t.get("status")), "tokens_in": tok_in, "tokens_out": tok_out, "cost_usd": cost,
+            "pull_requests": prs, "needs_attention": [{"id": t["id"][:8], "role": t.get("role"), "notes": (t.get("notes") or "")[:200]} for t in stuck]}
+    L = [f"# Sprint review — {project} {sprint}", "",
+         f"{len(mine)} fleet tasks · {data['by_status']} · tokens in {tok_in:,} (incl. cached) / out {tok_out:,} · est. cost ${cost:.2f}", ""]
+    if board_sprint:
+        L += [f"Board: {board_sprint.get('points_done')} of {board_sprint.get('points_total')} points done, "
+              f"{board_sprint.get('points_remaining')} remaining.", ""]
+    for title, key in (("Roles", "by_role"), ("Agents", "by_agent"), ("Machines", "by_machine")):
+        L += [f"**{title}:** " + ", ".join(f"{k} {v}" for k, v in data[key].items()), ""]
+    L += ["## Pull requests to review", ""] + ([f"- {u}" for u in prs] or ["- none opened by the fleet this sprint"]) + [""]
+    L += ["## Needs your attention", ""] + ([f"- {x['id']} ({x['role']}): {x['notes']}" for x in data["needs_attention"]] or ["- nothing stuck"]) + [""]
+    return data, "\n".join(L)
