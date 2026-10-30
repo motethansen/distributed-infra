@@ -44,6 +44,7 @@ PREFER_PRIMARY_TYPES = {
 
 _MACHINES_CONFIG = Path(__file__).parent.parent / "config" / "machines.yaml"
 _ONLINE_WINDOW_SECS = 30  # worker process is "active" if it polled within this window
+_lan_ips: dict[str, dict[str, str]] = {}  # worker_name → {iface: ip}, as last reported
 _last_seen: dict[str, float] = {}  # worker_name → unix ts of last claim poll
 
 
@@ -105,8 +106,13 @@ def _tailscale_liveness() -> dict[str, dict]:
                     nodes.append(data["Self"])
                 nodes.extend((data.get("Peer") or {}).values())
                 for n in nodes:
+                    cur = n.get("CurAddr") or ""
                     info = {"online": bool(n.get("Online")),
-                            "last_seen": _parse_last_seen(n.get("LastSeen"))}
+                            "last_seen": _parse_last_seen(n.get("LastSeen")),
+                            # direct = peer-to-peer (on the LAN this is a 192.168.x address); a
+                            # relay between two machines in the same house is itself the alarm.
+                            "path": ("direct" if cur else (f"relay:{n['Relay']}" if n.get("Relay") else None)),
+                            "cur_addr": cur or None}
                     for ip in (n.get("TailscaleIPs") or []):
                         out[ip] = info
         except (subprocess.SubprocessError, ValueError, OSError):
@@ -186,6 +192,9 @@ async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(de
     if not name:
         raise HTTPException(status_code=422, detail="worker_name required")
     _last_seen[name] = time.time()
+    ips = body.get("lan_ips")
+    if isinstance(ips, dict):
+        _lan_ips[name] = {str(k)[:32]: str(v)[:45] for k, v in list(ips.items())[:8]}
     return Response(status_code=204)
 
 
@@ -270,6 +279,13 @@ def _load_machines() -> dict:
         return yaml.safe_load(f).get("machines", {})
 
 
+def _lan_ips_for(name: str, cfg: dict) -> dict[str, str]:
+    ips = _lan_ips.get(name)
+    for alias in cfg.get("aliases", []) or []:
+        ips = ips or _lan_ips.get(alias)
+    return ips or {}
+
+
 @app.get("/machines")
 async def list_machines(x_secret_key: str = Header(default="")):
     """Roster from machines.yaml + liveness derived from worker claim polls.
@@ -321,6 +337,9 @@ async def list_machines(x_secret_key: str = Header(default="")):
             "online": online,                # machine reachable on the tailnet
             "tailscale_online": (tsinfo["online"] if tsinfo is not None else None),
             "worker_active": worker_active,  # worker process polled within the window
+            "tailscale_path": (tsinfo or {}).get("path"),      # direct | relay:<region> | None (self)
+            "tailscale_addr": (tsinfo or {}).get("cur_addr"),  # where Tailscale is reaching it right now
+            "lan_ips": _lan_ips_for(name, cfg),                # {iface: ip} the worker reported
             "last_seen_ago_secs": last_seen_ago,
         })
     return out
