@@ -132,3 +132,23 @@ def test_a_superseded_story_is_closed_not_remaining():
     s = scrum.parse_sprint(sprint, scrum.parse_backlog(BACKLOG), "sprint-02.md")
     assert {x["id"]: x["status"] for x in s["stories"]}["DM-003"] == "superseded"
     assert s["points_total"] == 22 and s["points_remaining"] == 13        # the 4 superseded points are not remaining
+
+
+@pytest.mark.asyncio
+async def test_aliases_are_folded_and_open_only_backlogs_are_flagged(api, tmp_path, monkeypatch):
+    cfg = tmp_path / "machines.yaml"
+    cfg.write_text("machines:\n  thinkpad-x1:\n    aliases: [thinkpad, michaelhansen-thinkpad-x13-gen-4]\n")
+    monkeypatch.setattr(api, "_MACHINES_CONFIG", cfg)
+    for name in ("thinkpad-x1", "thinkpad", "michaelhansen-thinkpad-x13-gen-4"):
+        t = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="x"))
+        await api.db.update_task(t.id, {"status": TaskStatus.done, "assigned_to": name, "result": {"agent": "claude"}})
+    out = await api.scrum_usage(group_by="machine", since=None, until=None, project=None, sprint=None, x_secret_key="k")
+    assert [g["key"] for g in out["groups"]] == ["thinkpad-x1"] and out["groups"][0]["tasks"] == 3
+    (api.SCRUM_REPO and None)
+    import pathlib
+    repo = pathlib.Path(api.SCRUM_REPO)
+    (repo / "vantage").mkdir(); (repo / "vantage" / "product-backlog.md").write_text(BACKLOG)
+    api._SCRUM_CACHE["ts"] = 0
+    sp = await api.scrum_sprints(x_secret_key="k")
+    flags = {p["project"]: (p["backlog_open_work_only"], p["complete_pct"]) for p in sp["projects"]}
+    assert flags["vantage"] == (True, None) and flags["demo"] == (False, 50.0)
