@@ -8,6 +8,7 @@ from typing import Any
 
 import aiosqlite
 
+from shared import tracking
 from shared.models import Task, TaskStatus
 
 DB_PATH = os.getenv("QUEUE_DB_PATH", "./data/queue.db")
@@ -52,8 +53,28 @@ def _row_to_task(row: aiosqlite.Row) -> Task:
     return Task(**d)
 
 
+_MIGRATED: set[str] = set()   # db paths whose tracking columns are known to exist
+
+
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
     await db.execute(CREATE_TABLE)
+    path = _db_path()
+    if path not in _MIGRATED:
+        cur = await db.execute("PRAGMA table_info(tasks)")
+        have = {r[1] for r in await cur.fetchall()}
+        for col, typ in tracking.TRACK_COLUMNS.items():
+            if col not in have:
+                await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+        # Backfill from data the rows already hold (only where still empty).
+        for col in ("agent", "model"):
+            await db.execute(f"UPDATE tasks SET {col}=json_extract(result,'$.{col}') WHERE {col} IS NULL "
+                             f"AND result IS NOT NULL AND json_valid(result) AND json_extract(result,'$.{col}') IS NOT NULL")
+        for col in ("project", "sprint", "story"):
+            await db.execute(f"UPDATE tasks SET {col}=json_extract(payload,'$.{col}') WHERE {col} IS NULL "
+                             f"AND json_valid(payload) AND json_extract(payload,'$.{col}') IS NOT NULL")
+        await db.execute("UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL "
+                         "AND status IN ('done','failed','needs_human')")
+        _MIGRATED.add(path)
     await db.commit()
 
 
@@ -61,15 +82,18 @@ async def insert_task(task: Task) -> Task:
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await _ensure_schema(db)
+        tags = tracking.from_payload(task.payload)
         await db.execute(
-            """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at,
+                                  project,sprint,story)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task.id, task.type, task.status, task.priority,
                 json.dumps(task.payload), task.created_by, task.assigned_to,
                 json.dumps(task.result) if task.result else None,
                 task.notes,
                 task.created_at.isoformat(), task.updated_at.isoformat(),
+                tags.get("project"), tags.get("sprint"), tags.get("story"),
             ),
         )
         await db.commit()
@@ -175,11 +199,22 @@ async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
     if not fields:
         return await get_task(task_id)
     fields = dict(fields)
-    fields["updated_at"] = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat()
+    fields["updated_at"] = now
+    if isinstance(fields.get("result"), dict):
+        fields.update(tracking.from_result(fields["result"]))      # who answered, tokens, cost
+    status = str(getattr(fields.get("status"), "value", fields.get("status")) or "")
+    if status in tracking.TERMINAL:
+        fields["finished_at"] = now
     if "result" in fields and fields["result"] is not None:
         fields["result"] = json.dumps(fields["result"])
-    set_clause = ", ".join(f"{k}=?" for k in fields)
-    values = list(fields.values()) + [task_id]
+    sets = [f"{k}=?" for k in fields]
+    values = list(fields.values())
+    if status == "in_progress":                                    # first start only
+        sets.append("started_at=COALESCE(started_at, ?)")
+        values.append(now)
+    set_clause = ", ".join(sets)
+    values = values + [task_id]
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await _ensure_schema(db)
@@ -208,3 +243,25 @@ async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
                 (now, note, note, t["id"]))
         await db.commit()
     return stuck
+
+
+_USAGE_COLS = ("id,type,status,assigned_to,agent,model,tokens_in,tokens_out,tokens_total,cost_usd,"
+               "started_at,finished_at,created_at,project,sprint,story")
+
+
+async def usage_rows(since: str | None = None, until: str | None = None,
+                     project: str | None = None, sprint: str | None = None, limit: int = 20000) -> list[dict]:
+    """Task rows (tracking columns only) for the Scrum/usage summaries."""
+    where, params = [], []
+    for col, op, val in (("created_at", ">=", since), ("created_at", "<", until),
+                         ("project", "=", project), ("sprint", "=", sprint)):
+        if val:
+            where.append(f"{col} {op} ?")
+            params.append(val)
+    sql = f"SELECT {_USAGE_COLS} FROM tasks" + (" WHERE " + " AND ".join(where) if where else "") + \
+          " ORDER BY created_at DESC LIMIT ?"
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(sql, (*params, limit))
+        return [dict(r) for r in await cur.fetchall()]

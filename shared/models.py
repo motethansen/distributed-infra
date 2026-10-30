@@ -65,6 +65,18 @@ class Task(BaseModel):
     notes: str | None = None  # human-readable context / review notes
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # Executor + usage tracking (shared/tracking.py). None until known.
+    agent: str | None = None
+    model: str | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tokens_total: int | None = None
+    cost_usd: float | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    project: str | None = None
+    sprint: str | None = None
+    story: str | None = None
 
 
 class TaskCreate(BaseModel):

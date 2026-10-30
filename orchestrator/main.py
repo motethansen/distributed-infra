@@ -16,6 +16,7 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
 
+from shared import tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -273,6 +274,36 @@ async def claim_task(body: ClaimRequest, x_secret_key: str = Header(default=""))
         # which trips uvicorn's "content longer than Content-Length" on a 204).
         return Response(status_code=204)
     return task
+
+
+# ── Scrum / usage summaries ──────────────────────────────────────────────────
+
+_GROUPS = ("agent", "machine", "project", "sprint", "type", "day")
+
+
+@app.get("/scrum/usage")
+async def scrum_usage(
+    group_by: str = Query(default="agent"),
+    since: str | None = Query(default=None, description="ISO date/time, inclusive (created_at)"),
+    until: str | None = Query(default=None, description="ISO date/time, exclusive"),
+    project: str | None = Query(default=None),
+    sprint: str | None = Query(default=None),
+    x_secret_key: str = Header(default=""),
+):
+    """Tasks, outcomes, agents/machines involved and token usage, grouped by agent, machine,
+    project, sprint, task type or day. Usage covers fleet tasks only: it cannot see how much of a
+    subscription quota is left, and tasks before 2026-10-30 have an agent but no token counts."""
+    _check_auth(x_secret_key)
+    if group_by not in _GROUPS:
+        raise HTTPException(status_code=422, detail=f"group_by must be one of {list(_GROUPS)}")
+    rows = await db.usage_rows(since=since, until=until, project=project, sprint=sprint)
+    return {
+        "group_by": group_by, "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "filters": {"since": since, "until": until, "project": project, "sprint": sprint},
+        "tasks": len(rows),
+        "totals": (tracking.summarise(rows, "all") or [{}])[0],
+        "groups": tracking.summarise(rows, group_by),
+    }
 
 
 # ── Machine roster ───────────────────────────────────────────────────────────

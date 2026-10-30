@@ -9,6 +9,7 @@ CLI usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -44,7 +45,7 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         }
 
     # --dangerously-skip-permissions skips interactive confirmations so agy runs headlessly
-    args = [cli, "--dangerously-skip-permissions", "-p", prompt]
+    args = [cli, "--dangerously-skip-permissions", "--output-format", "json", "-p", prompt]
     if model:
         args += ["--model", model]
 
@@ -65,11 +66,35 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
+    text, usage, failed = parse_json_output(out)
 
-    if proc.returncode != 0:
-        return {"error": err or out, "agent": "agy", "ok": False}
+    if proc.returncode != 0 or failed:
+        return {"error": err or text, "agent": "agy", "ok": False}
 
-    return {"agent": "agy", "model": model or "agy-default", "response": out, "ok": True}
+    result = {"agent": "agy", "model": model or "agy-default", "response": text, "ok": True}
+    if usage:
+        result["usage"] = usage
+    return result
+
+
+def parse_json_output(out: str) -> tuple[str, dict | None, bool]:
+    """(answer text, usage, failed) from `agy --output-format json`; raw text if it is not that JSON."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return out, None, False
+    if not isinstance(d, dict) or "response" not in d:
+        return out, None, False
+    text = d.get("response")
+    text = text.strip() if isinstance(text, str) else out
+    u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
+    usage = None
+    if u:
+        usage = {"tokens_in": int(u.get("input_tokens") or 0), "tokens_out": int(u.get("output_tokens") or 0)}
+        if u.get("total_tokens") is not None:
+            usage["tokens_total"] = int(u["total_tokens"])   # includes thinking tokens
+    status = str(d.get("status") or "SUCCESS").upper()
+    return text, usage, status not in ("SUCCESS", "OK", "COMPLETED")
 
 
 if __name__ == "__main__":
