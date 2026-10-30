@@ -105,13 +105,16 @@ def _tailscale_liveness() -> dict[str, dict]:
                 if data.get("Self"):
                     nodes.append(data["Self"])
                 nodes.extend((data.get("Peer") or {}).values())
+                self_ips = set((data.get("Self") or {}).get("TailscaleIPs") or [])
                 for n in nodes:
                     cur = n.get("CurAddr") or ""
                     info = {"online": bool(n.get("Online")),
                             "last_seen": _parse_last_seen(n.get("LastSeen")),
                             # direct = peer-to-peer (on the LAN this is a 192.168.x address); a
                             # relay between two machines in the same house is itself the alarm.
-                            "path": ("direct" if cur else (f"relay:{n['Relay']}" if n.get("Relay") else None)),
+                            # (this machine's own entry has no path; its `Relay` is just its home DERP region)
+                            "path": (None if set(n.get("TailscaleIPs") or []) & self_ips
+                                     else "direct" if cur else (f"relay:{n['Relay']}" if n.get("Relay") else None)),
                             "cur_addr": cur or None}
                     for ip in (n.get("TailscaleIPs") or []):
                         out[ip] = info
