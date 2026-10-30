@@ -82,3 +82,39 @@ async def test_hostile_lan_ips_payload_is_bounded(api):
 def test_tailscale_address_is_excluded_even_on_an_unexpected_interface_name():
     text = "2: wlan0    inet 192.168.0.9/24 scope global wlan0\\\n3: ts9    inet 100.101.102.103/32 scope global ts9\\\n"
     assert netinfo.parse_ip_addr(text) == {"wlan0": "192.168.0.9"}
+
+
+def test_finds_ifconfig_when_the_service_path_has_no_sbin(monkeypatch):
+    """launchd's PATH lacks /sbin, which left mac-mini reporting no addresses at all."""
+    monkeypatch.setattr(netinfo.shutil, "which", lambda n: None)
+    calls = []
+
+    class R:
+        returncode = 0
+        stdout = "en1: flags=8863<UP>\n\tinet 192.168.0.204 netmask 0xffffff00\n\tstatus: active\n"
+
+    monkeypatch.setattr(netinfo.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or R())
+    monkeypatch.setattr(netinfo.os.path, "isfile", lambda p: p == "/sbin/ifconfig")
+    monkeypatch.setattr(netinfo.os, "access", lambda p, m: True)
+    assert netinfo.lan_ips() == {"en1": "192.168.0.204"}
+    assert calls == [["/sbin/ifconfig"]]
+
+
+def test_own_tailscale_entry_has_no_path(monkeypatch):
+    import json, subprocess
+    from orchestrator import main as m
+    status = {"Self": {"TailscaleIPs": ["100.76.214.54"], "Online": True, "Relay": "sin"},
+              "Peer": {"k": {"TailscaleIPs": ["100.112.241.6"], "Online": True, "CurAddr": "192.168.0.206:41641"},
+                       "r": {"TailscaleIPs": ["100.97.176.37"], "Online": True, "CurAddr": "", "Relay": "sin"}}}
+
+    class R:
+        returncode = 0
+        stdout = json.dumps(status)
+
+    monkeypatch.setattr(m, "_tailscale_bin", lambda: "/x/tailscale")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    m._TS_CACHE["ts"] = 0
+    out = m._tailscale_liveness()
+    assert out["100.76.214.54"]["path"] is None
+    assert out["100.112.241.6"]["path"] == "direct"
+    assert out["100.97.176.37"]["path"] == "relay:sin"

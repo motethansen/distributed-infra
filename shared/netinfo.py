@@ -7,6 +7,7 @@ them in /machines. stdlib only: `ip` on Linux, `ifconfig` on macOS.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import shutil
 import subprocess
@@ -52,15 +53,28 @@ def parse_ifconfig(text: str) -> dict[str, str]:
     return out
 
 
+def _find(name: str) -> str | None:
+    """A service's PATH is minimal (launchd has no /sbin), so look in the usual places too."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in ("/sbin", "/usr/sbin", "/bin", "/usr/bin"):
+        if os.path.isfile(f"{d}/{name}") and os.access(f"{d}/{name}", os.X_OK):
+            return f"{d}/{name}"
+    return None
+
+
 def lan_ips() -> dict[str, str]:
     """{interface: ipv4} for this machine's real LAN interfaces; {} if it cannot tell."""
     try:
-        if shutil.which("ip"):
-            r = subprocess.run(["ip", "-o", "-4", "addr", "show", "up"],
+        ip = _find("ip")
+        if ip:
+            r = subprocess.run([ip, "-o", "-4", "addr", "show", "up"],
                                capture_output=True, text=True, timeout=3)
             return parse_ip_addr(r.stdout) if r.returncode == 0 else {}
-        if shutil.which("ifconfig"):
-            r = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=3)
+        ifc = _find("ifconfig")
+        if ifc:
+            r = subprocess.run([ifc], capture_output=True, text=True, timeout=3)
             return parse_ifconfig(r.stdout) if r.returncode == 0 else {}
     except (subprocess.SubprocessError, OSError):
         pass
