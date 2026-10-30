@@ -113,6 +113,10 @@ async def test_endpoint_joins_fleet_work_to_stories_and_shows_origin(api):
     assert sprint["agents_involved"] == ["codex"] and sprint["machines_involved"] == ["thinkpad-x1"]
     r = out["recent_tasks"][0]
     assert (r["origin"], r["machine"], r["agent"], r["story"], r["tokens"]) == ("flutter-terminal-iOS", "thinkpad-x1", "codex", "DM-002", 900)
+    assert r["via"] == "mac-mini"
+    t2 = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="mac-mini", payload={}))
+    old = [x for x in (await api.scrum_sprints(x_secret_key="k"))["recent_tasks"] if x["id"] == t2.id[:8]][0]
+    assert old["origin"] is None                      # not recorded is not the same as "asked from mac-mini"
     with pytest.raises(Exception):
         await api.scrum_sprints(x_secret_key="bad")
 

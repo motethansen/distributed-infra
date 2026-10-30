@@ -389,7 +389,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
                           "machine": t.assigned_to, "agent": t.agent, "model": t.model,
                           "tokens": t.tokens_total if t.tokens_total is not None else
                           ((t.tokens_in or 0) + (t.tokens_out or 0) or None),
-                          "origin": (t.payload or {}).get("_origin") or t.created_by,
+                          "origin": (t.payload or {}).get("_origin") or None,        # None = not recorded (created_by is just the orchestrator)
+                          "via": t.created_by,
                           "project": t.project, "sprint": t.sprint, "story": t.story,
                           "started_at": t.started_at, "finished_at": t.finished_at,
                           "created_at": t.created_at.isoformat(timespec="seconds")} for t in recent],
