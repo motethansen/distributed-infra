@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:http/http.dart' as http;
 
 import 'models.dart';
@@ -15,6 +16,8 @@ class OrchestratorApi {
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
         'x-secret-key': secretKey,
+        // Which device asked (e.g. flutter-terminal-iOS for the iPad): shown as the task's origin.
+        'x-client': 'flutter-terminal-${defaultTargetPlatform.name}',
       };
 
   /// Enqueue an agent_run task. Returns the task id.

@@ -252,7 +252,7 @@ def _is_duplicate(msg_id: str, now: float) -> bool:
 
 # ── Queue client ──────────────────────────────────────────────────────────────
 def _headers() -> dict:
-    return {"x-secret-key": SECRET_KEY, "Content-Type": "application/json"}
+    return {"x-secret-key": SECRET_KEY, "Content-Type": "application/json", "x-client": "whatsapp-bridge"}
 
 
 def _waha_headers() -> dict:

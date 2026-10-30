@@ -16,7 +16,7 @@ import yaml
 from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
 
-from shared import tracking
+from shared import scrum, tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -205,9 +205,14 @@ async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(de
 # ── Task CRUD ────────────────────────────────────────────────────────────────
 
 @app.post("/tasks", response_model=Task, status_code=201)
-async def create_task(body: TaskCreate, x_secret_key: str = Header(default="")):
+async def create_task(body: TaskCreate, x_secret_key: str = Header(default=""),
+                      x_client: str = Header(default="")):
     _check_auth(x_secret_key)
     payload = dict(body.payload or {})
+    # Which client asked (iPad app, fleet-mcp on the MacBook, WhatsApp ...): the proof of
+    # where work was initiated. A caller-supplied _origin wins; the header fills the gap.
+    if x_client.strip() and not payload.get("_origin"):
+        payload["_origin"] = x_client.strip()[:60]
     # Default an agent-style task to prefer the primary box, unless the caller
     # already pinned it (_target_machine) or set its own preference.
     if (body.type in PREFER_PRIMARY_TYPES
@@ -303,6 +308,78 @@ async def scrum_usage(
         "tasks": len(rows),
         "totals": (tracking.summarise(rows, "all") or [{}])[0],
         "groups": tracking.summarise(rows, group_by),
+    }
+
+
+# ── Scrum board: backlog + sprints + what the fleet did for them ─────────────
+
+SCRUM_REPO = os.getenv("SCRUM_REPO", "~/Projects/github/techstartups/vizneoprojects")
+_SCRUM_CACHE: dict = {"ts": 0.0, "data": None}
+_SCRUM_TTL = 30
+
+
+def _repo_head(repo: str) -> dict:
+    """Commit + date of the checkout we are reading, so a stale checkout is visible, not hidden."""
+    try:
+        r = subprocess.run(["git", "-C", os.path.expanduser(repo), "log", "-1", "--format=%h|%cI|%s"],
+                           capture_output=True, text=True, timeout=5)
+        h, d, subj = (r.stdout.strip().split("|", 2) + ["", ""])[:3]
+        return {"commit": h, "committed_at": d, "subject": subj[:100]}
+    except (subprocess.SubprocessError, OSError):
+        return {}
+
+
+@app.get("/scrum/sprints")
+async def scrum_sprints(x_secret_key: str = Header(default="")):
+    """Per project: backlog completion; per sprint: stories, points, burndown; joined with the
+    fleet's recorded work (tasks tagged with a `story`): which agents and machines did it, tokens.
+    Reads the vizneoprojects checkout on THIS machine (SCRUM_REPO); `repo` shows how fresh it is."""
+    _check_auth(x_secret_key)
+    now = time.time()
+    if now - _SCRUM_CACHE["ts"] > _SCRUM_TTL or _SCRUM_CACHE["data"] is None:
+        try:
+            _SCRUM_CACHE["data"] = await asyncio.to_thread(scrum.load, SCRUM_REPO)
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail=f"scrum repo not readable at {SCRUM_REPO}: {exc}")
+        _SCRUM_CACHE["ts"] = now
+    data = _SCRUM_CACHE["data"]
+    rows = await db.usage_rows()
+    by_story = {g["key"]: g for g in tracking.summarise([r for r in rows if r.get("story")], "story")}
+    projects = []
+    for p in data["projects"]:
+        sprints = []
+        for sp in p["sprints"]:
+            stories = []
+            for st in sp["stories"]:
+                f = by_story.get(st["id"] or "")
+                stories.append({**st, "fleet": ({k: f[k] for k in ("tasks", "done", "agents", "machines",
+                                                                       "tokens_total", "cost_usd")} if f else None)})
+            fleet_agents = sorted({a for st in stories if st["fleet"] for a in st["fleet"]["agents"]})
+            fleet_machines = sorted({m for st in stories if st["fleet"] for m in st["fleet"]["machines"]})
+            sprints.append({**sp, "stories": stories, "agents_involved": fleet_agents,
+                            "machines_involved": fleet_machines,
+                            "agent_count": len(fleet_agents)})
+        projects.append({**p, "sprints": sprints})
+    recent = await db.list_tasks(limit=25)
+    return {
+        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO)},
+        "projects": projects,
+        "fleet": {"totals": (tracking.summarise(rows, "all") or [{}])[0],
+                  "by_agent": tracking.summarise(rows, "agent"), "by_machine": tracking.summarise(rows, "machine")},
+        "recent_tasks": [{"id": t.id[:8], "type": t.type.value if hasattr(t.type, "value") else str(t.type),
+                          "status": t.status.value if hasattr(t.status, "value") else str(t.status),
+                          "machine": t.assigned_to, "agent": t.agent, "model": t.model,
+                          "tokens": t.tokens_total if t.tokens_total is not None else
+                          ((t.tokens_in or 0) + (t.tokens_out or 0) or None),
+                          "origin": (t.payload or {}).get("_origin") or t.created_by,
+                          "project": t.project, "sprint": t.sprint, "story": t.story,
+                          "started_at": t.started_at, "finished_at": t.finished_at,
+                          "created_at": t.created_at.isoformat(timespec="seconds")} for t in recent],
+        "notes": ["Story status comes from the product backlog when it knows the ID (it carries the evidence), "
+                  "else from the sprint file. `points_remaining_as_written` is the sprint file uncorrected.",
+                  "Burndown history is only what a sprint file recorded; the last point is today's computed value.",
+                  "Fleet usage covers tasks tagged with a story; tokens exist only for tasks run since 2026-10-30."],
     }
 
 
