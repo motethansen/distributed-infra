@@ -301,7 +301,7 @@ async def scrum_usage(
     _check_auth(x_secret_key)
     if group_by not in _GROUPS:
         raise HTTPException(status_code=422, detail=f"group_by must be one of {list(_GROUPS)}")
-    rows = await db.usage_rows(since=since, until=until, project=project, sprint=sprint)
+    rows = _canon_machines(await db.usage_rows(since=since, until=until, project=project, sprint=sprint))
     return {
         "group_by": group_by, "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "filters": {"since": since, "until": until, "project": project, "sprint": sprint},
@@ -316,6 +316,22 @@ async def scrum_usage(
 SCRUM_REPO = os.getenv("SCRUM_REPO", "~/Projects/github/techstartups/vizneoprojects")
 _SCRUM_CACHE: dict = {"ts": 0.0, "data": None}
 _SCRUM_TTL = 30
+
+
+# Per vizneoprojects/README.md: these three backlogs list OPEN work only (shipped work is prose),
+# so closed/total says nothing about completion. Reported, but flagged.
+_OPEN_ONLY_BACKLOGS = {"distributed-infra", "vantage", "motethansen"}
+
+
+def _canon_machines(rows: list[dict]) -> list[dict]:
+    """Old tasks name thinkpad three ways; fold aliases into the roster's canonical name."""
+    try:
+        machines = _load_machines()
+    except (OSError, yaml.YAMLError):
+        return rows
+    alias = {a: name for name, cfg in machines.items() for a in (cfg.get("aliases") or [])}
+    return [({**r, "assigned_to": alias.get(r.get("assigned_to"), r.get("assigned_to"))} if r.get("assigned_to") in alias else r)
+            for r in rows]
 
 
 def _repo_head(repo: str) -> dict:
@@ -343,7 +359,7 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
             raise HTTPException(status_code=503, detail=f"scrum repo not readable at {SCRUM_REPO}: {exc}")
         _SCRUM_CACHE["ts"] = now
     data = _SCRUM_CACHE["data"]
-    rows = await db.usage_rows()
+    rows = _canon_machines(await db.usage_rows())
     by_story = {g["key"]: g for g in tracking.summarise([r for r in rows if r.get("story")], "story")}
     projects = []
     for p in data["projects"]:
@@ -359,7 +375,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
             sprints.append({**sp, "stories": stories, "agents_involved": fleet_agents,
                             "machines_involved": fleet_machines,
                             "agent_count": len(fleet_agents)})
-        projects.append({**p, "sprints": sprints})
+        projects.append({**p, "sprints": sprints, "backlog_open_work_only": p["project"] in _OPEN_ONLY_BACKLOGS,
+                         "complete_pct": None if p["project"] in _OPEN_ONLY_BACKLOGS else p["complete_pct"]})
     recent = await db.list_tasks(limit=25)
     return {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -379,7 +396,10 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
         "notes": ["Story status comes from the product backlog when it knows the ID (it carries the evidence), "
                   "else from the sprint file. `points_remaining_as_written` is the sprint file uncorrected.",
                   "Burndown history is only what a sprint file recorded; the last point is today's computed value.",
-                  "Fleet usage covers tasks tagged with a story; tokens exist only for tasks run since 2026-10-30."],
+                  "Fleet usage covers tasks tagged with a story; tokens exist only for tasks run since 2026-10-30.",
+                  "Claude tokens_in includes the cached context re-read on every call (tens of thousands per call), "
+                  "so compare agents by tokens_out and task count as well as the input total.",
+                  "backlog_open_work_only: that project's backlog lists open work only, so its completion % is not shown."],
     }
 
 
