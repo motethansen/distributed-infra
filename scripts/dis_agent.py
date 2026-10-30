@@ -47,7 +47,7 @@ HELP = """/model auto|claude|codex|agy|deepseek|opus   pick who answers (opus = 
 
 
 def projects_cfg() -> dict:
-    return yaml.safe_load((ROOT / "config" / "projects.yaml").read_text())
+    return yaml.safe_load((ROOT / "config" / "scrum_projects.yaml").read_text())
 
 
 def _tools():
