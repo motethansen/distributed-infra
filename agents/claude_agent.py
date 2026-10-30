@@ -9,6 +9,7 @@ CLI usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -71,7 +72,8 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
             "ok": False,
         }
 
-    args = [cli, "-p", prompt, "--dangerously-skip-permissions"]
+    # --output-format json: same answer, plus the exact token usage and the CLI's cost estimate.
+    args = [cli, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
     # Multi-turn: --session-id pins a caller-supplied id on the first turn;
     # --resume continues that same conversation on later turns.
     if session_id:
@@ -96,12 +98,37 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
+    text, usage, is_error = parse_json_output(out)
 
-    if proc.returncode != 0:
-        return {"error": err or out, "agent": "claude", "ok": False}
+    if proc.returncode != 0 or is_error:
+        return {"error": err or text, "agent": "claude", "ok": False}
 
-    return {"agent": "claude", "model": effective_model or "claude-default",
-            "response": out, "session_id": session_id, "ok": True}
+    result = {"agent": "claude", "model": effective_model or "claude-default",
+              "response": text, "session_id": session_id, "ok": True}
+    if usage:
+        result["usage"] = usage
+    return result
+
+
+def parse_json_output(out: str) -> tuple[str, dict | None, bool]:
+    """(answer text, usage, is_error) from `claude -p --output-format json`; if the output is not
+    that JSON (older CLI, or a plain error), the raw text is the answer and there is no usage."""
+    try:
+        d = json.loads(out)
+    except ValueError:
+        return out, None, False
+    if not isinstance(d, dict) or "result" not in d:
+        return out, None, False
+    text = d.get("result")
+    text = text.strip() if isinstance(text, str) else out
+    u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
+    usage = None
+    if u:
+        tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+        usage = {"tokens_in": tin, "tokens_out": int(u.get("output_tokens") or 0)}
+        if d.get("total_cost_usd") is not None:
+            usage["cost_usd"] = d["total_cost_usd"]   # the CLI's estimate; a subscription is not billed per token
+    return text, usage, bool(d.get("is_error"))
 
 
 if __name__ == "__main__":

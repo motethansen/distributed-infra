@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from shared import tracking
 from shared.models import Task, TaskStatus
 
 RQLITE_URL = os.getenv("RQLITE_URL", "http://localhost:4001").rstrip("/")
@@ -109,20 +110,48 @@ def _row_to_task(d: dict) -> Task:
 
 # ── Schema ────────────────────────────────────────────────────────────────────
 async def ensure_schema() -> None:
-    """Create the tasks table if absent. Call once at orchestrator startup —
-    rqlite persists it in the Raft log, so it need not run per operation."""
+    """Create the tasks table if absent and add the tracking columns. Call once at
+    orchestrator startup — rqlite persists it in the Raft log, so it need not run per
+    operation. Idempotent, and safe if two orchestrators start at once."""
     await _execute([[CREATE_TABLE]])
+    res = await _query([["SELECT name FROM pragma_table_info('tasks')"]], level="weak")
+    have = {r["name"] for r in _rows(res[0])} if res else set()
+    for col, typ in tracking.TRACK_COLUMNS.items():
+        if col not in have:
+            try:
+                await _execute([[f"ALTER TABLE tasks ADD COLUMN {col} {typ}"]])
+            except RqliteError as e:
+                if "duplicate column" not in str(e).lower():   # the other orchestrator won the race
+                    raise
+    # Backfill from data the rows already hold (only where still empty; derived, not invented).
+    for sql in (
+        "UPDATE tasks SET agent=json_extract(result,'$.agent') "
+        "WHERE agent IS NULL AND result IS NOT NULL AND json_valid(result) AND json_extract(result,'$.agent') IS NOT NULL",
+        "UPDATE tasks SET model=json_extract(result,'$.model') "
+        "WHERE model IS NULL AND result IS NOT NULL AND json_valid(result) AND json_extract(result,'$.model') IS NOT NULL",
+        "UPDATE tasks SET project=json_extract(payload,'$.project') WHERE project IS NULL AND json_valid(payload) "
+        "AND json_extract(payload,'$.project') IS NOT NULL",
+        "UPDATE tasks SET sprint=json_extract(payload,'$.sprint') WHERE sprint IS NULL AND json_valid(payload) "
+        "AND json_extract(payload,'$.sprint') IS NOT NULL",
+        "UPDATE tasks SET story=json_extract(payload,'$.story') WHERE story IS NULL AND json_valid(payload) "
+        "AND json_extract(payload,'$.story') IS NOT NULL",
+        "UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL AND status IN ('done','failed','needs_human')",
+    ):
+        await _execute([[sql]])
 
 
 # ── Queue operations (mirror orchestrator.db) ─────────────────────────────────
 async def insert_task(task: Task) -> Task:
+    tags = tracking.from_payload(task.payload)
     await _execute([[
-        """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO tasks (id,type,status,priority,payload,created_by,assigned_to,result,notes,created_at,updated_at,
+                              project,sprint,story)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         task.id, task.type, task.status, task.priority,
         json.dumps(task.payload), task.created_by, task.assigned_to,
         json.dumps(task.result) if task.result else None,
         task.notes, task.created_at.isoformat(), task.updated_at.isoformat(),
+        tags.get("project"), tags.get("sprint"), tags.get("story"),
     ]])
     return task
 
@@ -191,11 +220,21 @@ async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
     if not fields:
         return await get_task(task_id)
     fields = dict(fields)
-    fields["updated_at"] = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat()
+    fields["updated_at"] = now
+    if isinstance(fields.get("result"), dict):
+        fields.update(tracking.from_result(fields["result"]))      # who answered, tokens, cost
+    status = str(getattr(fields.get("status"), "value", fields.get("status")) or "")
+    if status in tracking.TERMINAL:
+        fields["finished_at"] = now
     if "result" in fields and fields["result"] is not None:
         fields["result"] = json.dumps(fields["result"])
-    set_clause = ", ".join(f"{k}=?" for k in fields)
-    stmt = [f"UPDATE tasks SET {set_clause} WHERE id=?", *fields.values(), task_id]
+    sets = [f"{k}=?" for k in fields]
+    values = list(fields.values())
+    if status == "in_progress":                                    # first start only
+        sets.append("started_at=COALESCE(started_at, ?)")
+        values.append(now)
+    stmt = [f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", *values, task_id]
     await _execute([stmt])
     return await get_task(task_id)
 
@@ -215,3 +254,23 @@ async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
         now, note, note, cutoff_iso,
     ]])
     return _rows(results[0]) if results else []
+
+
+_USAGE_COLS = ("id,type,status,assigned_to,agent,model,tokens_in,tokens_out,tokens_total,cost_usd,"
+               "started_at,finished_at,created_at,project,sprint,story")
+
+
+async def usage_rows(since: str | None = None, until: str | None = None,
+                     project: str | None = None, sprint: str | None = None, limit: int = 20000) -> list[dict]:
+    """Task rows (tracking columns only) for the Scrum/usage summaries. Dashboard read: may be
+    slightly stale."""
+    where, params = [], []
+    for col, op, val in (("created_at", ">=", since), ("created_at", "<", until),
+                         ("project", "=", project), ("sprint", "=", sprint)):
+        if val:
+            where.append(f"{col} {op} ?")
+            params.append(val)
+    sql = f"SELECT {_USAGE_COLS} FROM tasks" + (" WHERE " + " AND ".join(where) if where else "") + \
+          " ORDER BY created_at DESC LIMIT ?"
+    res = await _query([[sql, *params, limit]], level="none")
+    return _rows(res[0]) if res else []

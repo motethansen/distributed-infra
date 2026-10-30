@@ -10,6 +10,7 @@ CLI usage:
 from __future__ import annotations
 
 import asyncio
+import re
 import os
 import shutil
 import sys
@@ -138,7 +139,20 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     if proc.returncode != 0 and not final:
         return {"error": err or out or "codex exited non-zero", "agent": "codex", "ok": False}
 
-    return {"agent": "codex", "model": chosen_model or "codex-default", "response": final or out, "ok": True}
+    result = {"agent": "codex", "model": chosen_model or "codex-default", "response": final or out, "ok": True}
+    total = parse_tokens_used(out + "\n" + err)
+    if total is not None:
+        result["usage"] = {"tokens_total": total}   # codex reports one total, not in/out
+    return result
+
+
+def parse_tokens_used(text: str) -> int | None:
+    """The total from codex's trailing 'tokens used\\n4,071' line (last one wins)."""
+    found = re.findall(r"tokens used\s*[:\n]\s*([\d,]+)", text, flags=re.IGNORECASE)
+    try:
+        return int(found[-1].replace(",", "")) if found else None
+    except ValueError:
+        return None
 
 
 if __name__ == "__main__":

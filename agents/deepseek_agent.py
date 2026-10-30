@@ -65,7 +65,11 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         return {"error": str(e), "agent": "deepseek", "ok": False}
 
     text = data["choices"][0]["message"]["content"]
-    return {"agent": "deepseek", "model": effective_model, "response": text, "ok": True}
+    result = {"agent": "deepseek", "model": effective_model, "response": text, "ok": True}
+    u = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    if u:
+        result["usage"] = {"tokens_in": int(u.get("prompt_tokens") or 0), "tokens_out": int(u.get("completion_tokens") or 0)}
+    return result
 
 
 if __name__ == "__main__":
