@@ -93,3 +93,12 @@ def test_a_generated_sprint_flows_through_load_and_the_per_sprint_backlog_view(t
     assert pr["sprints"][0]["points_total"] == 8 and pr["velocity"][0]["points_total"] == 8
     v = scrum_digest.backlog_view(pr, date(2026, 11, 1))
     assert [x["id"] for x in v["sprints"][0]["stories"]] == ["DM-001", "DM-002"] and [x["id"] for x in v["unscheduled"]] == ["DM-003"]
+
+
+def test_a_goal_is_the_first_sentence_or_a_word_boundary_cut_never_a_chopped_word():
+    assert se.short_goal("Let users pick the model. Then show who answered, with a long tail of detail.") == "Let users pick the model."
+    g = se.short_goal(("abcdef " * 60).strip())                                       # 7 chars a word: the 200 limit lands mid-word
+    assert g.endswith("…") and len(g) <= 201 and g[:-1].split()[-1] == "abcdef"
+    assert se.short_goal("short one") == "short one" and se.short_goal("") == "" and se.short_goal("  spaced   out  ") == "spaced out"
+    assert se.short_goal("A" * 250 + ". tail").endswith("…")                           # a first sentence over the limit is cut instead
+    assert "goal: " in se.new_sprint("demo", 1, "x" * 3 + ". more", D1)

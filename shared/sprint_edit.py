@@ -27,8 +27,19 @@ def sprint_file(project: str, number: int) -> str:
     return f"{project}/sprint-{number:02d}.md"
 
 
+def short_goal(text: str, limit: int = 200) -> str:
+    """The first sentence of the request, or a word-boundary cut with an ellipsis: never a word chopped in half."""
+    t = " ".join((text or "").split())
+    m = re.match(r"(.+?[.!?])(\s|$)", t)
+    if m and len(m.group(1)) <= limit:
+        return m.group(1)
+    if len(t) <= limit:
+        return t
+    return t[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 def new_sprint(project: str, number: int, goal: str, day: str) -> str:
-    goal = " ".join((goal or "").split())[:300] or f"Sprint {number}"
+    goal = short_goal(goal) or f"Sprint {number}"
     return f"""---
 project: {project}
 sprint: {number:02d}
