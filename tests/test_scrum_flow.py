@@ -565,3 +565,45 @@ def test_cancel_marks_the_story_with_the_date_and_reason_and_cannot_be_undone_or
     assert "cancelled by michael" in _git(origin, "log", "-1", "--format=%s", "main")
     with pytest.raises(sf.PlanError, match="already closed"):
         sf.mark_story(work, "demo", "DM-001", "🏃 in progress", None)                     # a cancelled story is not quietly revived
+
+
+# ── sprint file sync (git) ───────────────────────────────────────────────────
+
+def test_the_sprint_file_is_created_on_the_first_story_then_follows_the_story_and_closes_only_when_told(vrepo):
+    work, origin = vrepo
+    day = "2026-10-31"
+    story = {"id": "S-1", "title": "Pick the LLM", "points": 3}
+    r = sf.sprint_open_story(work, "demo", 4, story, "DM-002", "Let users pick the model", day)
+    assert r["committed"] and r["pushed"]
+    f = work / "demo" / "sprint-04.md"
+    from shared import scrum
+    assert "DM-002 Pick the LLM" in f.read_text() and scrum.parse_sprint(f.read_text(), {})["points_remaining"] == 3
+    assert "sprint 04 — DM-002 planned" in _git(origin, "log", "-1", "--format=%s", "main")
+    sf.sprint_open_story(work, "demo", 4, {"id": "S-2", "title": "Second", "points": 2}, "DM-003", "ignored for an existing file", day)
+    assert scrum.parse_sprint(f.read_text(), {})["points_total"] == 5 and "ignored for an existing file" not in f.read_text()
+    sf.sprint_mark(work, "demo", 4, "DM-002", "🏃 in progress", day)
+    sf.sprint_mark(work, "demo", 4, "DM-002", "✅ done 2026-11-01", "2026-11-01", closing=True)
+    s = scrum.parse_sprint(f.read_text(), {})
+    assert s["points_remaining"] == 2 and [b["remaining"] for b in s["burndown"] if b["recorded"]] == [5.0, 2.0]
+    assert sf.find_sprint_of(work, "demo", "DM-003") == 4 and sf.find_sprint_of(work, "demo", "DM-999") is None
+    with pytest.raises(Exception, match="closing=True"):
+        sf.sprint_mark(work, "demo", 4, "DM-003", "✅ done 2026-11-01", "2026-11-01")          # not without the closing flag
+
+
+def test_a_hand_written_sprint_file_is_refused_and_so_are_uncommitted_edits(vrepo):
+    work, origin = vrepo
+    f = work / "demo" / "sprint-05.md"
+    f.write_text("---\nproject: demo\nsprint: 05\nowner: project-orchestrator\n---\n\n## Stories\n\n| Story | Points | Status |\n|---|---|---|\n")
+    _git(work, "add", "."); _git(work, "commit", "-qm", "human sprint"); _git(work, "push", "-q", "origin", "HEAD:main")
+    before = f.read_text()
+    with pytest.raises(sf.PlanError, match="not a dis-agent sprint"):
+        sf.sprint_open_story(work, "demo", 5, {"id": "S-1", "title": "x", "points": 1}, "DM-009", "g", "2026-10-31")
+    assert f.read_text() == before and _git(work, "status", "--porcelain").strip() == ""      # untouched, nothing staged
+    f.write_text(before + "| DM-777 mentioned in a human sprint | 1 | 🔵 |\n")
+    _git(work, "add", "."); _git(work, "commit", "-qm", "mention"); _git(work, "push", "-q", "origin", "HEAD:main")
+    assert sf.find_sprint_of(work, "demo", "DM-777") is None                                    # only dis-agent sprints are ever located
+    g = work / "demo" / "sprint-06.md"
+    sf.sprint_open_story(work, "demo", 6, {"id": "S-1", "title": "x", "points": 1}, "DM-009", "g", "2026-10-31")
+    g.write_text(g.read_text() + "\nhuman typing\n")
+    with pytest.raises(sf.PlanError, match="uncommitted changes"):
+        sf.sprint_mark(work, "demo", 6, "DM-009", "🏃 in progress", "2026-11-01")

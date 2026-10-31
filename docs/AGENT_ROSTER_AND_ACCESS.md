@@ -224,3 +224,15 @@ them against the architecture and the existing backlog, and writing the briefs t
 To spend it well: one call per planning or grooming session, give it the context it needs in that call (the tool does), batch your
 feedback into one revision round, and never use it for implementation, review, status or chat. At the cap it falls back to Sonnet and
 the digest warns from 80%.
+
+### Sprint files (built 2026-10-31)
+
+`dis-agent` maintains `<project>/sprint-NN.md` in the notes repo for the sprints it runs, so the Vantage per-sprint backlog, burndown
+and velocity follow the work with no manual bookkeeping. `approve` registers the story in the backlog (planned) and adds it to the sprint
+file (creating the file with the goal, start date and burndown table on the first story); `go` moves it to in progress and then in review;
+`close` marks it done and burns the points down; `cancel` takes it out of scope. Every change records today's remaining points.
+
+Rules that keep it safe: sprint files have one writer, so `dis-agent` edits only files whose front matter says `owner: dis-agent` and
+refuses a hand-written sprint (for example `budgetapp/sprint-05.md`); it never edits a file with uncommitted changes; a story is
+never marked done without `close`. The `-s` label (`S-roles`, `V1`) maps to the next free sprint number for the project, remembered in
+`data/scrum/<project>/sprints.json`; a plain number (`-s 6`) is used as given.

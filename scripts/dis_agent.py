@@ -67,6 +67,29 @@ def _report(what: str, r: dict) -> None:
     print(f"  backlog: {what} (committed{', pushed' if r['pushed'] else '; NOT pushed — ' + ' '.join(r['push_error'] or []) + ' — push when online'})")
 
 
+def _sprint_number(project: str, label: str) -> int:
+    """Sprint label -> sprint file number, remembered in data/scrum/<project>/sprints.json."""
+    from shared import sprint_edit
+    f = ROOT / "data" / "scrum" / project / "sprints.json"
+    mapping = json.loads(f.read_text()) if f.exists() else {}
+    n = sprint_edit.number_for(viz_repo(), project, label, mapping)
+    if not label.strip().isdigit() and label not in mapping:
+        mapping[label] = n
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(mapping, indent=2))
+    return n
+
+
+def _sprint_step(what: str, fn) -> bool:
+    """A sprint-file update must never break the flow it rides on: say what happened and carry on. True if it worked."""
+    try:
+        _report(what, fn())
+        return True
+    except sf.PlanError as e:
+        print(f"  sprint file NOT updated: {e}")
+        return False
+
+
 def projects_cfg() -> dict:
     return yaml.safe_load((ROOT / "config" / "scrum_projects.yaml").read_text())
 
@@ -287,6 +310,16 @@ def cmd_approve(a) -> None:
             _report(f"{r['id']} registered as planned", r)
         except sf.PlanError as e:
             print(f"  backlog NOT updated: {e}")
+    if plan.get("backlog_id") and not plan.get("sprint_number"):
+        try:
+            n = _sprint_number(plan["project"], plan["sprint"])
+            req = (json.loads((path.parent / "stories.json").read_text()).get("request") if (path.parent / "stories.json").exists() else "") or plan["story"]["title"]
+            if _sprint_step(f"sprint-{n:02d}.md now holds {plan['backlog_id']}", lambda: sf.sprint_open_story(
+                    viz_repo(), plan["project"], n, plan["story"], plan["backlog_id"], req, now[:10])):
+                plan["sprint_number"] = n                          # only once it worked, so a later approve retries a failure
+                path.write_text(json.dumps(plan, indent=2, ensure_ascii=False))
+        except sf.PlanError as e:
+            print(f"  sprint file NOT updated: {e}")
     print(f"Run it:  dis-agent go {path}")
 
 
@@ -304,6 +337,9 @@ def cmd_go(a) -> None:
             _report(f"{bid} in progress", sf.mark_story(viz_repo(), plan["project"], bid, "🏃 in progress", None))
         except sf.PlanError as e:
             print(f"  backlog NOT updated: {e}")
+        if plan.get("sprint_number"):
+            _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in progress", lambda: sf.sprint_mark(
+                viz_repo(), plan["project"], plan["sprint_number"], bid, "🏃 in progress", datetime.now(timezone.utc).date().isoformat()))
     log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], plan["story"], tasks, go=ok,
                       approved=a.approved, cwd=a.cwd, project_cfg=(cfg["projects"] or {}).get(plan["project"]))
     if ok:
@@ -318,6 +354,9 @@ def cmd_go(a) -> None:
                         + "; validation: " + sf.validation_summary(ev.get("validation")) + "; awaiting sprint review"))
             except sf.PlanError as e:
                 print(f"  backlog NOT updated: {e}")
+            if plan.get("sprint_number"):
+                _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in review", lambda: sf.sprint_mark(
+                    viz_repo(), plan["project"], plan["sprint_number"], bid, "🔍 in review", datetime.now(timezone.utc).date().isoformat()))
         print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
@@ -375,9 +414,14 @@ def cmd_cancel(a) -> None:
         print("left as it was")
         return
     try:
-        _report(f"{a.story} CANCELLED", sf.cancel_story(viz_repo(), a.project, a.story, who, datetime.now(timezone.utc).date().isoformat(), a.reason))
+        day = datetime.now(timezone.utc).date().isoformat()
+        _report(f"{a.story} CANCELLED", sf.cancel_story(viz_repo(), a.project, a.story, who, day, a.reason))
     except sf.PlanError as e:
         sys.exit(f"not cancelled: {e}")
+    n = sf.find_sprint_of(viz_repo(), a.project, a.story)
+    if n:
+        _sprint_step(f"sprint-{n:02d}.md: {a.story} cancelled, out of scope", lambda: sf.sprint_mark(
+            viz_repo(), a.project, n, a.story, f"❌ cancelled {day}", day, closing=True))
 
 
 def _board() -> dict:
@@ -483,6 +527,10 @@ def cmd_close(a) -> None:
                 r = sf.close_story(viz_repo(), a.project, bid, who, datetime.now(timezone.utc).date().isoformat(),
                                    "PRs " + (", ".join(ev["pull_requests"]) or "none"))
                 _report(f"{bid} CLOSED", r)
+                day = datetime.now(timezone.utc).date().isoformat()
+                if pl.get("sprint_number"):
+                    _sprint_step(f"sprint-{pl['sprint_number']:02d}.md: {bid} done, burndown updated", lambda: sf.sprint_mark(
+                        viz_repo(), a.project, pl["sprint_number"], bid, f"✅ done {day}", day, closing=True))
             except sf.PlanError as e:
                 print(f"  not closed: {e}")
         else:

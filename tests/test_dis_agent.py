@@ -301,3 +301,96 @@ def test_cancel_needs_a_reason_and_a_confirmation_and_calls_the_cancel_path(monk
     monkeypatch.setattr("builtins.input", lambda p="": "n")
     da.cmd_cancel(ns())
     assert len(calls) == 1 and "left as it was" in capsys.readouterr().out
+
+
+# ── sprint files follow approve / close / cancel ─────────────────────────────
+
+def test_sprint_label_gets_a_stable_file_number_and_numbers_are_used_as_given(tmp_path, monkeypatch):
+    (tmp_path / "viz" / "demo").mkdir(parents=True)
+    (tmp_path / "viz" / "demo" / "sprint-04.md").write_text("x")
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    assert da._sprint_number("demo", "S-roles") == 5 and da._sprint_number("demo", "S-roles") == 5      # remembered
+    assert da._sprint_number("demo", "V2") == 6                                                          # next free, mapping counted
+    assert da._sprint_number("demo", "9") == 9
+    import json
+    assert json.loads((tmp_path / "data" / "scrum" / "demo" / "sprints.json").read_text()) == {"S-roles": 5, "V2": 6}
+
+
+def _approve_env(tmp_path, monkeypatch):
+    import json
+    d = tmp_path / "data" / "scrum" / "demo" / "S-x"
+    d.mkdir(parents=True)
+    (d / "stories.json").write_text(json.dumps({"request": "Let users pick the model", "stories": []}))
+    plan = d / "S-1.plan.json"
+    plan.write_text(json.dumps({"project": "demo", "sprint": "S-x", "story": {"id": "S-1", "title": "Pick", "points": 3}, "tasks": []}))
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    (tmp_path / "viz" / "demo").mkdir(parents=True)
+    ok = {"committed": True, "pushed": True, "push_error": None}
+    return plan, ok
+
+
+def test_approve_registers_the_story_then_opens_it_in_the_sprint_file_once(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    plan, ok = _approve_env(tmp_path, monkeypatch)
+    calls = {"reg": 0, "open": []}
+    monkeypatch.setattr(da.sf, "register_story", lambda *a, **k: calls.__setitem__("reg", calls["reg"] + 1) or dict(ok, id="DM-002"))
+    monkeypatch.setattr(da.sf, "sprint_open_story", lambda *a, **k: calls["open"].append(a) or ok)
+    da.cmd_approve(argparse.Namespace(plan=str(plan)))
+    assert "sprint-01.md now holds DM-002 (committed, pushed)" in capsys.readouterr().out
+    saved = json.loads(plan.read_text())
+    assert saved["backlog_id"] == "DM-002" and saved["sprint_number"] == 1 and "approval" in saved
+    (_repo, project, n, story, bid, request, day), = calls["open"]
+    assert (project, n, bid, request, story["points"]) == ("demo", 1, "DM-002", "Let users pick the model", 3)
+    da.cmd_approve(argparse.Namespace(plan=str(plan)))                                    # approving again: nothing is repeated
+    assert calls["reg"] == 1 and len(calls["open"]) == 1
+
+
+def test_a_failing_sprint_file_update_never_breaks_approve(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    plan, ok = _approve_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(da.sf, "register_story", lambda *a, **k: dict(ok, id="DM-002"))
+
+    def boom(*a, **k):
+        raise da.sf.PlanError("sprint-01.md is not a dis-agent sprint")
+    monkeypatch.setattr(da.sf, "sprint_open_story", boom)
+    da.cmd_approve(argparse.Namespace(plan=str(plan)))
+    out = capsys.readouterr().out
+    assert "sprint file NOT updated: sprint-01.md is not a dis-agent sprint" in out and "approved" in out
+    assert "sprint_number" not in json.loads(plan.read_text())                            # not recorded, so a later approve retries
+
+
+def test_close_and_cancel_update_the_sprint_file_only_when_the_story_has_one(tmp_path, monkeypatch):
+    import argparse
+    import json
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    marks = []
+    ok = {"committed": True, "pushed": True, "push_error": None}
+    monkeypatch.setattr(da.sf, "sprint_mark", lambda *a, **k: marks.append((a[2:5], k)) or ok)
+    monkeypatch.setattr(da.sf, "cancel_story", lambda *a, **k: ok)
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: False})())
+    da.cmd_cancel(argparse.Namespace(project="demo", story="DM-002", reason="not needed", yes=True))
+    assert marks == []                                                                    # no dis-agent sprint holds it
+    monkeypatch.setattr(da.sf, "find_sprint_of", lambda *a: 4)
+    da.cmd_cancel(argparse.Namespace(project="demo", story="DM-002", reason="not needed", yes=True))
+    (args, kw), = marks
+    assert args[0] == 4 and args[1] == "DM-002" and args[2].startswith("❌ cancelled ") and kw["closing"] is True
+
+    marks.clear()
+    d = tmp_path / "data" / "scrum" / "demo" / "S"
+    d.mkdir(parents=True)
+    (d / "S-1.plan.json").write_text(json.dumps({"story": {"id": "S-1", "title": "t"}, "backlog_id": "DM-002", "sprint_number": 4, "tasks": []}))
+    p = lambda role: {"project": "demo", "sprint": "S", "story": "S-1", "role": role}   # noqa: E731
+    rows = [{"id": "00000001x", "status": "done", "agent": "claude", "created_at": "1", "payload": p("dev_frontend"), "result": {}},
+            {"id": "00000002x", "status": "done", "agent": "agy", "created_at": "2", "payload": p("tester"),
+             "result": {"response": '{"validation":{"criteria":[{"n":1,"status":"pass","evidence":"t"}]}}'}},
+            {"id": "00000003x", "status": "done", "agent": "codex", "created_at": "3", "payload": p("reviewer"), "result": {"response": "ok"}}]
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: rows})())
+    monkeypatch.setattr(da.sf, "close_story", lambda *a, **k: ok)
+    da.cmd_close(argparse.Namespace(project="demo", sprint="S", story=None, yes=True, force=False))
+    (args, kw), = marks
+    assert args[0] == 4 and args[1] == "DM-002" and args[2].startswith("✅ done ") and kw["closing"] is True
