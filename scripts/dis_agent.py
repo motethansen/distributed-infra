@@ -550,7 +550,8 @@ def cmd_close(a) -> None:
         pl = json.loads(f.read_text())
         if pl.get("backlog_id"):
             plans[pl["story"]["id"]] = pl
-    want = a.story or list(plans)
+    by_backlog = {pl["backlog_id"]: sid for sid, pl in plans.items()}
+    want = [by_backlog.get(x, x) for x in a.story] if a.story else list(plans)       # --story takes the plan's ID or the backlog's
     if not want:
         sys.exit(f"no registered stories under {base}; approve a plan first")
     rows = sc.client()._call("GET", "/tasks", params={"limit": 500})

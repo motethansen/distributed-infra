@@ -480,3 +480,14 @@ def test_close_check_shows_the_evidence_and_never_closes_or_prompts(tmp_path, mo
     assert closed == [] and "CHECK ONLY: every gate passes" in out and "1 pass, 0 fail" in out
     closed, out = _close_with(tmp_path, monkeypatch, None, capsys, check=True)
     assert closed == [] and "NOT closing" in out and "CHECK ONLY" not in out              # a failing gate is reported, not previewed as closable
+
+
+def test_close_takes_the_story_by_plan_id_or_backlog_id(tmp_path, monkeypatch, capsys):
+    import argparse
+    _plans(tmp_path, monkeypatch)
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: []})())
+    for ident in ("S-1", "DM-002"):
+        da.cmd_close(argparse.Namespace(project="demo", sprint="S-roles", story=[ident], yes=False, force=False, check=True))
+        assert "DM-002 (S-1)" in capsys.readouterr().out, ident
+    da.cmd_close(argparse.Namespace(project="demo", sprint="S-roles", story=["DM-777"], yes=False, force=False, check=True))
+    assert "DM-777: no registered plan" in capsys.readouterr().out
