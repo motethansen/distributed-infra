@@ -237,18 +237,72 @@ def test_scrum_prints_the_digest_saves_it_and_narrates_only_when_asked(tmp_path,
     assert "BRIEFING TEXT" in capsys.readouterr().out
 
 
-def test_review_without_a_project_lists_the_queue_and_with_one_needs_a_sprint(monkeypatch, capsys):
+def test_review_lists_the_queue_with_sprint_prs_and_the_confirming_command(tmp_path, monkeypatch, capsys):
     import argparse
-    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: _board_with(
-        [{"project": "p", "id": "P-1", "title": "A thing", "evidence": "validation ok"}])})())
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"projects": {"p": {"repo": "git@github.com:o/p.git"}}})
+    board = _board_with([{"project": "p", "id": "P-1", "title": "A thing", "evidence": "PR #9 green, waiting for you to merge"},
+                         {"project": "p", "id": "P-2", "title": "No PR", "evidence": "verified by hand"}])
+    board["projects"] = [{"project": "p", "backlog_view": {"sprints": [{"sprint": "3", "stories": [{"id": "P-1"}]}], "unscheduled": [], "cancelled": []}}]
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: board})())
     da.cmd_review(argparse.Namespace(project=None, sprint=None))
     out = capsys.readouterr().out
-    assert "1 stories wait for your sprint review" in out and "P-1" in out and "validation ok" in out
-    with pytest.raises(SystemExit, match="-s SPRINT"):
-        da.cmd_review(argparse.Namespace(project="p", sprint=None))
+    assert "2 stories wait for your sprint review" in out and "P-1  A thing   [sprint 3]" in out and "P-2  No PR   [not in a sprint]" in out
+    assert "PRs:      https://github.com/o/p/pull/9" in out
+    assert "confirm:  dis-agent accept -p p --story P-1 --pr https://github.com/o/p/pull/9" in out
+    assert 'confirm:  dis-agent accept -p p --story P-2 --evidence "what you verified"' in out
+    da.cmd_review(argparse.Namespace(project="p", sprint=None))                              # -p alone is the queue for that project
+    assert "2 stories wait" in capsys.readouterr().out
     monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: _board_with()})())
     da.cmd_review(argparse.Namespace(project=None, sprint=None))
     assert "Nothing is waiting" in capsys.readouterr().out
+
+
+def test_accept_needs_evidence_checks_github_when_given_a_pr_and_only_closes_on_a_yes(tmp_path, monkeypatch, capsys):
+    import argparse
+    closed = []
+    ok = {"committed": True, "pushed": True, "push_error": None}
+    monkeypatch.setattr(da.sf, "close_story", lambda *a, **k: closed.append(a) or ok)
+    monkeypatch.setattr(da.sf, "find_sprint_of", lambda *a: None)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path)
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: False})())
+    ns = lambda **k: argparse.Namespace(**{"project": "p", "story": "P-1", "pr": None, "evidence": None, "yes": False, **k})   # noqa: E731
+    with pytest.raises(SystemExit, match="needs evidence"):
+        da.cmd_accept(ns(yes=True))
+    with pytest.raises(SystemExit, match="needs evidence"):
+        da.cmd_accept(ns(evidence="   ", yes=True))
+    with pytest.raises(SystemExit, match="needs your confirmation"):
+        da.cmd_accept(ns(evidence="checked the response"))
+    assert closed == []
+    da.cmd_accept(ns(evidence="checked the response", yes=True))
+    assert closed[0][2] == "P-1" and closed[0][5] == "checked the response"
+    monkeypatch.setattr(da.sf, "verify_pr_merged", lambda url: {"merged_at": "2026-10-30", "title": "Ledger"})
+    da.cmd_accept(ns(pr="https://github.com/o/p/pull/9", evidence="CI green", yes=True))
+    assert closed[1][5] == "https://github.com/o/p/pull/9 merged 2026-10-30; CI green" and "GitHub confirms" in capsys.readouterr().out
+
+    def unmerged(url):
+        raise da.sf.PlanError(f"{url} is OPEN, not merged")
+    monkeypatch.setattr(da.sf, "verify_pr_merged", unmerged)
+    with pytest.raises(SystemExit, match="not accepted: .*is OPEN, not merged"):
+        da.cmd_accept(ns(pr="https://github.com/o/p/pull/9", yes=True))
+    assert len(closed) == 2                                                                 # an unmerged PR never closes anything
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda p="": "n")
+    da.cmd_accept(ns(evidence="x"))
+    assert len(closed) == 2 and "left in review" in capsys.readouterr().out
+
+
+def test_accept_also_updates_a_dis_agent_sprint_file_when_the_story_has_one(tmp_path, monkeypatch):
+    import argparse
+    marks = []
+    ok = {"committed": True, "pushed": True, "push_error": None}
+    monkeypatch.setattr(da.sf, "close_story", lambda *a, **k: ok)
+    monkeypatch.setattr(da.sf, "find_sprint_of", lambda *a: 4)
+    monkeypatch.setattr(da.sf, "sprint_mark", lambda *a, **k: marks.append((a[2:5], k)) or ok)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path)
+    da.cmd_accept(argparse.Namespace(project="p", story="P-1", pr=None, evidence="verified", yes=True))
+    (args, kw), = marks
+    assert args[0] == 4 and args[1] == "P-1" and args[2].startswith("✅ done ") and kw["closing"] is True
 
 
 def test_an_old_orchestrator_without_a_digest_gets_a_clear_message(monkeypatch):

@@ -16,7 +16,8 @@
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
-  dis-agent review                                the review queue: everything waiting for your sprint review, on demand
+  dis-agent review                                the review queue: each waiting story with its sprint, PRs and the exact command to confirm it
+  dis-agent accept -p PROJ --story ID --pr URL    confirm a story the fleet did not build (GitHub must show the PR merged), or --evidence "..."
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
   dis-agent validate -p PROJ -s SPR --story ID    run the independent tester (agy) on a story; --branch main when it is already merged
   dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
@@ -514,24 +515,61 @@ def cmd_scrum(a) -> None:
 
 
 def cmd_review_queue(a) -> None:
-    q = _board()["digest"]["review_queue"]
-    if not q:
+    from shared import scrum_next
+    items = scrum_next.review_items(_board(), _local_plans(), (projects_cfg().get("projects") or {}), a.project)
+    if not items:
         print("Nothing is waiting for your review.")
         return
-    print(f"{len(q)} stories wait for your sprint review:\n")
-    for r in q:
-        print(f"  {r['project']:<18} {r['id']:<8} {r['title'][:80]}")
+    print(f"{len(items)} stories wait for your sprint review:\n")
+    for r in items:
+        print(f"  {r['project']} {r['id']}  {r['title'][:86]}" + (f"   [sprint {r['sprint']}]" if r["sprint"] else "   [not in a sprint]"))
         if r["evidence"]:
-            print(f"  {'':<18} {'':<8} {r['evidence'][:200]}")
-    print("\nFor a story the fleet built (it has a plan): dis-agent close -p <project> -s <sprint>   (shows validation + review, asks you)\n"
-          "For a sprint's overall outcome:              dis-agent review -p <project> -s <sprint>")
+            print(f"      evidence: {r['evidence'][:230]}")
+        if r["prs"]:
+            print(f"      PRs:      {', '.join(r['prs'])}")
+        print(f"      confirm:  {r['command']}")
+    print("\nA story the fleet built has validation and review evidence (`/close` shows it). Any other story is confirmed with `dis-agent accept`,\n"
+          "which closes it only on your say-so and, when you give a PR, only after GitHub confirms it is merged. Cancel one with `dis-agent cancel`.")
+
+
+def cmd_accept(a) -> None:
+    """Confirm, at a sprint review, a story the fleet did not build. Evidence is required: a merged PR or what you verified."""
+    who = os.environ.get("USER", "human")
+    day = datetime.now(timezone.utc).date().isoformat()
+    if not a.pr and not (a.evidence or "").strip():
+        sys.exit("accepting needs evidence: --pr <url of a MERGED pull request> or --evidence \"what you verified\"")
+    parts = []
+    if a.pr:
+        try:
+            m = sf.verify_pr_merged(a.pr)
+        except sf.PlanError as e:
+            sys.exit(f"not accepted: {e}")
+        parts.append(f"{a.pr} merged {m['merged_at']}")
+        print(f"  GitHub confirms: {a.pr} is merged ({m['merged_at']}): {m['title'][:80]}")
+    if (a.evidence or "").strip():
+        parts.append(a.evidence.strip())
+    if a.yes:
+        ok = True
+    elif sys.stdin.isatty():
+        ok = input(f"Accept {a.story} in {a.project} as done? You confirm the sprint review accepts it [y/N] ").strip().lower() == "y"
+    else:
+        sys.exit("not accepting: needs your confirmation (run this in a terminal, or pass --yes)")
+    if not ok:
+        print("left in review")
+        return
+    try:
+        _report(f"{a.story} ACCEPTED", sf.close_story(viz_repo(), a.project, a.story, who, day, "; ".join(parts)))
+    except sf.PlanError as e:
+        sys.exit(f"not accepted: {e}")
+    n = sf.find_sprint_of(viz_repo(), a.project, a.story)
+    if n:
+        _sprint_step(f"sprint-{n:02d}.md: {a.story} done, burndown updated", lambda: sf.sprint_mark(
+            viz_repo(), a.project, n, a.story, f"✅ done {day}", day, closing=True))
 
 
 def cmd_review(a) -> None:
-    if not a.project:
+    if not a.project or not a.sprint:
         return cmd_review_queue(a)
-    if not a.sprint:
-        sys.exit("give -s SPRINT as well, or run `dis-agent review` alone for the queue")
     a.sprint = resolve_sprint(a.project, a.sprint)
     c = sc.client()
     rows = c._call("GET", "/tasks", params={"limit": 500})
@@ -667,6 +705,10 @@ def main() -> None:
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
     bk.add_argument("-p", "--project", required=True); bk.add_argument("--limit", type=int, default=40)
     bk.add_argument("--all", action="store_true", help="also list sprints with no stories")
+    ac = sub.add_parser("accept"); ac.set_defaults(fn=cmd_accept)
+    ac.add_argument("-p", "--project", required=True); ac.add_argument("--story", required=True)
+    ac.add_argument("--pr", help="URL of a pull request that must be MERGED (checked with GitHub)")
+    ac.add_argument("--evidence", help="what you verified, when there is no PR"); ac.add_argument("--yes", action="store_true")
     cn = sub.add_parser("cancel"); cn.set_defaults(fn=cmd_cancel)
     cn.add_argument("-p", "--project", required=True); cn.add_argument("--story", required=True)
     cn.add_argument("--reason", required=True); cn.add_argument("--yes", action="store_true")

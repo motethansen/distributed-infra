@@ -724,3 +724,40 @@ def find_sprint_of(repo: Path, project: str, bid: str) -> int | None:
             m = re.match(r"sprint-0*(\d+)\.md$", f.name)
             return int(m.group(1)) if m else None
     return None
+
+
+# ── stories the fleet did not build: evidence, then the human accepts ────────
+
+def repo_slug(clone_url: str | None) -> str | None:
+    """owner/name from a git@github.com:o/n.git or https://github.com/o/n URL."""
+    m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", clone_url or "")
+    return m.group(1) if m else None
+
+
+def pr_links(text: str, slug: str | None) -> list[str]:
+    """Pull request links found in an evidence cell: full URLs, plus `PR #12` / `PRs #12, #13` / `pull/12` resolved against the project's repo."""
+    urls = list(dict.fromkeys(re.findall(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+", text or "")))
+    if slug:
+        nums: list[str] = []
+        for m in re.finditer(r"\bPRs?\s*((?:#\d+(?:\s*(?:,|and|&|/)\s*)?)+)", text or ""):
+            nums += re.findall(r"#(\d+)", m.group(1))
+        nums += re.findall(r"(?<![\w/])pull/(\d+)", text or "")
+        for n in nums:
+            u = f"https://github.com/{slug}/pull/{n}"
+            if u not in urls:
+                urls.append(u)
+    return urls
+
+
+def verify_pr_merged(url: str, run=subprocess.run) -> dict:
+    """Ask GitHub (gh) whether the PR is merged. Raises PlanError if it is not, or cannot be checked: evidence is not a guess."""
+    try:
+        r = run(["gh", "pr", "view", url, "--json", "state,mergedAt,title"], capture_output=True, text=True, timeout=40)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise PlanError(f"could not ask GitHub about {url}: {type(e).__name__}") from e
+    if r.returncode != 0:
+        raise PlanError(f"could not ask GitHub about {url}: {(r.stderr or r.stdout).strip()[:160]}")
+    info = json.loads(r.stdout)
+    if info.get("state") != "MERGED":
+        raise PlanError(f"{url} is {info.get('state')}, not merged")
+    return {"merged_at": (info.get("mergedAt") or "")[:10], "title": info.get("title", "")}

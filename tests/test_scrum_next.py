@@ -112,3 +112,19 @@ def test_suggestions_are_sorted_by_priority_whatever_the_order_they_were_found_i
     full = sn.suggest(b, plans, {"b": "d"}, limit=0)
     assert len(full) >= 4 and [x["priority"] for x in full] == sorted(x["priority"] for x in full) and full[0]["priority"] == 1
     assert len(sn.suggest(b, plans, {"b": "d"}, limit=2)) == 2 and sn.suggest(b, plans, {"b": "d"}, limit=2) == full[:2]
+
+
+def test_review_items_carry_sprint_prs_and_the_right_confirming_command():
+    b = board([proj("p", sprints=[{"sprint": "2", "stories": [st("P-1", "in_review")]}])],
+              review=[{"project": "p", "id": "P-1", "title": "t1", "evidence": "PR #7 green"},
+                      {"project": "p", "id": "P-2", "title": "t2", "evidence": "checked by hand"},
+                      {"project": "p", "id": "P-3", "title": "t3", "evidence": ""},
+                      {"project": "q", "id": "Q-1", "title": "t4", "evidence": "PR #1"}])
+    cfg = {"p": {"repo": "git@github.com:o/p.git"}}
+    items = {i["id"]: i for i in sn.review_items(b, [plan("p", "P-3", sprint=5)], cfg)}
+    assert items["P-1"]["sprint"] == "2" and items["P-1"]["prs"] == ["https://github.com/o/p/pull/7"] and not items["P-1"]["fleet"]
+    assert items["P-1"]["command"] == "dis-agent accept -p p --story P-1 --pr https://github.com/o/p/pull/7"
+    assert items["P-2"]["sprint"] is None and 'accept -p p --story P-2 --evidence "what you verified"' in items["P-2"]["command"]
+    assert items["P-3"]["fleet"] is True and items["P-3"]["command"] == "/close p 5 P-3"                    # a fleet plan means /close, not accept
+    assert items["Q-1"]["prs"] == [] and "--evidence" in items["Q-1"]["command"]                           # no repo configured: no guessed link
+    assert [i["id"] for i in sn.review_items(b, [], cfg, project="p")] == ["P-1", "P-2", "P-3"]
