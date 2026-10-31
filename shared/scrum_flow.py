@@ -357,13 +357,18 @@ def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
             f"Returned code:\n{parts}")
 
 
-def validate_prompt(story: dict) -> str:
+def validate_prompt(story: dict, branch: str | None = None) -> str:
+    """`branch` is for a story that is already merged: test what is on that branch (usually main) and keep the new tests on a
+    separate branch with a pull request instead of pushing to it."""
     crit = "\n".join(f"{i}. {c}" for i, c in enumerate(story.get("acceptance", []), 1))
+    where = (f"Work on the story branch `dis/{story['id']}`." if not branch else
+             f"The story is already merged: check out `{branch}` and test what is there. Do NOT push to `{branch}`: put the new tests on a new "
+             f"branch `dis/{story['id']}-validation`, push that and open a pull request for it (never merge it).")
     return (f"You are the independent tester for story {story['id']}: {story['title']}. You did not write the code and must not "
-            "change it. Work on the story branch `dis/" + story["id"] + "`.\n\n"
+            "change it. " + where + "\n\n"
             "1. Write tests from the ACCEPTANCE CRITERIA below and the public interfaces only: decide what to assert from the "
             "criteria, not by reading how the implementation works. Follow the repository's test conventions; put them in new files "
-            "named for the story. Commit and push them to the story branch.\n"
+            "named for the story. Commit and push them as described above.\n"
             "2. Run the repository's FULL test suite on that branch. If anything fails, do not fix the implementation; report it.\n"
             "3. For each criterion decide pass, fail or unverified (unverified = it needs a live system, a human, or a secret you do not "
             "have). Give one line of evidence each: the test name and its result, or why it could not be checked.\n\n"

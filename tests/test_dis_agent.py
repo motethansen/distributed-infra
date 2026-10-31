@@ -107,7 +107,7 @@ def test_close_refuses_when_a_task_is_unfinished_even_if_a_review_exists(tmp_pat
     assert closed == [] and "not every task is done" in capsys.readouterr().out
 
 
-def _close_with(tmp_path, monkeypatch, tester_response, capsys):
+def _close_with(tmp_path, monkeypatch, tester_response, capsys, check=False):
     import argparse
     import json
     d = tmp_path / "data" / "scrum" / "demo" / "S"
@@ -122,7 +122,7 @@ def _close_with(tmp_path, monkeypatch, tester_response, capsys):
     monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: rows})())
     closed = []
     monkeypatch.setattr(da.sf, "close_story", lambda *a, **k: closed.append(a) or {"committed": True, "pushed": True, "push_error": None})
-    da.cmd_close(argparse.Namespace(project="demo", sprint="S", story=None, yes=True, force=False))
+    da.cmd_close(argparse.Namespace(project="demo", sprint="S", story=None, yes=not check, force=False, check=check))
     return closed, capsys.readouterr().out
 
 
@@ -394,3 +394,89 @@ def test_close_and_cancel_update_the_sprint_file_only_when_the_story_has_one(tmp
     da.cmd_close(argparse.Namespace(project="demo", sprint="S", story=None, yes=True, force=False))
     (args, kw), = marks
     assert args[0] == 4 and args[1] == "DM-002" and args[2].startswith("✅ done ") and kw["closing"] is True
+
+
+# ── sprint label vs number, default sprint, validate ─────────────────────────
+
+def _plans(tmp_path, monkeypatch, label="S-roles", number=1):
+    import json
+    base = tmp_path / "data" / "scrum" / "demo"
+    (base / label).mkdir(parents=True)
+    (base / label / "S-1.plan.json").write_text(json.dumps({"story": {"id": "S-1", "title": "Pick", "acceptance": ["a", "b"]}, "backlog_id": "DM-002", "tasks": []}))
+    (base / "sprints.json").write_text(json.dumps({label: number}))
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    (tmp_path / "viz" / "demo").mkdir(parents=True)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    return base
+
+
+def test_the_sprint_can_be_named_by_label_or_by_the_number_the_board_shows(tmp_path, monkeypatch):
+    _plans(tmp_path, monkeypatch)
+    assert da.resolve_sprint("demo", "S-roles") == "S-roles"
+    assert da.resolve_sprint("demo", "1") == "S-roles" and da.resolve_sprint("demo", "01") == "S-roles"
+    for bad in ("S-1", "2"):                                                    # S-1 is a STORY id, 2 has no sprint
+        with pytest.raises(SystemExit) as e:
+            da.resolve_sprint("demo", bad)
+        assert "Sprints with plans: S-roles" in str(e.value) and "label or the number the board shows" in str(e.value)
+    with pytest.raises(SystemExit, match="Sprints with plans: none"):
+        da.resolve_sprint("nosuch", "1")
+
+
+def test_po_and_planning_default_to_the_next_free_sprint_number(tmp_path, monkeypatch, capsys):
+    import argparse
+    _plans(tmp_path, monkeypatch)
+    (tmp_path / "viz" / "demo" / "sprint-03.md").write_text("x")
+    assert da.next_sprint("demo") == "4" and da.next_sprint("nosuch") == "1"
+    ns = argparse.Namespace(project="demo", sprint=None)
+    da._default_sprint(ns)
+    assert ns.sprint == "4" and "using sprint 4" in capsys.readouterr().out
+    ns = argparse.Namespace(project="demo", sprint="7")
+    da._default_sprint(ns)
+    assert ns.sprint == "7"                                                     # an explicit one is left alone
+
+
+def test_validate_queues_the_tester_prints_the_verdict_and_says_when_it_is_not_a_pass(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    base = _plans(tmp_path, monkeypatch)
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"machines": {}, "projects": {"demo": {"repo": "git@github.com:o/demo.git", "dir": "demo"}}})
+    queued = []
+    verdict = ('{"validation":{"suite":"9 passed, 0 failed","criteria":[{"n":1,"status":"pass","evidence":"t1"},'
+               '{"n":2,"status":"unverified","evidence":"needs a live system"}]}}')
+
+    class C:
+        def queue(self, payload, notes):
+            queued.append(payload)
+            return {"id": "tt1"}
+
+        def wait(self, ids, **k):
+            return {"tt1": {"status": "done", "agent": "agy", "result": {"response": verdict}}}
+    monkeypatch.setattr(sc, "client", lambda: C())
+    da.cmd_validate(argparse.Namespace(project="demo", sprint="1", story="DM-002", approved=False, branch="main"))
+    out = capsys.readouterr().out
+    assert "1 pass, 0 fail, 1 unverified" in out and "needs a live system" in out and "close will refuse" in out
+    q = queued[0]
+    assert "git@github.com:o/demo.git" in q["prompt"]
+    assert q["role"] == "tester" and q["story"] == "S-1" and q["sprint"] == "S-roles" and "already merged" in q["prompt"] and "dis/S-1-validation" in q["prompt"]
+    assert json.loads((base / "S-roles" / "validation-S-1.json").read_text())["counts"]["unverified"] == 1
+    with pytest.raises(SystemExit, match="no plan for DM-9"):
+        da.cmd_validate(argparse.Namespace(project="demo", sprint="S-roles", story="DM-9", approved=False, branch=None))
+
+
+def test_close_accepts_the_board_number_and_explains_a_wrong_sprint(tmp_path, monkeypatch, capsys):
+    import argparse
+    _plans(tmp_path, monkeypatch)
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: []})())
+    da.cmd_close(argparse.Namespace(project="demo", sprint="1", story=None, yes=True, force=False))
+    out = capsys.readouterr().out
+    assert "DM-002 (S-1)" in out and "not every task is done" in out                      # found the plan through the number
+    with pytest.raises(SystemExit, match="Sprints with plans: S-roles"):
+        da.cmd_close(argparse.Namespace(project="demo", sprint="S-1", story=None, yes=True, force=False))
+
+
+def test_close_check_shows_the_evidence_and_never_closes_or_prompts(tmp_path, monkeypatch, capsys):
+    pass_ = '{"validation":{"criteria":[{"n":1,"status":"pass","evidence":"t1"}]}}'
+    closed, out = _close_with(tmp_path, monkeypatch, pass_, capsys, check=True)
+    assert closed == [] and "CHECK ONLY: every gate passes" in out and "1 pass, 0 fail" in out
+    closed, out = _close_with(tmp_path, monkeypatch, None, capsys, check=True)
+    assert closed == [] and "NOT closing" in out and "CHECK ONLY" not in out              # a failing gate is reported, not previewed as closable
