@@ -616,3 +616,37 @@ def test_validate_prompt_for_a_merged_story_tests_that_branch_and_never_pushes_t
     merged = sf.validate_prompt(st, "main")
     assert "check out `main`" in merged and "Do NOT push to `main`" in merged and "dis/S-1-validation" in merged and "open a pull request" in merged
     assert "Work on the story branch" not in merged and "ACCEPTANCE CRITERIA" in merged and "1. one" in merged
+
+
+# ── stories the fleet did not build ──────────────────────────────────────────
+
+def test_repo_slug_and_pr_links_resolve_the_prs_a_backlog_row_mentions():
+    assert sf.repo_slug("git@github.com:motethansen/budgetapp.git") == "motethansen/budgetapp"
+    assert sf.repo_slug("https://github.com/o/n") == "o/n" and sf.repo_slug("git@gitlab.com:o/n.git") is None and sf.repo_slug(None) is None
+    slug = "o/p"
+    assert sf.pr_links("PR #108, CI green", slug) == ["https://github.com/o/p/pull/108"]
+    assert sf.pr_links("PRs #12, #13 and #14 merged", slug) == [f"https://github.com/o/p/pull/{n}" for n in (12, 13, 14)]
+    assert sf.pr_links("PR #109 (stacked on #108)", slug) == ["https://github.com/o/p/pull/109"]          # #108 is a mention, not a PR ref
+    assert sf.pr_links("see pull/7 and https://github.com/x/y/pull/9", slug) == ["https://github.com/x/y/pull/9", "https://github.com/o/p/pull/7"]
+    assert sf.pr_links("issue #5, no PR", slug) == [] and sf.pr_links("PR #4", None) == []                  # no repo, no guessing
+    assert sf.pr_links("PR #4 and PR #4", slug) == ["https://github.com/o/p/pull/4"]                         # de-duplicated
+
+
+def test_verify_pr_merged_trusts_only_github_saying_merged():
+    import types
+
+    def gh(stdout="", rc=0, err=""):
+        return lambda *a, **k: types.SimpleNamespace(returncode=rc, stdout=stdout, stderr=err)
+    ok = sf.verify_pr_merged("u", run=gh(json.dumps({"state": "MERGED", "mergedAt": "2026-10-30T10:00:00Z", "title": "Ledger"})))
+    assert ok == {"merged_at": "2026-10-30", "title": "Ledger"}
+    with pytest.raises(sf.PlanError, match="is OPEN, not merged"):
+        sf.verify_pr_merged("u", run=gh(json.dumps({"state": "OPEN", "mergedAt": None, "title": "x"})))
+    with pytest.raises(sf.PlanError, match="is CLOSED, not merged"):
+        sf.verify_pr_merged("u", run=gh(json.dumps({"state": "CLOSED", "mergedAt": None, "title": "x"})))
+    with pytest.raises(sf.PlanError, match="could not ask GitHub"):
+        sf.verify_pr_merged("u", run=gh(rc=1, err="HTTP 404"))
+
+    def boom(*a, **k):
+        raise FileNotFoundError("gh")
+    with pytest.raises(sf.PlanError, match="could not ask GitHub"):
+        sf.verify_pr_merged("u", run=boom)

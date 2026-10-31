@@ -123,3 +123,35 @@ def render(sugs: list[dict]) -> str:
     for i, s in enumerate(sugs, 1):
         L += [f"{i}. {s['title']}", f"   why:     {s['why']}", f"   command: {s['command']}", f"   effect:  {s['kind']}; cost: {s['cost']}", ""]
     return "\n".join(L)
+
+
+def review_items(board: dict, plans: list[dict], cfg_projects: dict, project: str | None = None) -> list[dict]:
+    """Every story waiting for the human's review, with its sprint, its PRs and the exact command that confirms it."""
+    from shared import scrum_flow
+    out = []
+    by_plan = {(pl["project"], pl.get("backlog_id")): pl for pl in plans if pl.get("backlog_id")}
+    projects = {p["project"]: p for p in board.get("projects", [])}
+    for r in (board.get("digest") or {}).get("review_queue", []):
+        pn, sid = r["project"], r["id"]
+        if project and pn != project:
+            continue
+        sprint = None
+        for sp in (projects.get(pn, {}).get("backlog_view") or {}).get("sprints", []):
+            if any(s.get("id") == sid for s in sp.get("stories", [])):
+                sprint = sp.get("sprint")
+                break
+        slug = scrum_flow.repo_slug((cfg_projects.get(pn) or {}).get("repo"))
+        prs = scrum_flow.pr_links(r.get("evidence", ""), slug)
+        pl = by_plan.get((pn, sid))
+        if pl:
+            cmd = f"/close {pn} {pl.get('sprint_number') or pl['sprint']} {sid}"
+            how = "built by the fleet: the tester and reviewer ran; this shows their evidence and closes only if every gate passes"
+        elif prs:
+            cmd = f"dis-agent accept -p {pn} --story {sid} --pr {prs[0]}"
+            how = "not built by the fleet: merge the PR(s) first if it is not merged yet; accept checks GitHub that it is merged, then closes"
+        else:
+            cmd = f'dis-agent accept -p {pn} --story {sid} --evidence "what you verified"'
+            how = "not built by the fleet and no PR is named: say what you verified (a response, a test, a screen)"
+        out.append({"project": pn, "id": sid, "title": r["title"], "sprint": sprint, "evidence": r.get("evidence", ""), "prs": prs,
+                    "fleet": bool(pl), "command": cmd, "how": how})
+    return out
