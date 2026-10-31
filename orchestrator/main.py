@@ -17,6 +17,7 @@ from fastapi import Body, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
 
 from agents import roles as scrum_roles
+from orchestrator.llm_choices import build_llm_choices
 from shared import scrum, tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
@@ -265,6 +266,13 @@ async def create_task(body: TaskCreate, x_secret_key: str = Header(default=""),
         created_by=MACHINE_NAME,
     )
     return await db.insert_task(task)
+
+
+@app.get("/llm-choices")
+async def llm_choices(x_secret_key: str = Header(default="")) -> list[dict]:
+    """The one list of LLM choices every client shows, each with the payload fragment it sends."""
+    _check_auth(x_secret_key)
+    return build_llm_choices(scrum_roles.load_policy().get("roles") or {})
 
 
 @app.get("/tasks", response_model=list[Task])

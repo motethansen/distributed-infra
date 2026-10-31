@@ -27,6 +27,14 @@ roles:
     monthly_cost_cap_usd: 50
     warn_at: 0.8
     cap_fallback: { agent: claude, model: sonnet }
+  opus_chat:
+    best_for: "the Claude Opus choice in client pickers; Opus only through this grant, sonnet once the cap is spent."
+    agent: claude
+    model: opus
+    allow_opus: true
+    monthly_cost_cap_usd: 50
+    warn_at: 0.8
+    cap_fallback: { agent: claude, model: sonnet }
   scrum_master:
     best_for: "break stories into atomic tasks, order dependencies, assign roles, synthesise progress."
     agent: claude

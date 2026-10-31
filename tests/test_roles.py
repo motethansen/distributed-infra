@@ -89,7 +89,7 @@ def test_shipped_policy_is_loadable_and_safe_by_default():
     with pytest.raises(roles.RoleError, match="isolated"):
         roles.resolve("dev_backend", project="urbanlife")
     opus_roles = [n for n, s in p["roles"].items() if roles.is_opus(s.get("model"))]
-    assert opus_roles == ["product_owner"] and p["roles"]["product_owner"]["allow_opus"] is True
+    assert opus_roles == ["product_owner", "opus_chat"] and p["roles"]["product_owner"]["allow_opus"] is True
     assert roles.resolve("dev_backend", project="budgetapp")["agent"] == "deepseek"
     assert roles.resolve("dev_backend", project="budgetapp", sensitivity="private")["agent"] == "claude"
 
