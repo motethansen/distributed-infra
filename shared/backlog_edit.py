@@ -11,7 +11,7 @@ import re
 from collections import Counter
 
 _ID = re.compile(r"\b([A-Z]{2,6})-(\d{1,4}[a-z]?)\b")
-CLOSED_MARK = ("✅", "⛔", "🟢")
+CLOSED_MARK = ("✅", "⛔", "🟢", "❌")
 PLANNED, IN_PROGRESS, IN_REVIEW = "🔵 planned", "🏃 in progress", "🔍 in review"
 
 

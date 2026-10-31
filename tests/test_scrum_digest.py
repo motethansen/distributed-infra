@@ -78,3 +78,59 @@ def test_active_items_are_read_from_a_real_backlog_table_without_emoji_in_titles
     got = scrum.active_items(bl)
     assert [(g["id"], g["status"], g["title"], g["evidence"]) for g in got] == [
         ("AA-1", "in_review", "Fix the thing", "PR #4 shipped"), ("AA-2", "blocked", "Blocked thing", "waiting on Stripe")]
+
+
+# ── backlog_view: the product backlog per sprint ─────────────────────────────
+
+def _view_project():
+    items = [item2("V-1", "in_review", "PR 4"), item2("V-2", "blocked", "waiting on Stripe"), item2("V-3", "planned"),
+             item2("V-4", "in_progress", "running"), item2("V-5", "cancelled", "not needed", "2026-10-20"),
+             item2("V-6", "cancelled", "ancient", "2026-06-01"), item2("V-7", "cancelled", "undated"), item2("V-8", "planned", "just a note")]
+    sprints = [{"sprint": "2", "goal": "g2", "started": "2026-10-25", "status": "open", "points_total": 8, "points_done": 3, "points_remaining": 5,
+                "stories": [{"id": "V-1", "title": "one", "status": "in_review", "points": 3, "assignee": "me"},
+                            {"id": "V-9", "title": "closed one", "status": "done", "points": 3, "assignee": None},
+                            {"id": "V-8", "title": "planned one", "status": "planned", "points": 1, "assignee": None},
+                            {"id": "V-6", "title": "ancient cancelled", "status": "cancelled", "points": 2, "assignee": None}]},
+               {"sprint": "10", "goal": "g10", "started": "2026-10-30", "status": "open", "points_total": 2, "points_done": 0, "points_remaining": 2,
+                "stories": [{"id": "V-2", "title": "two", "status": "blocked", "points": 2, "assignee": None}]},
+               {"sprint": "1", "goal": "g1", "stories": []}]
+    return {"project": "v", "closed": 4, "counts": {}, "backlog_items": items, "sprints": sprints}
+
+
+def item2(i, st, ev="", date_=None):
+    return {"id": i, "status": st, "title": f"title {i}", "evidence": ev, "priority": "High", "date": date_}
+
+
+def test_sprints_are_listed_newest_first_with_reasons_on_blocked_and_in_flight_stories_only():
+    v = sd.backlog_view(_view_project(), TODAY)
+    assert [s["sprint"] for s in v["sprints"]] == ["10", "2", "1"]                   # numeric order, not "10" < "2"
+    s10 = v["sprints"][0]["stories"][0]
+    assert s10["id"] == "V-2" and s10["reason"] == "waiting on Stripe"
+    s2 = {x["id"]: x for x in v["sprints"][1]["stories"]}
+    assert s2["V-1"]["reason"] == "PR 4" and s2["V-9"]["reason"] == "" and s2["V-8"]["reason"] == ""   # only in-flight/blocked/cancelled carry one
+
+
+def test_unscheduled_holds_only_stories_in_no_sprint_ordered_by_how_alive_they_are():
+    v = sd.backlog_view(_view_project(), TODAY)
+    assert [i["id"] for i in v["unscheduled"]] == ["V-4", "V-3"]                   # V-1 and V-2 are in sprints; cancelled are separate
+    assert v["closed_unscheduled"] == 3                                             # 4 closed overall, 1 of them (V-9) is in a sprint
+
+
+def test_cancelled_stories_show_for_sixty_days_then_hide_and_undated_ones_stay_visible():
+    v = sd.backlog_view(_view_project(), TODAY)
+    assert [c["id"] for c in v["cancelled"]] == ["V-5", "V-7"]
+    assert v["cancelled_hidden"] == 1                                              # V-6 (in a sprint, 152 days old) is hidden
+    assert all(s["id"] != "V-6" for sp in v["sprints"] for s in sp["stories"])
+    edge = {"project": "x", "closed": 0, "backlog_items": [item2("E-1", "cancelled", "", "2026-09-01"), item2("E-2", "cancelled", "", "2026-09-02")]}
+    vv = sd.backlog_view(edge, TODAY)                                               # 60 days vs 59 days
+    assert [c["id"] for c in vv["cancelled"]] == ["E-1", "E-2"] and vv["cancelled_hidden"] == 0
+    edge["backlog_items"][0]["date"] = "2026-08-31"                                 # 61 days
+    vv = sd.backlog_view(edge, TODAY)
+    assert [c["id"] for c in vv["cancelled"]] == ["E-2"] and vv["cancelled_hidden"] == 1
+
+
+def test_blocked_decisions_carry_the_reason_or_say_none_was_recorded():
+    p = proj("a", {"blocked": 2}, [item("A-1", "blocked", "needs a Stripe key from the dashboard"), item("A-2", "blocked", "")])
+    d = {x["text"].split(" is ")[0]: x for x in sd.build([p], TODAY)["decisions"] if x["kind"] == "blocked"}
+    assert d["A-1"]["reason"] == "needs a Stripe key from the dashboard" and "— needs a Stripe key" in d["A-1"]["text"]
+    assert "no reason recorded in the backlog" in d["A-2"]["text"] and d["A-2"]["reason"] == ""

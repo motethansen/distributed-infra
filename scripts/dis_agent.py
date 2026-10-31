@@ -12,7 +12,8 @@
   dis-agent plan -p PROJ -s SPR --story ID        Scrum Master plans roles, machines, order (nothing queued)
   dis-agent approve PLAN                          you approve exactly that plan
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
-  dis-agent backlog -p PROJ                       the project's open work: in progress, in review, blocked, planned
+  dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
+  dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
   dis-agent review                                the review queue: everything waiting for your sprint review, on demand
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
@@ -320,28 +321,63 @@ def cmd_go(a) -> None:
         print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
+_BADGE = {"in_progress": "🏃 in progress", "in_review": "🔍 in review", "blocked": "🚧 blocked", "planned": "🔵 planned",
+          "done": "✅ done", "superseded": "⛔ superseded", "cancelled": "❌ cancelled"}
+
+
+def _story_line(x: dict, width: int = 78) -> str:
+    pts = f"{x['points']:g}" if x.get("points") else ""
+    return f"    {x['id'] or '-':<8} {_BADGE.get(x['status'], x['status']):<14} {pts:>3}  {str(x['title'])[:width]}"
+
+
 def cmd_backlog(a) -> None:
-    from shared import backlog_edit as be
-    f = viz_repo() / a.project / "product-backlog.md"
-    if not f.exists():
-        sys.exit(f"{f} not found; set VIZNEO_REPO")
-    lines = f.read_text(encoding="utf-8").split("\n")
-    order = {"🏃": 0, "🔍": 1, "🚧": 2, "🔵": 3}
-    rows = []
-    for _hi, first, end, header, _h in be._tables(lines):
-        sc_ = be._col(header, "status")
-        if sc_ is None:
+    b = _board()
+    p = next((x for x in b["projects"] if x["project"] == a.project), None)
+    if not p:
+        sys.exit(f"unknown project {a.project!r}; known: {', '.join(x['project'] for x in b['projects'])}")
+    v = p["backlog_view"]
+    c = v["counts"]
+    print(f"{a.project}: {p['closed']} closed · {c.get('in_progress', 0)} in progress · {c.get('in_review', 0)} in review · "
+          f"{c.get('blocked', 0)} blocked · {c.get('planned', 0)} planned" + (f" · {c.get('cancelled', 0)} cancelled" if c.get("cancelled") else ""))
+    for sp in v["sprints"]:
+        if not sp["stories"] and not a.all:
             continue
-        for n in range(first, end):
-            cells = be._split(lines[n])
-            if len(cells) > sc_ and not be.is_closed_text(cells[sc_]):
-                rows.append((order.get(next((e for e in order if e in cells[sc_]), ""), 4), cells[0], re.sub(r"[*_`]", "", cells[1])[:92], cells[sc_]))
-    rows.sort()
-    print(f"{a.project}: {len(rows)} open stories\n")
-    for _o, i, t, st in rows[: a.limit]:
-        print(f"  {i:<8} {st:<14} {t}")
-    if len(rows) > a.limit:
-        print(f"  ... {len(rows) - a.limit} more (use --limit)")
+        print(f"\n  Sprint {sp['sprint']}  {sp.get('points_done') or 0:g}/{sp.get('points_total') or 0:g} pts"
+              + (f"  started {sp['started']}" if sp.get("started") else "") + (f"  — {str(sp['goal'])[:80]}" if sp.get("goal") else ""))
+        for x in sp["stories"]:
+            print(_story_line(x))
+            if x.get("reason") and x["status"] in ("blocked", "cancelled"):
+                print(f"{'':<27}why: {x['reason'][:150]}")
+    print(f"\n  Not in a sprint yet ({len(v['unscheduled'])} open; {v['closed_unscheduled']} closed ones not shown)")
+    for x in v["unscheduled"][: a.limit]:
+        print(_story_line(x))
+        if x["status"] == "blocked":
+            print(f"{'':<27}why: {x['evidence'][:150] or 'no reason recorded in the backlog'}")
+    if len(v["unscheduled"]) > a.limit:
+        print(f"    ... {len(v['unscheduled']) - a.limit} more (--limit)")
+    if v["cancelled"]:
+        print(f"\n  Cancelled in the last 60 days ({v['cancelled_hidden']} older hidden)")
+        for x in v["cancelled"]:
+            print(_story_line(x) + (f"   [{x['evidence'][:80]}]" if x.get("evidence") else ""))
+
+
+def cmd_cancel(a) -> None:
+    who = os.environ.get("USER", "human")
+    if not a.reason or not a.reason.strip():
+        sys.exit("a cancellation needs --reason")
+    if a.yes:
+        ok = True
+    elif sys.stdin.isatty():
+        ok = input(f"Cancel {a.story} in {a.project}? It stays visible for 60 days, then drops off the board. [y/N] ").strip().lower() == "y"
+    else:
+        sys.exit("not cancelling: needs your confirmation (run this in a terminal, or pass --yes)")
+    if not ok:
+        print("left as it was")
+        return
+    try:
+        _report(f"{a.story} CANCELLED", sf.cancel_story(viz_repo(), a.project, a.story, who, datetime.now(timezone.utc).date().isoformat(), a.reason))
+    except sf.PlanError as e:
+        sys.exit(f"not cancelled: {e}")
 
 
 def _board() -> dict:
@@ -484,6 +520,10 @@ def main() -> None:
     cl.add_argument("--force", action="store_true")
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
     bk.add_argument("-p", "--project", required=True); bk.add_argument("--limit", type=int, default=40)
+    bk.add_argument("--all", action="store_true", help="also list sprints with no stories")
+    cn = sub.add_parser("cancel"); cn.set_defaults(fn=cmd_cancel)
+    cn.add_argument("-p", "--project", required=True); cn.add_argument("--story", required=True)
+    cn.add_argument("--reason", required=True); cn.add_argument("--yes", action="store_true")
     sm = sub.add_parser("scrum"); sm.set_defaults(fn=cmd_scrum); sm.add_argument("--narrate", action="store_true", help="have the Scrum Master (Sonnet) write the briefing")
     sm.add_argument("--as", dest="as_agent")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)

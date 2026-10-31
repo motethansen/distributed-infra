@@ -317,3 +317,37 @@ async def test_a_failed_pull_is_reported_not_fatal_and_can_be_turned_off(api, tm
     monkeypatch.setenv("SCRUM_REPO_PULL", "0")
     sp = await api.scrum_sprints(x_secret_key="k")
     assert sp["repo"]["pull"]["ok"] is None                                                     # never attempted
+
+
+# ── cancelled stories and the per-sprint backlog rows ────────────────────────
+
+CANCEL_BL = ("| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n"
+             "| CC-001 | planned | High | 🔵 planned | |\n"
+             "| CC-002 | scoped out | Low | ❌ cancelled 2026-10-20 | not needed since CC-001 covers it |\n"
+             "| CC-003 | Stripe cleanup of cancelled subscriptions | Low | 🏃 in progress | the title mentions cancelled |\n"
+             "| CC-004 | old | Low | cancelled | undated |\n| CC-005 | done | Low | ✅ done 2026-01-01 | |\n")
+
+
+def test_cancelled_is_a_status_only_when_the_cell_starts_with_it():
+    got = scrum.parse_backlog(CANCEL_BL)
+    assert got == {"CC-001": "planned", "CC-002": "cancelled", "CC-003": "in_progress", "CC-004": "cancelled", "CC-005": "done"}
+
+
+def test_backlog_rows_keep_reasons_and_dates_and_skip_closed():
+    rows = {r["id"]: r for r in scrum.backlog_rows(CANCEL_BL)}
+    assert set(rows) == {"CC-001", "CC-002", "CC-003", "CC-004"}
+    assert rows["CC-002"]["date"] == "2026-10-20" and "covers it" in rows["CC-002"]["evidence"] and rows["CC-002"]["priority"] == "Low"
+    assert rows["CC-004"]["date"] is None
+
+
+def test_cancelled_work_is_neither_scope_nor_remaining_in_a_sprint_or_the_completion_figure(tmp_path):
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "product-backlog.md").write_text(CANCEL_BL)
+    (tmp_path / "p" / "sprint-01.md").write_text(
+        "---\nsprint: 1\n---\n| Story | Points | Status |\n|---|---|---|\n| CC-001 planned | 3 | 🔵 |\n| CC-002 scoped out | 5 | 🔵 |\n| CC-005 done | 2 | ✅ |\n")
+    pr = scrum.load(tmp_path)["projects"][0]
+    assert pr["counts"]["cancelled"] == 2 and pr["stories"] == 3 and pr["closed"] == 1          # 5 rows, 2 cancelled
+    assert pr["complete_pct"] == round(100 * 1 / 3, 1) and pr["scurve"]["scope_stories"] == 3
+    sp = pr["sprints"][0]
+    assert sp["points_total"] == 5 and sp["points_remaining"] == 3 and sp["points_done"] == 2    # the 5 cancelled points vanish
+    assert [s["status"] for s in sp["stories"]] == ["planned", "cancelled", "done"]

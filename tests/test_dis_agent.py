@@ -257,17 +257,47 @@ def test_an_old_orchestrator_without_a_digest_gets_a_clear_message(monkeypatch):
         da._board()
 
 
-def test_backlog_lists_only_open_rows_with_in_flight_work_first(tmp_path, monkeypatch, capsys):
+def _view():
+    return {"counts": {"in_review": 1, "blocked": 1, "planned": 1, "cancelled": 1}, "closed_unscheduled": 7, "cancelled_hidden": 2,
+            "sprints": [{"sprint": "2", "goal": "ship it", "started": "2026-10-30", "points_total": 5, "points_done": 2,
+                         "stories": [{"id": "D-1", "title": "in sprint", "status": "in_review", "points": 3, "reason": "PR 4"},
+                                     {"id": "D-2", "title": "stuck", "status": "blocked", "points": 2, "reason": "waiting on Stripe"}]},
+                        {"sprint": "1", "stories": []}],
+            "unscheduled": [{"id": "D-3", "title": "later", "status": "planned", "evidence": ""},
+                            {"id": "D-4", "title": "stuck too", "status": "blocked", "evidence": ""}],
+            "cancelled": [{"id": "D-5", "title": "dropped", "status": "cancelled", "evidence": "not needed"}]}
+
+
+def test_backlog_is_arranged_per_sprint_with_the_reason_for_every_blocked_story(monkeypatch, capsys):
     import argparse
-    (tmp_path / "demo").mkdir()
-    (tmp_path / "demo" / "product-backlog.md").write_text(
-        "| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n"
-        "| DM-001 | planned one | High | 🔵 planned | |\n| DM-002 | done one | High | ✅ done 2026-01-01 | |\n"
-        "| DM-003 | in review one | High | 🔍 in review | PR |\n| DM-004 | **running** | High | 🏃 in progress | |\n| DM-005 | stuck | Low | 🚧 blocked | |\n")
-    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path)
-    da.cmd_backlog(argparse.Namespace(project="demo", limit=3))
+    board = {"projects": [{"project": "demo", "closed": 4, "backlog_view": _view()}], "digest": {}}
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: board})())
+    da.cmd_backlog(argparse.Namespace(project="demo", limit=10, all=False))
     out = capsys.readouterr().out
-    ids = [l.split()[0] for l in out.splitlines() if l.strip().startswith("DM-")]
-    assert ids == ["DM-004", "DM-003", "DM-005"] and "4 open stories" in out and "1 more" in out and "DM-002" not in out
-    with pytest.raises(SystemExit, match="not found"):
-        da.cmd_backlog(argparse.Namespace(project="nosuch", limit=5))
+    assert out.index("Sprint 2") < out.index("Not in a sprint yet") < out.index("Cancelled in the last 60 days")
+    assert "Sprint 1" not in out                                                  # an empty sprint is hidden unless --all
+    assert "why: waiting on Stripe" in out and "why: no reason recorded in the backlog" in out and "why: PR 4" not in out
+    assert "7 closed ones not shown" in out and "2 older hidden" in out and "[not needed]" in out and "1 cancelled" in out
+    da.cmd_backlog(argparse.Namespace(project="demo", limit=10, all=True))
+    assert "Sprint 1" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="unknown project"):
+        da.cmd_backlog(argparse.Namespace(project="nosuch", limit=5, all=False))
+
+
+def test_cancel_needs_a_reason_and_a_confirmation_and_calls_the_cancel_path(monkeypatch, capsys):
+    import argparse
+    calls = []
+    monkeypatch.setattr(da.sf, "cancel_story", lambda *a, **k: calls.append(a) or {"committed": True, "pushed": True, "push_error": None})
+    ns = lambda **k: argparse.Namespace(**{"project": "demo", "story": "DM-1", "reason": "not needed", "yes": False, **k})   # noqa: E731
+    with pytest.raises(SystemExit, match="needs --reason"):
+        da.cmd_cancel(ns(reason="  "))
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: False})())
+    with pytest.raises(SystemExit, match="needs your confirmation"):
+        da.cmd_cancel(ns())
+    assert calls == []
+    da.cmd_cancel(ns(yes=True))
+    assert len(calls) == 1 and calls[0][2] == "DM-1" and calls[0][5] == "not needed"
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda p="": "n")
+    da.cmd_cancel(ns())
+    assert len(calls) == 1 and "left as it was" in capsys.readouterr().out

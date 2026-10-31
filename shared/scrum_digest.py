@@ -25,6 +25,64 @@ def _open_sprint(p: dict) -> dict | None:
     return max(cand, key=lambda s: (s.get("updated") or s.get("started") or "", str(s.get("sprint")))) if cand else None
 
 
+_ORDER = {"in_progress": 0, "in_review": 1, "blocked": 2, "planned": 3}
+CANCEL_VISIBLE_DAYS = 60
+
+
+def _num(v) -> float:
+    try:
+        return float(str(v))
+    except ValueError:
+        return -1.0
+
+
+def _cancel_hidden(date_: str | None, today: date) -> bool:
+    """A cancelled story stays visible for CANCEL_VISIBLE_DAYS; an undated one stays visible (its age is unknown)."""
+    d = _days(date_, today)
+    return d is not None and d > CANCEL_VISIBLE_DAYS
+
+
+def backlog_view(p: dict, today: date | None = None) -> dict[str, Any]:
+    """One project's product backlog arranged by sprint, then everything not yet in a sprint.
+
+    Same structure for Vantage and `dis-agent backlog`, so what you read is what the Scrum Master and Product
+    Owner agents are working from. Blocked and in-flight stories carry their reason (the backlog's evidence cell)."""
+    today = today or date.today()
+    items = {i["id"]: i for i in (p.get("backlog_items") or [])}
+    seen: set[str] = set()
+    sprints, hidden = [], 0
+    closed_in_sprints: set[str] = set()
+    for sp in sorted(p.get("sprints") or [], key=lambda s: _num(s.get("sprint")), reverse=True):
+        stories = []
+        for st in sp.get("stories") or []:
+            it = items.get(st.get("id") or "")
+            if st.get("id"):
+                seen.add(st["id"])
+            if st.get("status") in ("done", "superseded") and st.get("id"):
+                closed_in_sprints.add(st["id"])
+            if st.get("status") == "cancelled" and _cancel_hidden((it or {}).get("date"), today):
+                hidden += 1
+                continue
+            stories.append({"id": st.get("id"), "title": st.get("title"), "status": st.get("status"), "points": st.get("points"),
+                            "assignee": st.get("assignee"), "priority": (it or {}).get("priority", ""),
+                            "reason": (it or {}).get("evidence", "") if st.get("status") in ("blocked", "in_progress", "in_review", "cancelled") else "",
+                            "date": (it or {}).get("date")})
+        sprints.append({"sprint": sp.get("sprint"), "goal": sp.get("goal"), "started": sp.get("started"), "status": sp.get("status"),
+                        "points_total": sp.get("points_total"), "points_done": sp.get("points_done"),
+                        "points_remaining": sp.get("points_remaining"), "stories": stories})
+    unscheduled = sorted((i for i in items.values() if i["id"] not in seen and i["status"] != "cancelled"),
+                         key=lambda i: (_ORDER.get(i["status"], 9), i["id"]))
+    cancelled = []
+    for i in items.values():
+        if i["status"] == "cancelled" and i["id"] not in seen:
+            if _cancel_hidden(i.get("date"), today):
+                hidden += 1
+            else:
+                cancelled.append(i)
+    return {"sprints": sprints, "unscheduled": unscheduled, "cancelled": cancelled, "cancelled_hidden": hidden,
+            "closed_unscheduled": max(0, (p.get("closed") or 0) - len(closed_in_sprints)), "counts": p.get("counts") or {}}
+
+
 def build(projects: list[dict], today: date | None = None, opus: dict | None = None) -> dict[str, Any]:
     today = today or date.today()
     lines, review, decisions, adjust = [], [], [], []
@@ -48,7 +106,9 @@ def build(projects: list[dict], today: date | None = None, opus: dict | None = N
             if it["status"] == "in_review":
                 review.append(row)
             elif it["status"] == "blocked":
-                decisions.append({**row, "kind": "blocked", "text": f"{it['id']} is blocked: {it['title']}"})
+                why = (it["evidence"] or "").strip()
+                decisions.append({**row, "kind": "blocked", "reason": why[:240],
+                                  "text": f"{it['id']} is blocked: {it['title']}" + (f" — {why[:200]}" if why else " — no reason recorded in the backlog")})
         if (active_n + open_n) and since is not None and since >= STALL_DAYS:
             decisions.append({"project": p["project"], "kind": "stalled", "text": f"{p['project']}: nothing closed for {since} days with {active_n + open_n} stories still open"})
         if sp:
