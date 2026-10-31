@@ -111,3 +111,24 @@ async def test_unknown_role_is_4xx_lists_valid_roles_and_queues_nothing(api):
     assert 400 <= e.value.status_code < 500
     assert all(n in e.value.detail for n in ROLE_NAMES + ["opus_chat"])
     assert await api.db.list_tasks(limit=10) == []
+
+
+@pytest.mark.asyncio
+async def test_role_name_is_trimmed_and_case_insensitive(api):
+    t = await _queue(api, {"role": " Dev_Backend ", "prompt": "x"})
+    assert t.payload["role"] == "dev_backend"
+    assert len(await api.db.list_tasks(limit=10)) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_secret_looking_keys_anywhere(api):
+    def keys(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                yield k
+                yield from keys(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from keys(v)
+    bad = ("token", "key", "secret")
+    assert not [k for k in keys(await _choices(api)) if any(b in k.lower() for b in bad)]
