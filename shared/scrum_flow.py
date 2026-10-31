@@ -77,7 +77,7 @@ Answer with ONLY a JSON object, no prose:
 "suggested_acceptance":["..."],"brief":"..."}}],"missing":[{{"title":"...","why":"..."}}]}}"""
 
 
-def load_context(viz_repo: Path, project: str, max_chars: int = 24000) -> str:
+def load_context(viz_repo: Path, project: str, max_chars: int = 36000) -> str:
     """Architecture notes + the project's open backlog rows, capped. Architecture: the estate overview in full, any note
     named for the project, and only the TITLES of the rest (so the Product Owner can ask for them)."""
     from shared import backlog_edit
@@ -92,18 +92,10 @@ def load_context(viz_repo: Path, project: str, max_chars: int = 24000) -> str:
             parts.append("Other architecture notes (titles only): " + ", ".join(others))
     bl = viz_repo / project / "product-backlog.md"
     if bl.exists():
-        text = bl.read_text(encoding="utf-8", errors="replace")
-        rows = []
-        lines = text.split("\n")
-        for _hi, first, end, header, _h in backlog_edit._tables(lines):
-            sc = backlog_edit._col(header, "status")
-            if sc is None:
-                continue
-            for n in range(first, end):
-                cells = backlog_edit._split(lines[n])
-                if len(cells) > sc and not backlog_edit.is_closed_text(cells[sc]):
-                    rows.append(f"| {cells[0]} | {re.sub(r'[*_`]', '', cells[1])[:160] if len(cells) > 1 else ''} | {cells[sc]} |")
-        parts.append(f"=== OPEN BACKLOG: {project} ({len(rows)} open rows) ===\n" + "\n".join(rows))
+        from shared import scrum
+        rows = [r for r in scrum.backlog_rows(bl.read_text(encoding="utf-8", errors="replace")) if r["status"] != "cancelled"]
+        body = "\n".join(f"| {r['id']} | {r['title'][:160]} | {r['status']} | {r['priority']} | {r['evidence'][:240]} |" for r in rows)
+        parts.append(f"=== OPEN BACKLOG: {project} ({len(rows)} open rows: id | story | status | priority | reason/evidence) ===\n" + body)
     return "\n\n".join(parts)[:max_chars]
 
 
