@@ -60,8 +60,11 @@ def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str],
             + "\n".join(f"- {m}: {d}" for m, d in machines.items())
             + "\nSet `machine_required: true` only when the task cannot run elsewhere (iOS build, Android build).\n") if machines else ""
     return f"""You are the Scrum Master for the project "{project}" (sprint {sprint}).
-Break this story into atomic tasks for the roles below. Do not plan reviews or integration: the
-dispatcher adds a reviewer after every dev task, and an integrator after every dev_backend task.
+Break this story into atomic tasks for the roles below. Do not plan reviews, integration or branches: all work
+for the story goes on one branch, `dis/<story id>`. After each wave an integrator automatically applies the code
+that dev_backend (DeepSeek) returned as text to that branch, so later tasks can assume it is already there; never
+plan an "apply the earlier results" task. File-editing tasks run one at a time. One reviewer checks the whole story
+at the end.
 
 Story:
 {json.dumps(story, indent=2)}
@@ -275,13 +278,14 @@ def _carry(results: dict[str, str], deps: list[str]) -> str:
     return "\n\nResults of the tasks this one depends on:\n" + "\n\n".join(parts)
 
 
-def integrate_prompt(story: dict, code: str) -> str:
-    return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text. "
-            "Apply it to a new branch in this repository (create the files at the FILE: paths, adapting imports to the "
+def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
+    parts = "\n\n".join(f"--- task {t['key']}: {t['title']} ---\n{text[:12000]}" for t, text in code)
+    return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text, one block per "
+            "task, in order. Apply ALL of it to the story branch (create the files at the FILE: paths, adapting imports to the "
             "repo's conventions), run the tests, fix only what is needed to make the story's acceptance criteria hold, "
-            "commit, push and open a PR. Do not merge or deploy. Report the PR URL, the test output, and anything you "
+            "commit, push and open the PR if none exists. Do not merge or deploy. Report the PR URL, the test output, and anything you "
             f"changed from the returned code.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
-            f"Returned code:\n{code[:20000]}")
+            f"Returned code:\n{parts}")
 
 
 def review_prompt(story: dict, author: str, material: str) -> str:
@@ -292,74 +296,117 @@ def review_prompt(story: dict, author: str, material: str) -> str:
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 
 
-def repo_preamble(project: str, cfg: dict | None, story_id: str, key: str) -> str:
+def repo_preamble(project: str, cfg: dict | None, story_id: str) -> str:
     """Tell the agent where the code is: workers keep clones in different places, so find before cloning."""
     if not cfg:
         return ""
     note = f" Note: {cfg['note']}." if cfg.get("note") else ""
     return (f"Repository for project {project}: {cfg['repo']} (folder name `{cfg['dir']}`). First look for an existing clone "
             f"on this machine (`find ~/Projects -maxdepth 4 -type d -name {cfg['dir']} -exec test -d {{}}/.git \\; -print`); "
-            f"if there is none, clone it into ~/Projects/{cfg['dir']}. `git pull --ff-only` before you start and work on a "
-            f"new branch `dis/{story_id}-{key}`. Open a PR when done; never merge, never deploy, never touch a live database."
+            f"if there is none, clone it into ~/Projects/{cfg['dir']}. All work for this story goes on ONE branch, `dis/{story_id}`: "
+            f"fetch, check it out if it exists (else create it from the default branch), `git pull --ff-only`, commit and push to it. "
+            f"If no pull request exists for that branch open one with `gh pr create`; otherwise just push. Never merge, never deploy, "
+            f"never touch a live database."
             f"{note}\n\n")
+
+
+def _agent_of(task: dict) -> str | None:
+    return task.get("agent") or (task.get("result") or {}).get("agent")
+
+
+def _text_only(role: str, project: str, prompt: str) -> bool:
+    """Roles that never touch the repository: DeepSeek developers (text back) and analysts."""
+    if role == "analyst":
+        return True
+    if role != "dev_backend":
+        return False
+    from agents import roles as scrum_roles
+    try:
+        return scrum_roles.resolve(role, project=project, prompt=prompt)["agent"] == "deepseek"
+    except scrum_roles.RoleError:
+        return False
 
 
 def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list[dict], *, go: bool,
              approved: bool = False, cwd: str | None = None, sleep=time.sleep, say=print,
              project_cfg: dict | None = None) -> list[dict]:
-    """Queue the plan wave by wave; add integrator/reviewer steps; stop at the first failed task.
+    """Run the plan wave by wave; stop at the first failed task. Returns a log of
+    {key, role, task_id, status, agent}. With go=False nothing is queued.
 
-    Returns a log of {key, role, task_id, status, agent}. With go=False nothing is queued."""
+    One branch per story (dis/<story>). Tasks that only return text (DeepSeek, analyst) run in parallel;
+    after each wave ONE integrator applies all the DeepSeek code of that wave to the branch; tasks that
+    edit files run one at a time so they never race on the branch. After the last wave ONE reviewer
+    checks the whole story, pinned off Codex's family when Codex wrote any of it."""
     layers = waves(tasks)
     if not go:
         for i, layer in enumerate(layers, 1):
             say(f"wave {i}: " + ", ".join(f"{t['key']}[{t['role']}]" for t in layer))
-        say("dry run: nothing queued. Re-run with --go to queue these (reviews and integration are added automatically).")
+        say("dry run: nothing queued. Re-run with --go to queue these (integration and the story review are added automatically).")
         return []
     log: list[dict] = []
     results: dict[str, str] = {}
-    for layer in layers:
+    authors: set[str] = set()
+    pr_material: list[str] = []
+
+    def run(role: str, prompt: str, key: str, label: str, machine=None, required=False, as_agent=None) -> dict:
+        r = c.queue(tags(project, sprint, story["id"], role, approved, as_agent, cwd, machine, required,
+                         prompt=prompt, timeout=1800, flow_key=key), label)
+        say(f"queued {key} [{role}] -> {r['id'][:8]}")
+        done = c.wait([r["id"]], sleep=sleep)[r["id"]]
+        ran = _agent_of(done)
+        log.append({"key": key, "role": role, "task_id": r["id"], "status": done["status"], "agent": ran})
+        say(f"{key} [{role}] {done['status']} on {ran or '?'}")
+        if done["status"] != "done":
+            raise PlanError(f"task {key} ended {done['status']}: {done.get('notes') or ''} — stopped; fix and re-run")
+        return done
+
+    def batch(group: list[dict]) -> dict[str, dict]:
         queued = {}
-        for t in layer:
-            prompt = (repo_preamble(project, project_cfg, story["id"], t["key"]) if t["role"] in DEV_ROLES else "") \
-                + t["prompt"] + _carry(results, t["depends_on"])
+        for t in group:
+            prompt = t["prompt"] + _carry(results, t["depends_on"])
             r = c.queue(tags(project, sprint, story["id"], t["role"], approved, None, cwd, t.get("machine"),
-                             t.get("machine_required", False), prompt=prompt, timeout=1800,
-                             flow_key=t["key"]), f"{t['role']} {story['id']} {t['key']}")
+                             t.get("machine_required", False), prompt=prompt, timeout=1800, flow_key=t["key"]),
+                        f"{t['role']} {story['id']} {t['key']}")
             queued[r["id"]] = t
             say(f"queued {t['key']} [{t['role']}] -> {r['id'][:8]}")
+        out = {}
         for tid, done in c.wait(list(queued), sleep=sleep).items():
-            t = queued[tid]
-            ran = done.get("agent") or (done.get("result") or {}).get("agent")
+            t, ran = queued[tid], _agent_of(done)
             log.append({"key": t["key"], "role": t["role"], "task_id": tid, "status": done["status"], "agent": ran})
             say(f"{t['key']} [{t['role']}] {done['status']} on {ran or '?'}")
             if done["status"] != "done":
                 raise PlanError(f"task {t['key']} ended {done['status']}: {done.get('notes') or ''} — stopped; fix and re-run")
             results[t["key"]] = answer(done)
-            material = answer(done)
-            if t["role"] == "dev_backend" and ran == "deepseek":
-                i = c.queue(tags(project, sprint, story["id"], "integrator", approved, None, cwd,
-                                 prompt=repo_preamble(project, project_cfg, story["id"], t["key"]) + integrate_prompt(story, answer(done)),
-                                 timeout=1800), f"integrate {story['id']} {t['key']}")
-                idone = c.wait([i["id"]], sleep=sleep)[i["id"]]
-                iran = idone.get("agent") or (idone.get("result") or {}).get("agent")
-                log.append({"key": t["key"] + ":integrate", "role": "integrator", "task_id": i["id"],
-                            "status": idone["status"], "agent": iran})
-                say(f"{t['key']}:integrate [integrator] {idone['status']} on {iran or '?'}")
-                if idone["status"] != "done":
-                    raise PlanError(f"integration of {t['key']} ended {idone['status']}: {idone.get('notes') or ''}")
-                material = answer(idone)
-            if t["role"] in DEV_ROLES:
-                pin = {"as_agent": "claude"} if ran == "codex" else {}
-                rv = c.queue(tags(project, sprint, story["id"], "reviewer", approved, pin.get("as_agent"), cwd,
-                                  prompt=review_prompt(story, ran or "unknown", material), timeout=1800), f"review {story['id']} {t['key']}")
-                rdone = c.wait([rv["id"]], sleep=sleep)[rv["id"]]
-                rran = rdone.get("agent") or (rdone.get("result") or {}).get("agent")
-                log.append({"key": t["key"] + ":review", "role": "reviewer", "task_id": rv["id"],
-                            "status": rdone["status"], "agent": rran, "author": ran,
-                            "same_family": bool(ran and rran and ran == rran)})
-                say(f"{t['key']}:review [reviewer] {rdone['status']} on {rran or '?'}"
-                    + (" (SAME model family as the author)" if ran and rran and ran == rran else ""))
+            if ran and t["role"] in DEV_ROLES:
+                authors.add(ran)
+            out[t["key"]] = done
+        return out
+
+    for layer in layers:
+        parallel = [t for t in layer if _text_only(t["role"], project, t["prompt"])]
+        serial = [t for t in layer if t not in parallel]
+        done = batch(parallel) if parallel else {}
+        code = [(t, answer(done[t["key"]])) for t in parallel if t["role"] == "dev_backend"
+                and _agent_of(done[t["key"]]) == "deepseek"]
+        if code:
+            pre = repo_preamble(project, project_cfg, story["id"])
+            d = run("integrator", pre + integrate_prompt(story, code), "integrate:" + "+".join(t["key"] for t, _ in code),
+                    f"integrate {story['id']}")
+            pr_material.append(answer(d))
+            if _agent_of(d):
+                authors.add(_agent_of(d))
+        for t in serial:       # file editors one at a time: same branch, no races
+            pre = repo_preamble(project, project_cfg, story["id"]) if t["role"] in DEV_ROLES else ""
+            d = batch([{**t, "prompt": pre + t["prompt"]}])[t["key"]]
+            pr_material.append(answer(d))
+    if any(t["role"] in DEV_ROLES for t in tasks):
+        pin = "claude" if "codex" in authors else None
+        material = "\n\n".join(pr_material)
+        d = run("reviewer", review_prompt(story, ", ".join(sorted(authors)), material), "review", f"review {story['id']}", as_agent=pin)
+        rran = _agent_of(d)
+        log[-1].update({"authors": sorted(authors), "same_family": bool(rran and rran in authors)})
+        if rran and rran in authors:
+            say(f"review ran on {rran}, the SAME model family as an author")
     return log
 
 
