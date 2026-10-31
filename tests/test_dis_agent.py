@@ -12,6 +12,14 @@ import dis_agent as da  # noqa: E402
 import scrum_cli as sc  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """No test here may reach the live orchestrator (a pushed change refreshes the board): a test that needs a client sets its own."""
+    def refuse():
+        raise RuntimeError("tests must not reach the live orchestrator; monkeypatch sc.client")
+    monkeypatch.setattr(sc, "client", refuse)
+
+
 def test_opus_is_only_reachable_through_the_capped_product_owner_role():
     assert da.MODELS["opus"] == (None, "product_owner")
     assert all(a != "claude" or r is None for (a, r) in da.MODELS.values())          # no model name maps claude+opus directly
@@ -631,3 +639,54 @@ def test_no_refresh_when_nothing_was_pushed_and_a_failed_refresh_never_looks_lik
     da._report("x", {"committed": True, "pushed": True, "push_error": None})
     out = capsys.readouterr().out
     assert "committed, pushed" in out and "could not be refreshed now (RuntimeError)" in out
+
+
+# ── waiting sprint proposals: resume, never overwrite, dismiss ───────────────
+
+def _proposal(tmp_path, monkeypatch, planned=(), human=()):
+    import json
+    d = tmp_path / "data" / "scrum" / "demo" / "S"
+    d.mkdir(parents=True)
+    stories = [{"id": "S-1", "title": "a", "points": 3}, {"id": "S-2", "title": "b", "points": 2},
+               {"id": "S-3", "title": "human step", "points": 1, "human_only": True}]
+    (d / "stories.json").write_text(json.dumps({"project": "demo", "sprint": "S", "request": "r", "stories": stories}))
+    for sid in planned:
+        (d / f"{sid}.plan.json").write_text(json.dumps({"project": "demo", "sprint": "S", "story": {"id": sid, "title": "t"}, "tasks": []}))
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    return d
+
+
+def test_a_proposal_with_unplanned_agent_stories_is_waiting_and_human_steps_do_not_count(tmp_path, monkeypatch):
+    d = _proposal(tmp_path, monkeypatch)
+    got = da._local_proposals()["demo"]
+    assert got["todo"] == ["S-1", "S-2"] and got["stories"] == 3 and got["points"] == 6 and got["sprint"] == "S"
+    (d / "S-1.plan.json").write_text('{"project":"demo","sprint":"S","story":{"id":"S-1","title":"t"},"tasks":[]}')
+    assert da._local_proposals()["demo"]["todo"] == ["S-2"]
+    (d / "S-2.plan.json").write_text('{"project":"demo","sprint":"S","story":{"id":"S-2","title":"t"},"tasks":[]}')
+    assert da._local_proposals() == {}                                               # everything an agent can do is planned
+
+
+def test_dismiss_hides_a_proposal_keeps_its_files_and_a_new_round_revives_it(tmp_path, monkeypatch, capsys):
+    import argparse
+    d = _proposal(tmp_path, monkeypatch)
+    (tmp_path / "viz").mkdir()
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    da.cmd_dismiss(argparse.Namespace(project="demo", sprint="S"))
+    assert da._local_proposals() == {} and (d / "stories.json").exists() and "dismissed" in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="no sprint"):
+        da.cmd_dismiss(argparse.Namespace(project="demo", sprint="nope"))
+    monkeypatch.setattr(sc, "client", lambda: object())
+    monkeypatch.setattr(da.sf, "propose_stories", lambda *a, **k: ([{"id": "S-1", "title": "n", "acceptance": ["a"]}], {"agent": "claude", "model": "opus", "concerns": []}))
+    da._po_round(argparse.Namespace(project="demo", sprint="S", as_agent=None, approved=False, context_file=None, no_context=True), "r")
+    assert da._local_proposals()["demo"]["todo"] == ["S-1"] and not (d / ".dismissed").exists()
+
+
+def test_a_fresh_po_round_without_feedback_archives_the_proposal_it_replaces(tmp_path, monkeypatch):
+    import argparse
+    import json
+    d = _proposal(tmp_path, monkeypatch)
+    monkeypatch.setattr(sc, "client", lambda: object())
+    monkeypatch.setattr(da.sf, "propose_stories", lambda *a, **k: ([{"id": "N-1", "title": "new", "acceptance": ["a"]}], {"agent": "claude", "model": "opus", "concerns": []}))
+    da._po_round(argparse.Namespace(project="demo", sprint="S", as_agent=None, approved=False, context_file=None, no_context=True), "r2")
+    assert json.loads((d / "stories.json").read_text())["stories"][0]["id"] == "N-1"
+    assert [x["id"] for x in json.loads((d / "stories.v1.json").read_text())["stories"]] == ["S-1", "S-2", "S-3"]      # the earlier proposal survives

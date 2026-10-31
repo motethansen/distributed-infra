@@ -13,6 +13,7 @@
   dis-agent approve PLAN                          you approve exactly that plan
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
   dis-agent next [-p PROJ]                        what to do next: ranked suggestions, each with the exact command, effect and cost
+  dis-agent dismiss -p PROJ -s SPR                stop `next` offering a sprint proposal you will not pursue (files are kept)
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
@@ -235,8 +236,9 @@ def _po_round(a, request: str, previous: list[dict] | None = None, feedback: str
                                        previous=previous, feedback=feedback)
     d = ROOT / "data" / "scrum" / a.project / a.sprint
     f = d / "stories.json"
-    if previous is not None and f.exists():
-        (d / f"stories.v{len(list(d.glob('stories.v*.json'))) + 1}.json").write_text(f.read_text())      # keep the earlier round
+    if f.exists():                                                  # never lose an earlier round, revision or not
+        (d / f"stories.v{len(list(d.glob('stories.v*.json'))) + 1}.json").write_text(f.read_text())
+    (d / ".dismissed").unlink(missing_ok=True)
     p = sf.save(ROOT, a.project, a.sprint, "stories.json", {"project": a.project, "sprint": a.sprint, "request": request,
                 "proposed_by": done.get("agent"), "model": done.get("model"), "concerns": done.get("concerns", []), "stories": stories})
     print(f"Product Owner ({done.get('agent')} {done.get('model') or ''}) proposed {len(stories)} stories -> {p}")
@@ -489,12 +491,50 @@ def _local_plans() -> list[dict]:
     return out
 
 
+def _local_proposals() -> dict[str, dict]:
+    """Sprint proposals waiting for feedback or planning: stories.json whose stories are not all planned yet."""
+    out: dict[str, dict] = {}
+    for f in sorted((ROOT / "data" / "scrum").glob("*/*/stories.json")):
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if (f.parent / ".dismissed").exists():
+            continue
+        planned = {json.loads(p.read_text())["story"]["id"] for p in f.parent.glob("*.plan.json") if p.read_text().strip()}
+        todo = [x for x in d.get("stories", []) if x["id"] not in planned and not x.get("human_only")]
+        if todo:
+            out[d["project"]] = {"sprint": d["sprint"], "stories": len(d["stories"]), "points": sum(x.get("points") or 0 for x in d["stories"]),
+                                 "todo": [x["id"] for x in todo], "planned": len(planned)}
+    return out
+
+
+def cmd_dismiss(a) -> None:
+    """Stop `next` offering a sprint proposal you will not pursue (the files are kept; a new `po` round revives it)."""
+    sprint = resolve_sprint_dir(a.project, a.sprint)
+    d = ROOT / "data" / "scrum" / a.project / sprint
+    if not (d / "stories.json").exists():
+        sys.exit(f"no proposal at {d}")
+    (d / ".dismissed").write_text(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    print(f"dismissed the {a.project} sprint {sprint} proposal; its files are kept in {d}")
+
+
+def resolve_sprint_dir(project: str, s: str) -> str:
+    base = ROOT / "data" / "scrum" / project
+    if (base / s).is_dir():
+        return s
+    for label, n in _sprint_maps(project).items():
+        if str(n) == s.lstrip("0") and (base / label).is_dir():
+            return label
+    sys.exit(f"no sprint {s!r} for {project} under {base}")
+
+
 def cmd_next(a) -> None:
     from shared import scrum_next
     groomed = {}
     for g in sorted((ROOT / "data" / "scrum").glob("*/grooming/groom-*.json")):
         groomed[g.parent.parent.name] = g.stem.removeprefix("groom-")
-    sugs = scrum_next.suggest(_board(), _local_plans(), groomed, a.project, a.limit)
+    sugs = scrum_next.suggest(_board(), _local_plans(), groomed, a.project, a.limit, proposals=_local_proposals())
     if a.json:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
@@ -716,6 +756,8 @@ def main() -> None:
     vl.add_argument("-p", "--project", required=True); vl.add_argument("-s", "--sprint", required=True)
     vl.add_argument("--story", required=True, help="the plan's story id (S-1) or its backlog id (DI-056)")
     vl.add_argument("--branch", help="for a story already merged: test this branch (usually main); new tests go on a separate PR branch")
+    ds = sub.add_parser("dismiss"); ds.set_defaults(fn=cmd_dismiss)
+    ds.add_argument("-p", "--project", required=True); ds.add_argument("-s", "--sprint", required=True)
     nx = sub.add_parser("next"); nx.set_defaults(fn=cmd_next); nx.add_argument("-p", "--project")
     nx.add_argument("--limit", type=int, default=6); nx.add_argument("--json", action="store_true")
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)

@@ -128,3 +128,15 @@ def test_review_items_carry_sprint_prs_and_the_right_confirming_command():
     assert items["P-3"]["fleet"] is True and items["P-3"]["command"] == "/close p 5 P-3"                    # a fleet plan means /close, not accept
     assert items["Q-1"]["prs"] == [] and "--evidence" in items["Q-1"]["command"]                           # no repo configured: no guessed link
     assert [i["id"] for i in sn.review_items(b, [], cfg, project="p")] == ["P-1", "P-2", "P-3"]
+
+
+def test_a_waiting_proposal_is_first_and_replaces_the_start_a_sprint_or_groom_suggestions():
+    open_ = [st("D-1", "planned")]
+    props = {"a": {"sprint": "1", "stories": 8, "points": 16, "todo": ["S-1", "S-3"], "planned": 0}}
+    s = sn.suggest(board([proj("a", open_), proj("b", open_)]), [], {"a": "2026-10-31"}, proposals=props)
+    assert s[0]["priority"] == 1 and "A sprint proposal for a is waiting for you: sprint 1, 8 stories, 16 points, 2 not planned yet (S-1, S-3)" == s[0]["title"]
+    assert '--revise "<your feedback>"' in s[0]["command"] and "plan -p a -s 1 --story <ID>" in s[0]["command"]
+    assert not any(x["command"] == "/sprint a" or x["command"] == "/groom a" for x in s)                  # no second sprint for the same project
+    assert any(x["command"] == "/groom b" for x in s)                                                    # other projects are unaffected
+    only_b = sn.suggest(board([proj("a", open_), proj("b", open_)]), [], {}, project="b", proposals=props)
+    assert not any("proposal" in x["title"] for x in only_b)                                             # -p filters proposals too
