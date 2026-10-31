@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -466,3 +467,71 @@ def sprint_review(tasks: list[dict], project: str, sprint: str, board_sprint: di
     L += ["## Pull requests to review", ""] + ([f"- {u}" for u in prs] or ["- none opened by the fleet this sprint"]) + [""]
     L += ["## Needs your attention", ""] + ([f"- {x['id']} ({x['role']}): {x['notes']}" for x in data["needs_attention"]] or ["- nothing stuck"]) + [""]
     return data, "\n".join(L)
+
+
+# ── backlog sync: open / in progress / in review automatically, closed only on confirmation ─────────
+
+def _git(repo: Path, *args: str, run=subprocess.run) -> subprocess.CompletedProcess:
+    return run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60)
+
+
+def edit_backlog(repo: Path, project: str, fn, message: str, run=subprocess.run) -> dict:
+    """Apply fn(text) -> (new_text, result) to <repo>/<project>/product-backlog.md, commit that one file,
+    and try to push. A failed push is reported, not fatal: the commit is kept for the next push."""
+    from shared import backlog_edit
+    path = repo / project / "product-backlog.md"
+    if not path.exists():
+        raise PlanError(f"{path} not found; set VIZNEO_REPO to the vizneoprojects checkout")
+    if _git(repo, "status", "--porcelain", "--", str(path.relative_to(repo)), run=run).stdout.strip():
+        raise PlanError(f"{path.name} has uncommitted changes (you may be editing it); commit or stash them first")
+    try:
+        new, result = fn(path.read_text(encoding="utf-8"))
+    except backlog_edit.BacklogError as e:
+        raise PlanError(str(e)) from e
+    path.write_text(new, encoding="utf-8")
+    rel = str(path.relative_to(repo))
+    _git(repo, "add", rel, run=run)
+    c = _git(repo, "commit", "-q", "-m", message, "--", rel, run=run)
+    if c.returncode != 0:
+        raise PlanError("git commit failed: " + (c.stderr or c.stdout).strip()[:200])
+    pushed = _git(repo, "push", "-q", "origin", "HEAD", run=run)
+    return {"result": result, "committed": True, "pushed": pushed.returncode == 0,
+            "push_error": None if pushed.returncode == 0 else (pushed.stderr or "").strip().splitlines()[-1:] or ["push failed"]}
+
+
+def register_story(repo: Path, project: str, story: dict, who: str, day: str, plan_name: str, run=subprocess.run) -> dict:
+    from shared import backlog_edit
+    ev = f"proposed by the Product Owner, approved by {who} {day}; plan {plan_name}"
+    r = edit_backlog(repo, project, lambda t: backlog_edit.add_story(t, story["title"], evidence=ev),
+                     f"{project}: story registered as planned (dis-agent, approved by {who})", run=run)
+    r["id"] = r["result"]
+    return r
+
+
+def mark_story(repo: Path, project: str, bid: str, status: str, evidence: str | None, run=subprocess.run) -> dict:
+    from shared import backlog_edit
+    return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, status, evidence), None),
+                        f"{project}: {bid} {status} (dis-agent)", run=run)
+
+
+def close_story(repo: Path, project: str, bid: str, who: str, day: str, evidence: str, run=subprocess.run) -> dict:
+    """Close a story. Only call this after the human confirmed at a sprint review."""
+    from shared import backlog_edit
+    if not backlog_edit.status_of((repo / project / "product-backlog.md").read_text(encoding="utf-8"), bid).startswith("🔍"):
+        raise PlanError(f"{bid} is not in review; only a story whose work is finished and under review can be closed")
+    return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, f"✅ done {day}", f"{evidence}; closed after sprint review, confirmed by {who}", closing=True), None),
+                        f"{project}: {bid} closed after sprint review, confirmed by {who}", run=run)
+
+
+def story_evidence(tasks: list[dict], project: str, sprint: str, story_id: str) -> dict:
+    mine = [t for t in tasks if (t.get("payload") or {}).get("project") == project
+            and str((t.get("payload") or {}).get("sprint")) == sprint and (t.get("payload") or {}).get("story") == story_id
+            and (t.get("payload") or {}).get("role") not in ("product_owner", "scrum_master")]
+    prs = sorted({m for t in mine for m in _PR.findall(json.dumps(t.get("result") or {}))})
+    review = next((t for t in sorted(mine, key=lambda t: t.get("created_at") or "", reverse=True)
+                   if (t.get("payload") or {}).get("role") == "reviewer" and t.get("status") == "done"), None)
+    agents = sorted({t.get("agent") for t in mine if t.get("agent")})
+    return {"tasks": len(mine), "done": sum(1 for t in mine if t.get("status") == "done"),
+            "stuck": [t["id"][:8] for t in mine if t.get("status") in ("failed", "needs_human")],
+            "agents": agents, "pull_requests": prs, "reviewed": review is not None,
+            "review_excerpt": answer(review)[:700] if review else ""}

@@ -355,9 +355,15 @@ _SCRUM_CACHE: dict = {"ts": 0.0, "data": None}
 _SCRUM_TTL = 30
 
 
-# Per vizneoprojects/README.md: these three backlogs list OPEN work only (shipped work is prose),
-# so closed/total says nothing about completion. Reported, but flagged.
-_OPEN_ONLY_BACKLOGS = {"vantage", "motethansen"}
+# A backlog that lists OPEN work only says nothing about completion from closed/total. None are left
+# (distributed-infra, vantage and motethansen now carry dated closed items); add a project here if one
+# is ever created that way. Reported, but flagged.
+_OPEN_ONLY_BACKLOGS: set[str] = set()
+
+# The board must not go stale because nobody pulled the notes repo: fast-forward it at most every
+# _PULL_EVERY seconds (SCRUM_REPO_PULL=0 turns it off). A failed pull is shown, never fatal.
+_PULL: dict = {"ts": 0.0, "ok": None, "error": None, "at": None}
+_PULL_EVERY = 120
 
 
 def _canon_machines(rows: list[dict]) -> list[dict]:
@@ -382,12 +388,29 @@ def _repo_head(repo: str) -> dict:
         return {}
 
 
+async def _pull_scrum_repo() -> None:
+    if os.getenv("SCRUM_REPO_PULL", "1") == "0" or time.time() - _PULL["ts"] < _PULL_EVERY:
+        return
+    _PULL["ts"] = time.time()
+    before = _repo_head(SCRUM_REPO).get("commit")
+    try:
+        r = await asyncio.to_thread(subprocess.run, ["git", "-C", os.path.expanduser(SCRUM_REPO), "pull", "--ff-only", "-q"],
+                                    capture_output=True, text=True, timeout=30)
+        ok, err = r.returncode == 0, None if r.returncode == 0 else ((r.stderr or "").strip().splitlines() or ["pull failed"])[-1][:160]
+    except (subprocess.SubprocessError, OSError) as exc:
+        ok, err = False, f"{type(exc).__name__}"
+    _PULL.update(ok=ok, error=err, at=datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    if _repo_head(SCRUM_REPO).get("commit") != before:
+        _SCRUM_CACHE["ts"] = 0.0
+
+
 @app.get("/scrum/sprints")
 async def scrum_sprints(x_secret_key: str = Header(default="")):
     """Per project: backlog completion; per sprint: stories, points, burndown; joined with the
     fleet's recorded work (tasks tagged with a `story`): which agents and machines did it, tokens.
     Reads the vizneoprojects checkout on THIS machine (SCRUM_REPO); `repo` shows how fresh it is."""
     _check_auth(x_secret_key)
+    await _pull_scrum_repo()
     now = time.time()
     if now - _SCRUM_CACHE["ts"] > _SCRUM_TTL or _SCRUM_CACHE["data"] is None:
         try:
@@ -417,7 +440,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
     recent = await db.list_tasks(limit=25)
     return {
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO)},
+        "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO),
+                 "pull": {k: _PULL[k] for k in ("at", "ok", "error")}},
         "projects": projects,
         "fleet": {"totals": (tracking.summarise(rows, "all") or [{}])[0],
                   "by_agent": tracking.summarise(rows, "agent"), "by_machine": tracking.summarise(rows, "machine"),
