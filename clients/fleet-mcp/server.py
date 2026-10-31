@@ -113,6 +113,9 @@ class Fleet:
     async def machines(self) -> list:
         return await self._call("GET", "/machines")
 
+    async def scrum(self) -> dict:
+        return await self._call("GET", "/scrum/sprints")
+
 
 # ── conversation store (local) ────────────────────────────────────────────────
 class State:
@@ -297,6 +300,25 @@ class Tools:
                                  for m in rows]}
         return await self._guard(go())
 
+    async def scrum(self, project: str | None = None) -> dict:
+        """The scrum-of-scrums digest, or one project's progress and in-flight stories."""
+        async def go():
+            b = await self.fleet.scrum()
+            g = b.get("digest")
+            if not g:
+                return {"error": "this orchestrator is too old to build the scrum digest"}
+            if project:
+                p = next((x for x in b.get("projects", []) if x.get("project") == project), None)
+                if not p:
+                    return {"error": f"unknown project {project!r}", "projects": [x.get("project") for x in b.get("projects", [])]}
+                return {"project": project, "closed": p.get("closed"), "stories": p.get("stories"), "counts": p.get("counts"),
+                        "in_flight": [{k: i[k] for k in ("id", "status", "title", "evidence")} for i in p.get("active_items", [])],
+                        "review_queue": [r for r in g["review_queue"] if r["project"] == project],
+                        "decisions": [d for d in g["decisions"] if d["project"] == project]}
+            return {"as_of": g["as_of"], "review_queue": g["review_queue"], "decisions": g["decisions"], "adjustments": g["adjustments"],
+                    "projects": g["projects"], "opus": g.get("opus")}
+        return await self._guard(go())
+
     def end_conversation(self, conversation: str) -> dict:
         data = self.state.load()
         had = data["conversations"].pop(conversation, None)
@@ -346,6 +368,13 @@ def build_server():
         """
         return await tools.ask(prompt, agent, task_kind, sensitivity, machine, cwd, conversation,
                                wait_seconds, timeout, failover, role, project, sprint, story)
+
+    @mcp.tool()
+    async def fleet_scrum(project: str | None = None) -> dict:
+        """Scrum of scrums across every project: stories ready for the human's review, decisions needed, stalled work,
+        suggested adjustments and per-project progress. Pass project to see one project's in-flight stories.
+        To engage the Scrum Master use fleet_ask(role="scrum_master", project=...)."""
+        return await tools.scrum(project)
 
     @mcp.tool()
     async def fleet_result(task_id: str, wait_seconds: float = 60) -> dict:

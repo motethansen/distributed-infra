@@ -8,7 +8,7 @@ from agents import roles
 from shared.models import TaskType
 
 IDS = ["auto", "claude", "codex", "agy", "deepseek"]
-ROLE_NAMES = ["product_owner", "scrum_master", "analyst", "dev_frontend", "dev_backend", "integrator", "reviewer"]
+ROLE_NAMES = ["product_owner", "scrum_master", "analyst", "dev_frontend", "dev_backend", "integrator", "tester", "reviewer"]
 
 
 @pytest.fixture
