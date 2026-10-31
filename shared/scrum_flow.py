@@ -606,21 +606,25 @@ def _git(repo: Path, *args: str, run=subprocess.run) -> subprocess.CompletedProc
     return run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60)
 
 
-def edit_backlog(repo: Path, project: str, fn, message: str, run=subprocess.run) -> dict:
-    """Apply fn(text) -> (new_text, result) to <repo>/<project>/product-backlog.md, commit that one file,
-    and try to push. A failed push is reported, not fatal: the commit is kept for the next push."""
-    from shared import backlog_edit
-    path = repo / project / "product-backlog.md"
-    if not path.exists():
+def edit_file(repo: Path, rel: str, fn, message: str, run=subprocess.run, create: bool = False) -> dict:
+    """Apply fn(text) -> (new_text, result) to <repo>/<rel>, commit that one file and try to push. A failed push is
+    reported, not fatal: the commit is kept for the next push. Refuses to run over uncommitted changes (a human may be editing)."""
+    from shared import backlog_edit, sprint_edit
+    path = repo / rel
+    if path.exists():
+        if _git(repo, "status", "--porcelain", "--", rel, run=run).stdout.strip():
+            raise PlanError(f"{path.name} has uncommitted changes (you may be editing it); commit or stash them first")
+        text = path.read_text(encoding="utf-8")
+    elif create:
+        text = ""
+    else:
         raise PlanError(f"{path} not found; set VIZNEO_REPO to the vizneoprojects checkout")
-    if _git(repo, "status", "--porcelain", "--", str(path.relative_to(repo)), run=run).stdout.strip():
-        raise PlanError(f"{path.name} has uncommitted changes (you may be editing it); commit or stash them first")
     try:
-        new, result = fn(path.read_text(encoding="utf-8"))
-    except backlog_edit.BacklogError as e:
+        new, result = fn(text)
+    except (backlog_edit.BacklogError, sprint_edit.SprintError) as e:
         raise PlanError(str(e)) from e
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(new, encoding="utf-8")
-    rel = str(path.relative_to(repo))
     _git(repo, "add", rel, run=run)
     c = _git(repo, "commit", "-q", "-m", message, "--", rel, run=run)
     if c.returncode != 0:
@@ -628,6 +632,10 @@ def edit_backlog(repo: Path, project: str, fn, message: str, run=subprocess.run)
     pushed = _git(repo, "push", "-q", "origin", "HEAD", run=run)
     return {"result": result, "committed": True, "pushed": pushed.returncode == 0,
             "push_error": None if pushed.returncode == 0 else (pushed.stderr or "").strip().splitlines()[-1:] or ["push failed"]}
+
+
+def edit_backlog(repo: Path, project: str, fn, message: str, run=subprocess.run) -> dict:
+    return edit_file(repo, f"{project}/product-backlog.md", fn, message, run=run)
 
 
 def register_story(repo: Path, project: str, story: dict, who: str, day: str, plan_name: str, run=subprocess.run) -> dict:
@@ -679,3 +687,35 @@ def cancel_story(repo: Path, project: str, bid: str, who: str, day: str, reason:
         raise PlanError("a cancellation needs a reason")
     return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, f"❌ cancelled {day}", f"cancelled by {who}: {reason.strip()}", closing=True), None),
                         f"{project}: {bid} cancelled by {who}", run=run)
+
+
+# ── the sprint file the fleet maintains ──────────────────────────────────────
+
+def sprint_open_story(repo: Path, project: str, number: int, story: dict, bid: str, request: str, day: str, run=subprocess.run) -> dict:
+    """Add the approved story to sprint-NN.md (creating the file if this is the sprint's first story)."""
+    from shared import sprint_edit as se
+
+    def fn(text: str):
+        text = text or se.new_sprint(project, number, request, day)
+        text = se.add_story(text, bid, story["title"], float(story.get("points") or 0))
+        return se.record_burndown(text, day), None
+    return edit_file(repo, se.sprint_file(project, number), fn, f"{project}: sprint {number:02d} — {bid} planned (dis-agent)", run=run, create=True)
+
+
+def sprint_mark(repo: Path, project: str, number: int, bid: str, status: str, day: str, closing: bool = False, run=subprocess.run) -> dict:
+    from shared import sprint_edit as se
+
+    def fn(text: str):
+        return se.record_burndown(se.set_story_status(text, bid, status, day, closing=closing), day), None
+    return edit_file(repo, se.sprint_file(project, number), fn, f"{project}: sprint {number:02d} — {bid} {status} (dis-agent)", run=run)
+
+
+def find_sprint_of(repo: Path, project: str, bid: str) -> int | None:
+    """The number of the dis-agent sprint file holding this story, if any."""
+    from shared import sprint_edit as se
+    for f in sorted((repo / project).glob("sprint-*.md")):
+        t = f.read_text(encoding="utf-8")
+        if se.owner_of(t) == se.OWNER and re.search(rf"\b{re.escape(bid)}\b", t):
+            m = re.match(r"sprint-0*(\d+)\.md$", f.name)
+            return int(m.group(1)) if m else None
+    return None
