@@ -810,3 +810,21 @@ def test_the_proposal_printout_shows_agent_work_stretch_capacity_and_human_steps
     out = capsys.readouterr().out
     assert "AGENT WORK 8 pts (3 stories): committed 6, stretch 2 (S-4) · capacity ~4" in out and "exceeds capacity by 2 pts" in out
     assert "HUMAN STEPS 1 pts (1: S-2)" in out and "! concern: watch out" in out
+
+
+def test_proposal_shows_stories_concerns_capacity_and_revision_history_without_any_model_call(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    d = _vproposal(tmp_path, monkeypatch, revisions=[{"feedback": "add the DO scan", "at": "2026-10-31T08:34:18+00:00"}])
+    (d / "stories.v1.json").write_text("{}")
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"sprint_capacity_points": 15})
+    da.cmd_proposal(argparse.Namespace(project="demo", sprint="1"))
+    out = capsys.readouterr().out
+    assert "1 revision(s), 1 earlier round(s) kept" in out and "revision 1 (2026-10-31 08:34 UTC): add the DO scan" in out
+    assert "S-1" in out and "! concern: cut S-3 first" in out and "AGENT WORK 5 pts (2 stories): committed 3, stretch 2 (S-3)" in out
+    assert "dis-agent steps -p demo -s 1" in out
+    with pytest.raises(SystemExit, match="no sprint"):
+        da.cmd_proposal(argparse.Namespace(project="demo", sprint="9"))
+    (d / "stories.json").unlink()
+    with pytest.raises(SystemExit, match="no proposal"):
+        da.cmd_proposal(argparse.Namespace(project="demo", sprint="1"))

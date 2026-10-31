@@ -14,6 +14,7 @@
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
   dis-agent next [-p PROJ]                        what to do next: ranked suggestions, each with the exact command, effect and cost
   dis-agent dismiss -p PROJ -s SPR                stop `next` offering a sprint proposal you will not pursue (files are kept)
+  dis-agent proposal -p PROJ -s SPR               show the current sprint proposal (no model call): stories, concerns, capacity, revisions
   dis-agent steps -p PROJ -s SPR                  YOUR steps in a sprint proposal (human-only stories) with what each blocks
   dis-agent done -p PROJ -s SPR --story S-2 --evidence "..."   mark one of your steps done
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
@@ -618,6 +619,23 @@ def cmd_done(a) -> None:
     print(f"{a.story} marked done." + (f" Now unblocked (this step was one of their dependencies): {', '.join(unblocked)}" if unblocked else ""))
 
 
+def cmd_proposal(a) -> None:
+    """Show the current sprint proposal with no model call: stories, concerns, capacity, revisions and earlier rounds."""
+    sprint = resolve_sprint_dir(a.project, a.sprint)
+    d = ROOT / "data" / "scrum" / a.project / sprint
+    f = d / "stories.json"
+    if not f.exists():
+        sys.exit(f"no proposal at {d}")
+    doc = json.loads(f.read_text())
+    revs = doc.get("revisions", [])
+    print(f"{a.project} sprint {sprint}: proposed by {doc.get('proposed_by')} {doc.get('model') or ''}; {len(revs)} revision(s), "
+          f"{len(list(d.glob('stories.v*.json')))} earlier round(s) kept\nRequest: {str(doc.get('request'))[:240]}\n")
+    for i, r in enumerate(revs, 1):
+        print(f"  revision {i} ({r['at'][:16].replace('T', ' ')} UTC): {r['feedback'][:200]}")
+    _show_stories(doc["stories"], doc.get("concerns", []))
+    print(f"\nContinue: dis-agent po -p {a.project} -s {sprint} --revise \"<feedback>\"  ·  dis-agent plan -p {a.project} -s {sprint} --story <ID>  ·  dis-agent steps -p {a.project} -s {sprint}")
+
+
 def cmd_dismiss(a) -> None:
     """Stop `next` offering a sprint proposal you will not pursue (the files are kept; a new `po` round revives it)."""
     sprint = resolve_sprint_dir(a.project, a.sprint)
@@ -868,6 +886,8 @@ def main() -> None:
     vl.add_argument("--branch", help="for a story already merged: test this branch (usually main); new tests go on a separate PR branch")
     ds = sub.add_parser("dismiss"); ds.set_defaults(fn=cmd_dismiss)
     ds.add_argument("-p", "--project", required=True); ds.add_argument("-s", "--sprint", required=True)
+    pv = sub.add_parser("proposal"); pv.set_defaults(fn=cmd_proposal)
+    pv.add_argument("-p", "--project", required=True); pv.add_argument("-s", "--sprint", required=True)
     stp = sub.add_parser("steps"); stp.set_defaults(fn=cmd_steps)
     stp.add_argument("-p", "--project", required=True); stp.add_argument("-s", "--sprint", required=True)
     dn = sub.add_parser("done"); dn.set_defaults(fn=cmd_done)
