@@ -5,11 +5,17 @@
   dis-agent ask "question"        one question, one answer
   dis-agent roles                 who holds which role + live usage
   dis-agent status                open sprints, remaining points, what the fleet is doing
-  dis-agent po   -p PROJ -s SPR "request"         Product Owner proposes stories (nothing queued)
+  dis-agent po   -p PROJ -s SPR "request"         Product Owner (Opus) proposes stories, aligned with the architecture and backlog
+  dis-agent po   -p PROJ -s SPR --revise "..."    ...revises them with your sprint-planning feedback
+  dis-agent planning -p PROJ -s SPR               interactive sprint planning: stories, your feedback, revise, until you accept
+  dis-agent groom -p PROJ                         Product Owner reviews the open backlog against the architecture (writes nothing)
   dis-agent plan -p PROJ -s SPR --story ID        Scrum Master plans roles, machines, order (nothing queued)
   dis-agent approve PLAN                          you approve exactly that plan
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
-  dis-agent review -p PROJ -s SPR                 sprint review: what ran, PRs to look at, what is stuck
+  dis-agent backlog -p PROJ                       the project's open work: in progress, in review, blocked, planned
+  dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
+  dis-agent review                                the review queue: everything waiting for your sprint review, on demand
+  dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
   dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
 
 A story is open (planned) once you approve its plan, in progress while `go` runs, in review when the work
@@ -24,6 +30,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +147,95 @@ def cmd_ask(a) -> None:
     print(_show(asyncio.run(_ask(_tools(), a.prompt, st))))
 
 
+def _show_stories(stories: list[dict], concerns: list[str]) -> None:
+    for s_ in stories:
+        print(f"  {s_['id']:<8} {s_.get('points', '?'):>3} pts  {s_['title']}" + ("  [human-only step]" if s_.get("human_only") else ""))
+        if s_.get("architecture_notes"):
+            print(f"           architecture: {str(s_['architecture_notes'])[:150]}")
+        for r_ in (s_.get("risks") or [])[:2]:
+            print(f"           risk: {str(r_)[:130]}")
+        if s_.get("briefs"):
+            print(f"           briefs for: {', '.join(s_['briefs'])}")
+    for c_ in concerns:
+        print(f"  ! concern: {c_}")
+
+
+def _po_round(a, request: str, previous: list[dict] | None = None, feedback: str = "") -> list[dict]:
+    ctx = Path(a.context_file).read_text() if getattr(a, "context_file", None) else ""
+    if not getattr(a, "no_context", False):
+        ctx = sf.load_context(viz_repo(), a.project) + ("\n\n" + ctx if ctx else "")
+    stories, done = sf.propose_stories(sc.client(), a.project, a.sprint, request, ctx, a.approved, a.as_agent,
+                                       previous=previous, feedback=feedback)
+    d = ROOT / "data" / "scrum" / a.project / a.sprint
+    f = d / "stories.json"
+    if previous is not None and f.exists():
+        (d / f"stories.v{len(list(d.glob('stories.v*.json'))) + 1}.json").write_text(f.read_text())      # keep the earlier round
+    p = sf.save(ROOT, a.project, a.sprint, "stories.json", {"project": a.project, "sprint": a.sprint, "request": request,
+                "proposed_by": done.get("agent"), "model": done.get("model"), "concerns": done.get("concerns", []), "stories": stories})
+    print(f"Product Owner ({done.get('agent')} {done.get('model') or ''}) proposed {len(stories)} stories -> {p}")
+    _show_stories(stories, done.get("concerns", []))
+    return stories
+
+
+def cmd_po(a) -> None:
+    f = ROOT / "data" / "scrum" / a.project / a.sprint / "stories.json"
+    if a.revise:
+        if not f.exists():
+            sys.exit(f"{f} not found; run `po` with a request first")
+        prev = json.loads(f.read_text())
+        _po_round(a, prev["request"], prev["stories"], a.revise)
+    else:
+        if not a.request:
+            sys.exit("give the request, or --revise 'feedback' to adjust the existing stories")
+        _po_round(a, a.request)
+    print(f"\nNothing is queued. Next: dis-agent plan -p {a.project} -s {a.sprint} --story <ID>")
+
+
+def cmd_planning(a) -> None:
+    if not sys.stdin.isatty():
+        sys.exit("planning is interactive: run it in a terminal (or use `po --revise` for one round)")
+    f = ROOT / "data" / "scrum" / a.project / a.sprint / "stories.json"
+    if f.exists():
+        prev = json.loads(f.read_text())
+        stories, request = prev["stories"], prev["request"]
+        print(f"Resuming the proposal in {f}\n")
+        _show_stories(stories, prev.get("concerns", []))
+    else:
+        request = input("What should this sprint deliver? ").strip()
+        if not request:
+            return
+        stories = _po_round(a, request)
+    rounds = 0
+    while True:
+        fb = input("\nFeedback for the Product Owner (Enter = accept, q = stop): ").strip()
+        if fb.lower() in ("", "q"):
+            break
+        rounds += 1
+        print("  (each round is one Product Owner call; Opus is capped, then falls back to Sonnet)")
+        stories = _po_round(a, request, stories, fb)
+    print(f"\n{'Accepted' if fb != 'q' else 'Stopped'} after {rounds} revision(s). For each story you want built:\n"
+          f"  dis-agent plan -p {a.project} -s {a.sprint} --story <ID>   then   dis-agent approve <plan>")
+
+
+def cmd_groom(a) -> None:
+    ctx = sf.load_context(viz_repo(), a.project)
+    rep, done = sf.groom_backlog(sc.client(), a.project, ctx, a.approved, a.as_agent)
+    day = datetime.now(timezone.utc).date().isoformat()
+    p = sf.save(ROOT, a.project, "grooming", f"groom-{day}.json", rep)
+    rev = rep["review"]
+    counts = {}
+    for r in rev:
+        counts[r.get("verdict", "?")] = counts.get(r.get("verdict", "?"), 0) + 1
+    print(f"Product Owner ({done.get('agent')} {done.get('model') or ''}) reviewed {len(rev)} open stories: "
+          + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())) + f"\n-> {p}\n{str(rep.get('summary') or '')[:500]}\n")
+    for r in rev:
+        if r.get("verdict") != "ok":
+            print(f"  {r.get('id'):<8} {r.get('verdict'):<11} " + "; ".join(str(i) for i in (r.get("issues") or [])[:2])[:170])
+    for m in rep.get("missing") or []:
+        print(f"  missing: {str(m.get('title'))[:90]} — {str(m.get('why'))[:80]}")
+    print("\nThis wrote only the report. Nothing in the backlog was changed.")
+
+
 def cmd_status(a) -> None:
     c = sc.client()
     board = c._call("GET", "/scrum/sprints")
@@ -217,13 +313,85 @@ def cmd_go(a) -> None:
         if bid:
             try:
                 _report(f"{bid} in review", sf.mark_story(viz_repo(), plan["project"], bid, "🔍 in review",
-                        "work finished; PRs " + (", ".join(ev["pull_requests"]) or "none found") + "; awaiting sprint review"))
+                        "work finished; PRs " + (", ".join(ev["pull_requests"]) or "none found")
+                        + "; validation: " + sf.validation_summary(ev.get("validation")) + "; awaiting sprint review"))
             except sf.PlanError as e:
                 print(f"  backlog NOT updated: {e}")
         print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
+def cmd_backlog(a) -> None:
+    from shared import backlog_edit as be
+    f = viz_repo() / a.project / "product-backlog.md"
+    if not f.exists():
+        sys.exit(f"{f} not found; set VIZNEO_REPO")
+    lines = f.read_text(encoding="utf-8").split("\n")
+    order = {"🏃": 0, "🔍": 1, "🚧": 2, "🔵": 3}
+    rows = []
+    for _hi, first, end, header, _h in be._tables(lines):
+        sc_ = be._col(header, "status")
+        if sc_ is None:
+            continue
+        for n in range(first, end):
+            cells = be._split(lines[n])
+            if len(cells) > sc_ and not be.is_closed_text(cells[sc_]):
+                rows.append((order.get(next((e for e in order if e in cells[sc_]), ""), 4), cells[0], re.sub(r"[*_`]", "", cells[1])[:92], cells[sc_]))
+    rows.sort()
+    print(f"{a.project}: {len(rows)} open stories\n")
+    for _o, i, t, st in rows[: a.limit]:
+        print(f"  {i:<8} {st:<14} {t}")
+    if len(rows) > a.limit:
+        print(f"  ... {len(rows) - a.limit} more (use --limit)")
+
+
+def _board() -> dict:
+    b = sc.client()._call("GET", "/scrum/sprints")
+    if "digest" not in b:
+        sys.exit("this orchestrator is too old to build the scrum digest: deploy the latest distributed-infra to it")
+    return b
+
+
+def cmd_scrum(a) -> None:
+    from shared import scrum_digest
+    b = _board()
+    t = b["fleet"]["totals"]
+    fleet = (f"Fleet: {t.get('tasks')} tasks, {t.get('done')} done; tokens out {t.get('tokens_out'):,}."
+             + (f" Opus this month ${b['digest']['opus']['spent']:.2f} of ${b['digest']['opus']['cap']:.0f}." if b["digest"].get("opus") else ""))
+    md = scrum_digest.to_markdown(b["digest"], fleet)
+    if a.narrate:
+        t_ = sc.client().queue(sf.tags("scrum-of-scrums", b["digest"]["as_of"], None, "scrum_master", False, a.as_agent, None,
+                                       prompt="You are the Scrum Master running the scrum of scrums for the human product owner. From this digest write a "
+                                              "tight briefing (at most 12 lines): the 3 things that most need his attention, the risks you see, and the "
+                                              "adjustments you recommend, each with the reason. Do not invent facts that are not in the digest.\n\n" + md,
+                                       timeout=600), "scrum of scrums")
+        done = sc.client().wait([t_["id"]])[t_["id"]]
+        md += "\n## Scrum Master's briefing\n\n" + (sf.answer(done) if done["status"] == "done" else f"(the briefing task ended {done['status']})") + "\n"
+    d = ROOT / "data" / "scrum" / "_all"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{b['digest']['as_of']}.md").write_text(md)
+    print(md)
+    print(f"(saved {d / (b['digest']['as_of'] + '.md')})\nReview what is waiting:  dis-agent review")
+
+
+def cmd_review_queue(a) -> None:
+    q = _board()["digest"]["review_queue"]
+    if not q:
+        print("Nothing is waiting for your review.")
+        return
+    print(f"{len(q)} stories wait for your sprint review:\n")
+    for r in q:
+        print(f"  {r['project']:<18} {r['id']:<8} {r['title'][:80]}")
+        if r["evidence"]:
+            print(f"  {'':<18} {'':<8} {r['evidence'][:200]}")
+    print("\nFor a story the fleet built (it has a plan): dis-agent close -p <project> -s <sprint>   (shows validation + review, asks you)\n"
+          "For a sprint's overall outcome:              dis-agent review -p <project> -s <sprint>")
+
+
 def cmd_review(a) -> None:
+    if not a.project:
+        return cmd_review_queue(a)
+    if not a.sprint:
+        sys.exit("give -s SPRINT as well, or run `dis-agent review` alone for the queue")
     c = sc.client()
     rows = c._call("GET", "/tasks", params={"limit": 500})
     board = c._call("GET", "/scrum/sprints")
@@ -256,9 +424,14 @@ def cmd_close(a) -> None:
         print(f"\n{bid} ({sid}) {pl['story']['title']}\n  tasks {ev['done']}/{ev['tasks']} done, agents {', '.join(ev['agents']) or '-'}, "
               f"reviewed: {'yes' if ev['reviewed'] else 'NO'}\n  PRs: {', '.join(ev['pull_requests']) or 'none found'}"
               + (f"\n  stuck: {', '.join(ev['stuck'])}" if ev["stuck"] else ""))
+        v = ev.get("validation")
+        print("  validation: " + sf.validation_summary(v))
+        for c in (v or {}).get("criteria", []):
+            print(f"    {c['n']}. {c['status']:<10} {c['evidence'][:110]}")
         if ev["review_excerpt"]:
             print("  review says: " + ev["review_excerpt"].replace("\n", " ")[:400])
-        problems = [m for m, bad in (("not every task is done", ev["done"] < ev["tasks"] or ev["tasks"] == 0), ("no review ran", not ev["reviewed"])) if bad]
+        problems = [m for m, bad in (("not every task is done", ev["done"] < ev["tasks"] or ev["tasks"] == 0), ("no review ran", not ev["reviewed"]),
+                                     ("validation did not pass: " + sf.validation_summary(v), not (v and v.get("passed") is True))) if bad]
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
             continue
@@ -292,9 +465,15 @@ def main() -> None:
     sub.add_parser("status").set_defaults(fn=cmd_status)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--as", dest="as_agent"); common.add_argument("--approved", action="store_true")
-    po = sub.add_parser("po", parents=[common]); po.set_defaults(fn=sc.cmd_po)
+    po = sub.add_parser("po", parents=[common]); po.set_defaults(fn=cmd_po)
     po.add_argument("-p", "--project", required=True); po.add_argument("-s", "--sprint", required=True)
-    po.add_argument("--context-file"); po.add_argument("request")
+    po.add_argument("--context-file"); po.add_argument("--no-context", action="store_true", help="skip the architecture + backlog context")
+    po.add_argument("--revise", metavar="FEEDBACK", help="adjust the existing stories with your planning feedback")
+    po.add_argument("request", nargs="?")
+    pn = sub.add_parser("planning", parents=[common]); pn.set_defaults(fn=cmd_planning)
+    pn.add_argument("-p", "--project", required=True); pn.add_argument("-s", "--sprint", required=True)
+    pn.add_argument("--context-file"); pn.add_argument("--no-context", action="store_true")
+    gm = sub.add_parser("groom", parents=[common]); gm.set_defaults(fn=cmd_groom); gm.add_argument("-p", "--project", required=True)
     pl = sub.add_parser("plan", parents=[common]); pl.set_defaults(fn=cmd_plan)
     pl.add_argument("-p", "--project", required=True); pl.add_argument("-s", "--sprint", required=True); pl.add_argument("--story", required=True)
     ap_ = sub.add_parser("approve"); ap_.set_defaults(fn=cmd_approve); ap_.add_argument("plan")
@@ -303,8 +482,12 @@ def main() -> None:
     cl.add_argument("-p", "--project", required=True); cl.add_argument("-s", "--sprint", required=True)
     cl.add_argument("--story", action="append"); cl.add_argument("--yes", action="store_true", help="you have read the review and confirm")
     cl.add_argument("--force", action="store_true")
+    bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
+    bk.add_argument("-p", "--project", required=True); bk.add_argument("--limit", type=int, default=40)
+    sm = sub.add_parser("scrum"); sm.set_defaults(fn=cmd_scrum); sm.add_argument("--narrate", action="store_true", help="have the Scrum Master (Sonnet) write the briefing")
+    sm.add_argument("--as", dest="as_agent")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
-    rv.add_argument("-p", "--project", required=True); rv.add_argument("-s", "--sprint", required=True)
+    rv.add_argument("-p", "--project"); rv.add_argument("-s", "--sprint")
     a = ap.parse_args()
     if not a.cmd:
         a = ap.parse_args(["chat"])

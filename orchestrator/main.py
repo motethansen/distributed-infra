@@ -18,7 +18,7 @@ from fastapi.responses import Response
 
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
-from shared import scrum, tracking
+from shared import scrum, scrum_digest, tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -449,7 +449,15 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
         projects.append({**p, "sprints": sprints, "backlog_open_work_only": p["project"] in _OPEN_ONLY_BACKLOGS,
                          "complete_pct": None if p["project"] in _OPEN_ONLY_BACKLOGS else p["complete_pct"]})
     recent = await db.list_tasks(limit=25)
+    opus = None
+    try:
+        cap = (scrum_roles.load_policy().get("roles") or {}).get("product_owner", {}).get("monthly_cost_cap_usd")
+        if cap:
+            opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap)}
+    except Exception:                                    # the digest is advice; it must never break the board
+        opus = None
     return {
+        "digest": scrum_digest.build(projects, opus=opus),
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO),
                  "pull": {k: _PULL[k] for k in ("at", "ok", "error")}},

@@ -86,7 +86,7 @@ class Queue:
             bad = p.get("flow_key") in self.fail_keys
             self.tasks[tid] = {"id": tid, "payload": p, "status": "needs_human" if bad else "done", "agent": agent,
                                "notes": "boom" if bad else None,
-                               "result": {"ok": not bad, "agent": agent, "response": f"output of {p.get('flow_key') or p['role']}"}}
+                               "result": {"ok": not bad, "agent": agent, "response": self.reply(p)}}
             self.order.append(tid)
             self.events.append(("POST", p.get("flow_key") or p["role"]))
             return httpx.Response(201, json={"id": tid})
@@ -95,6 +95,12 @@ class Queue:
             self.events.append(("GET", t["payload"].get("flow_key") or t["payload"]["role"]))
             return httpx.Response(200, json=t)
         return httpx.Response(404)
+
+    def reply(self, p):
+        if p.get("role") == "tester":
+            n = p["prompt"].count("\n1. ") and 1
+            return 'ran it.\n{"validation":{"suite":"3 passed, 0 failed","criteria":[{"n":1,"status":"pass","evidence":"test_x"}]}}'
+        return f"output of {p.get('flow_key') or p['role']}"
 
     def client(self, urls=("http://a:1",)):
         return sf.FleetClient(list(urls), "k", transport=httpx.MockTransport(self.handler))
@@ -142,7 +148,7 @@ def test_dependency_results_are_handed_to_the_next_task_and_waves_run_in_order()
 def test_reviewer_is_pinned_off_codex_when_codex_was_the_author_and_a_same_family_review_is_flagged():
     q = Queue(agent_for=lambda p: "codex")
     out, log = _run(q, [_t("ui", "dev_frontend")])
-    assert q.payloads()[1].get("agent") == "claude"
+    assert q.payloads()[-1].get("agent") == "claude"
     q2 = Queue(agent_for=lambda p: "claude")                  # reviewer fell back to the author's family
     out2, log2 = _run(q2, [_t("ui", "dev_frontend")])
     assert out2[-1]["same_family"] is True and any("SAME model family" in l for l in log2)
@@ -218,7 +224,7 @@ def test_wait_times_out_instead_of_hanging():
 def test_dev_backend_that_fell_back_to_claude_wrote_its_own_files_so_no_integrator():
     q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
     _run(q, [_t("api", "dev_backend")])
-    assert [p["role"] for p in q.payloads()] == ["dev_backend", "reviewer"]
+    assert [p["role"] for p in q.payloads()] == ["dev_backend", "tester", "reviewer"]
 
 
 # ── machines, repo preamble, approval, review ────────────────────────────────
@@ -335,7 +341,7 @@ def test_the_story_review_is_pinned_to_claude_when_codex_wrote_any_of_it_and_fla
 def test_a_claude_dev_task_needs_no_integrator_and_an_analyst_only_story_is_not_reviewed():
     q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
     _run(q, [_t("ui", "dev_frontend")])
-    assert [p["role"] for p in q.payloads()] == ["dev_frontend", "reviewer"]
+    assert [p["role"] for p in q.payloads()] == ["dev_frontend", "tester", "reviewer"]
     q2 = Queue(agent_for=lambda p: "agy")
     _run(q2, [_t("doc", "analyst")])
     assert [p["role"] for p in q2.payloads()] == ["analyst"]
@@ -429,3 +435,113 @@ def test_story_evidence_is_scoped_to_the_story_and_ignores_planning_tasks():
     assert ev["tasks"] == 4 and ev["done"] == 3 and ev["stuck"] == ["00000006"] and ev["pull_requests"] == ["https://github.com/o/r/pull/5"]
     assert ev["reviewed"] is True and ev["review_excerpt"] == "LGTM, one nit"
     assert sf.story_evidence(rows, "p", "S", "S-9")["reviewed"] is False
+
+
+# ── independent validation ───────────────────────────────────────────────────
+
+def _val(*statuses, suite="9 passed, 0 failed"):
+    crit = [{"n": i, "status": s, "evidence": f"e{i}"} for i, s in enumerate(statuses, 1)]
+    return "Done.\n" + json.dumps({"validation": {"suite": suite, "criteria": crit}})
+
+
+def test_validation_passes_only_when_every_criterion_passes_and_none_are_missing():
+    ok = sf.parse_validation(_val("pass", "pass"), 2)
+    assert ok["passed"] is True and ok["counts"] == {"pass": 2, "fail": 0, "unverified": 0} and ok["suite"] == "9 passed, 0 failed"
+    assert sf.parse_validation(_val("pass", "fail"), 2)["passed"] is False
+    assert sf.parse_validation(_val("pass", "unverified"), 2)["passed"] is False              # unverified needs a human
+    short = sf.parse_validation(_val("pass"), 3)                                              # the tester skipped criteria
+    assert short["passed"] is False and short["complete"] is False
+    assert sf.parse_validation(_val("pass", "bogus"), 2)["criteria"][1]["status"] == "unverified"
+
+
+def test_the_model_cannot_declare_its_own_pass_and_garbage_is_not_a_verdict():
+    lie = 'x {"validation":{"passed":true,"criteria":[{"n":1,"status":"fail","evidence":"boom"}]}}'
+    assert sf.parse_validation(lie, 1)["passed"] is False
+    for bad in ("", "no json", '{"validation": "ok"}', '{"validation":{"criteria":[]}}'):
+        v = sf.parse_validation(bad, 1)
+        assert v["passed"] is None and v["error"]
+    last = sf.parse_validation(_val("fail") + "\n" + _val("pass"), 1)                         # the last block wins
+    assert last["passed"] is True
+
+
+def test_the_tester_runs_after_the_dev_work_and_before_the_review_and_the_reviewer_is_told_the_verdict():
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
+    out, log = _run(q, [_t("ui", "dev_frontend")])
+    assert [p["role"] for p in q.payloads()] == ["dev_frontend", "tester", "reviewer"]
+    tester = next(p for p in q.payloads() if p["role"] == "tester")
+    assert "ACCEPTANCE CRITERIA" in tester["prompt"] and "POST /gift returns 201" in tester["prompt"] and "`dis/BA-201`" in tester["prompt"]
+    assert "1 pass, 0 fail, 0 unverified" in q.payloads()[-1]["prompt"]
+    assert out[-2]["role"] == "tester" and out[-2]["validation"]["passed"] is True
+    assert any("validation: 1 pass" in l for l in log)
+
+
+def test_a_failed_tester_task_does_not_stop_the_review_but_leaves_no_verdict():
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex", fail_keys={"validate"})
+    out, _ = _run(q, [_t("ui", "dev_frontend")])
+    v = next(e for e in out if e["role"] == "tester")["validation"]
+    assert v["passed"] is None and "tester task failed" in v["error"]
+    assert q.payloads()[-1]["role"] == "reviewer" and "the tester task failed" in q.payloads()[-1]["prompt"]
+
+
+def test_story_evidence_carries_the_latest_validation():
+    base = {"project": "p", "sprint": "S", "story": "S-1"}
+    rows = [{"id": "00000001x", "status": "done", "agent": "claude", "created_at": "1", "payload": {**base, "role": "dev_frontend"}, "result": {}},
+            {"id": "00000002x", "status": "done", "agent": "agy", "created_at": "2", "payload": {**base, "role": "tester"},
+             "result": {"response": _val("pass", "fail")}}]
+    ev = sf.story_evidence(rows, "p", "S", "S-1")
+    assert ev["validation"]["passed"] is False and ev["validation"]["counts"]["fail"] == 1
+    assert sf.story_evidence(rows[:1], "p", "S", "S-1")["validation"] is None
+    rows[1]["status"] = "needs_human"
+    assert sf.story_evidence(rows, "p", "S", "S-1")["validation"]["passed"] is None
+
+
+# ── Product Owner: architecture alignment, briefs, feedback rounds, grooming ──
+
+def test_po_prompt_asks_for_alignment_briefs_and_carries_feedback_only_on_a_revision():
+    first = sf.po_prompt("p", "S", "gift money", context="CTX-MARK")
+    assert "CTX-MARK" in first and "architecture" in first and "BRIEF" in first and '"briefs"' in first and "concerns" in first
+    assert "feedback at sprint planning" not in first
+    rev = sf.po_prompt("p", "S", "gift money", previous=[{"id": "S-1", "title": "old"}], feedback="drop the currency part")
+    assert "drop the currency part" in rev and '"old"' in rev and "feedback at sprint planning" in rev
+
+
+def test_context_has_the_estate_architecture_in_full_other_notes_by_title_and_only_open_rows(tmp_path):
+    arch = tmp_path / "_architecture"
+    arch.mkdir()
+    (arch / "estate-architecture.md").write_text("ESTATE RULES " + "x" * 100)
+    (arch / "demo-design.md").write_text("DEMO DESIGN NOTE")
+    (arch / "unrelated.md").write_text("SHOULD NOT APPEAR IN FULL")
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / "product-backlog.md").write_text(BACKLOG + "| DM-005 | Done thing | High | ✅ done 2026-01-01 | |\n")
+    c = sf.load_context(tmp_path, "demo")
+    assert "ESTATE RULES" in c and "DEMO DESIGN NOTE" in c and "SHOULD NOT APPEAR" not in c
+    assert "Other architecture notes (titles only): unrelated.md" in c
+    assert "DM-001" in c and "DM-005" not in c and "1 open rows" in c
+    assert len(sf.load_context(tmp_path, "demo", max_chars=50)) == 50                     # capped
+
+
+def _po_queue(stories_json):
+    q = Queue(agent_for=lambda p: "claude")
+    q.reply = lambda p: stories_json
+    return q
+
+
+def test_propose_stories_returns_concerns_and_sends_the_previous_round_and_feedback():
+    body = json.dumps({"concerns": ["conflicts with DM-001"], "stories": [
+        {"id": "S-1", "title": "Gift", "acceptance": ["201"], "briefs": {"dev_backend": "build x"}}]})
+    q = _po_queue(body)
+    stories, done = sf.propose_stories(q.client(), "demo", "S", "gift", "CTX", previous=[{"id": "S-0"}], feedback="smaller")
+    assert stories[0]["briefs"] == {"dev_backend": "build x"} and done["concerns"] == ["conflicts with DM-001"]
+    sent = q.payloads()[0]
+    assert sent["role"] == "product_owner" and "smaller" in sent["prompt"] and "CTX" in sent["prompt"] and '"S-0"' in sent["prompt"]
+
+
+def test_groom_returns_the_review_and_refuses_a_reply_without_one():
+    ok = json.dumps({"summary": "fine", "review": [{"id": "DM-001", "verdict": "ok"}], "missing": []})
+    rep, done = sf.groom_backlog(_po_queue(ok).client(), "demo", "ctx")
+    assert rep["review"][0]["verdict"] == "ok"
+    with pytest.raises(sf.PlanError, match="no review list"):
+        sf.groom_backlog(_po_queue('{"summary":"x"}').client(), "demo", "ctx")
+    q = _po_queue(ok)
+    sf.groom_backlog(q.client(), "demo", "ctx")
+    assert q.payloads()[0]["role"] == "product_owner" and q.payloads()[0]["sprint"] == "grooming" and "OPEN stories" in q.payloads()[0]["prompt"]

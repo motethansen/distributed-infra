@@ -35,23 +35,82 @@ class PlanError(ValueError):
 
 # ── prompts ──────────────────────────────────────────────────────────────────
 
-def po_prompt(project: str, sprint: str, request: str, context: str = "") -> str:
-    ctx = ("\nContext (existing backlog / sprint, read-only):\n" + context.strip()) if context.strip() else ""
+def po_prompt(project: str, sprint: str, request: str, context: str = "", previous: list[dict] | None = None,
+              feedback: str = "") -> str:
+    ctx = ("\nContext (architecture notes and the open backlog, read-only):\n" + context.strip()) if context.strip() else ""
+    rev = ""
+    if previous:
+        rev = ("\nYou proposed these stories earlier:\n" + json.dumps(previous, indent=1)[:14000]
+               + "\n\nThe human product owner gave this feedback at sprint planning. Revise the stories to take it into account; "
+               "keep story IDs that still stand, drop or merge the rest, and say in `concerns` anything in the feedback you "
+               "disagree with and why:\n" + feedback.strip() + "\n")
     return f"""You are the Product Owner for the project "{project}" (sprint {sprint}).
 
 Business request:
 {request.strip()}
-{ctx}
-
-Write user stories a developer can build and a reviewer can check. For each story give one
-user-visible outcome small enough for one sprint, points (1,2,3,5,8), observable acceptance criteria
-(a response, a screen, a passing test — not "works well"), the edge cases in and out of scope, and
-dependencies. Mark stories that need a human-only step (payment dashboard, app-store console).
-Never include a secret. Spend your effort on trade-offs, not on restating the request.
+{ctx}{rev}
+Your job is to turn the request into stories a developer can build and a reviewer can check, AND to align them with the architecture
+and the existing backlog: say where a story conflicts with, duplicates or depends on something that already exists, and which
+architectural rule it must respect. For each story give one user-visible outcome small enough for one sprint, points (1,2,3,5,8),
+observable acceptance criteria (a response, a screen, a passing test — not "works well"), edge cases in and out of scope, dependencies,
+risks, and a short BRIEF for each agent role that will work on it (dev_backend, dev_frontend, ... only the ones needed): what to build,
+which files or interfaces, what not to touch. Briefs are prompts for other models: self-contained, no secrets, no credentials.
+Mark stories that need a human-only step (payment dashboard, app-store console). Spend your effort on trade-offs, not on restating
+the request.
 
 Answer with ONLY a JSON object, no prose:
-{{"stories":[{{"id":"S-1","title":"...","points":3,"acceptance":["..."],"edge_cases":["..."],
-"out_of_scope":["..."],"depends_on":[],"human_only":false}}]}}"""
+{{"concerns":["..."],"stories":[{{"id":"S-1","title":"...","points":3,"acceptance":["..."],"edge_cases":["..."],
+"out_of_scope":["..."],"depends_on":[],"risks":["..."],"architecture_notes":"...","briefs":{{"dev_backend":"..."}},"human_only":false}}]}}"""
+
+
+def groom_prompt(project: str, context: str) -> str:
+    return f"""You are the Product Owner grooming the backlog of the project "{project}". Review the OPEN stories below against the
+architecture notes. For each open story give a verdict: ok, needs_work (say what is missing: acceptance criteria, scope, a dependency),
+duplicate (of which ID), stale (probably already done or no longer wanted — say what evidence you would check), or conflicts (with which
+architectural rule). Suggest observable acceptance criteria where they are missing, and name stories that are missing altogether.
+Do not invent facts about the code; where you cannot tell, say so. No secrets.
+
+{context.strip()}
+
+Answer with ONLY a JSON object, no prose:
+{{"summary":"...","review":[{{"id":"XX-001","verdict":"ok|needs_work|duplicate|stale|conflicts","issues":["..."],
+"suggested_acceptance":["..."],"brief":"..."}}],"missing":[{{"title":"...","why":"..."}}]}}"""
+
+
+def load_context(viz_repo: Path, project: str, max_chars: int = 24000) -> str:
+    """Architecture notes + the project's open backlog rows, capped. Architecture: the estate overview in full, any note
+    named for the project, and only the TITLES of the rest (so the Product Owner can ask for them)."""
+    from shared import backlog_edit
+    parts: list[str] = []
+    arch = viz_repo / "_architecture"
+    if arch.is_dir():
+        picked = [f for f in sorted(arch.glob("*.md")) if f.stem == "estate-architecture" or project.lower() in f.stem.lower()]
+        for f in picked:
+            parts.append(f"=== ARCHITECTURE: {f.name} ===\n" + f.read_text(encoding="utf-8", errors="replace")[:9000])
+        others = [f.name for f in sorted(arch.glob("*.md")) if f not in picked]
+        if others:
+            parts.append("Other architecture notes (titles only): " + ", ".join(others))
+    bl = viz_repo / project / "product-backlog.md"
+    if bl.exists():
+        text = bl.read_text(encoding="utf-8", errors="replace")
+        rows = []
+        lines = text.split("\n")
+        for _hi, first, end, header, _h in backlog_edit._tables(lines):
+            sc = backlog_edit._col(header, "status")
+            if sc is None:
+                continue
+            for n in range(first, end):
+                cells = backlog_edit._split(lines[n])
+                if len(cells) > sc and not backlog_edit.is_closed_text(cells[sc]):
+                    rows.append(f"| {cells[0]} | {re.sub(r'[*_`]', '', cells[1])[:160] if len(cells) > 1 else ''} | {cells[sc]} |")
+        parts.append(f"=== OPEN BACKLOG: {project} ({len(rows)} open rows) ===\n" + "\n".join(rows))
+    return "\n\n".join(parts)[:max_chars]
+
+
+def parse_po(text: str) -> tuple[list[dict], list[str]]:
+    obj = extract_json(text)
+    concerns = [str(c)[:400] for c in (obj.get("concerns") or [])] if isinstance(obj, dict) else []
+    return parse_stories(text), concerns
 
 
 def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str],
@@ -252,13 +311,30 @@ def tags(project: str, sprint: str, story: str | None, role: str, approved: bool
 # ── the three steps ──────────────────────────────────────────────────────────
 
 def propose_stories(c: FleetClient, project: str, sprint: str, request: str, context: str = "",
-                    approved: bool = False, as_agent: str | None = None, sleep=time.sleep) -> tuple[list[dict], dict]:
+                    approved: bool = False, as_agent: str | None = None, sleep=time.sleep,
+                    previous: list[dict] | None = None, feedback: str = "") -> tuple[list[dict], dict]:
+    """Returns (stories, task). `task["concerns"]` carries the Product Owner's concerns about the request."""
     t = c.queue(tags(project, sprint, None, "product_owner", approved, as_agent, None,
-                     prompt=po_prompt(project, sprint, request, context), timeout=900), f"PO {project} {sprint}")
+                     prompt=po_prompt(project, sprint, request, context, previous, feedback), timeout=900), f"PO {project} {sprint}")
     done = c.wait([t["id"]], sleep=sleep)[t["id"]]
     if done["status"] != "done":
         raise PlanError(f"product owner task {done['status']}: {done.get('notes') or ''}")
-    return parse_stories(answer(done)), done
+    stories, concerns = parse_po(answer(done))
+    done["concerns"] = concerns
+    return stories, done
+
+
+def groom_backlog(c: FleetClient, project: str, context: str, approved: bool = False, as_agent: str | None = None,
+                  sleep=time.sleep) -> tuple[dict, dict]:
+    t = c.queue(tags(project, "grooming", None, "product_owner", approved, as_agent, None,
+                     prompt=groom_prompt(project, context), timeout=900), f"groom {project}")
+    done = c.wait([t["id"]], sleep=sleep)[t["id"]]
+    if done["status"] != "done":
+        raise PlanError(f"product owner task {done['status']}: {done.get('notes') or ''}")
+    obj = extract_json(answer(done))
+    if not isinstance(obj, dict) or not isinstance(obj.get("review"), list):
+        raise PlanError("the grooming reply has no review list")
+    return obj, done
 
 
 def plan_story(c: FleetClient, project: str, sprint: str, story: dict, roles: dict[str, str],
@@ -289,11 +365,65 @@ def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
             f"Returned code:\n{parts}")
 
 
-def review_prompt(story: dict, author: str, material: str) -> str:
+def validate_prompt(story: dict) -> str:
+    crit = "\n".join(f"{i}. {c}" for i, c in enumerate(story.get("acceptance", []), 1))
+    return (f"You are the independent tester for story {story['id']}: {story['title']}. You did not write the code and must not "
+            "change it. Work on the story branch `dis/" + story["id"] + "`.\n\n"
+            "1. Write tests from the ACCEPTANCE CRITERIA below and the public interfaces only: decide what to assert from the "
+            "criteria, not by reading how the implementation works. Follow the repository's test conventions; put them in new files "
+            "named for the story. Commit and push them to the story branch.\n"
+            "2. Run the repository's FULL test suite on that branch. If anything fails, do not fix the implementation; report it.\n"
+            "3. For each criterion decide pass, fail or unverified (unverified = it needs a live system, a human, or a secret you do not "
+            "have). Give one line of evidence each: the test name and its result, or why it could not be checked.\n\n"
+            f"Acceptance criteria:\n{crit}\n\n"
+            "End your reply with ONE JSON object and nothing after it:\n"
+            '{"validation":{"suite":"<N passed, M failed>","criteria":[{"n":1,"status":"pass|fail|unverified","evidence":"..."}]}}')
+
+
+_VALID_STATUS = {"pass", "fail", "unverified"}
+
+
+def parse_validation(text: str, n_criteria: int | None = None) -> dict:
+    """The tester's verdict. `passed` is computed here, never taken from the model: every criterion
+    must be `pass` (and, when n_criteria is known, every criterion must be reported)."""
+    dec, found = json.JSONDecoder(), None
+    for m in re.finditer(r"\{", text or ""):
+        try:
+            obj, _ = dec.raw_decode(text[m.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("validation"), dict):
+            found = obj["validation"]
+    if not found or not isinstance(found.get("criteria"), list) or not found["criteria"]:
+        return {"passed": None, "error": "the tester did not return a validation block", "counts": {}, "criteria": []}
+    crit = []
+    for c in found["criteria"]:
+        if isinstance(c, dict):
+            st = str(c.get("status") or "").strip().lower()
+            crit.append({"n": c.get("n"), "status": st if st in _VALID_STATUS else "unverified",
+                         "evidence": str(c.get("evidence") or "")[:300]})
+    counts = {k: sum(1 for c in crit if c["status"] == k) for k in ("pass", "fail", "unverified")}
+    complete = n_criteria is None or len({c["n"] for c in crit}) >= n_criteria
+    return {"passed": bool(crit) and counts["pass"] == len(crit) and complete, "complete": complete, "counts": counts,
+            "suite": str(found.get("suite") or "")[:120], "criteria": crit}
+
+
+def validation_summary(v: dict | None) -> str:
+    if not v:
+        return "no validation ran"
+    if v.get("passed") is None:
+        return v.get("error") or "validation unavailable"
+    c = v["counts"]
+    return f"{c['pass']} pass, {c['fail']} fail, {c['unverified']} unverified" + (f" ({v['suite']})" if v.get("suite") else "") \
+        + ("" if v.get("complete", True) else "; some criteria were not reported")
+
+
+def review_prompt(story: dict, author: str, material: str, validation: dict | None = None) -> str:
     return (f"Independent review of work on story {story['id']}: {story['title']}. The author was {author}; you did not "
             "write it and must not edit anything. Check it against the acceptance criteria, run the tests if there is a "
             "branch or PR, and report findings ranked by consequence (wrong behaviour, missing test, security, style). "
             f"Say what you could not verify.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
+            f"Independent tester's verdict: {validation_summary(validation)}\n\n"
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 
 
@@ -400,10 +530,19 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
             pre = repo_preamble(project, project_cfg, story["id"]) if t["role"] in DEV_ROLES else ""
             d = batch([{**t, "prompt": pre + t["prompt"]}])[t["key"]]
             pr_material.append(answer(d))
+    validation = None
     if any(t["role"] in DEV_ROLES for t in tasks):
+        pre = repo_preamble(project, project_cfg, story["id"])
+        try:
+            d = run("tester", pre + validate_prompt(story), "validate", f"validate {story['id']}")
+            validation = parse_validation(answer(d), len(story.get("acceptance", [])) or None)
+        except PlanError as e:
+            validation = {"passed": None, "error": f"the tester task failed: {e}", "counts": {}, "criteria": []}
+        log[-1]["validation"] = validation
+        say("validation: " + validation_summary(validation))
         pin = "claude" if "codex" in authors else None
         material = "\n\n".join(pr_material)
-        d = run("reviewer", review_prompt(story, ", ".join(sorted(authors)), material), "review", f"review {story['id']}", as_agent=pin)
+        d = run("reviewer", review_prompt(story, ", ".join(sorted(authors)), material, validation), "review", f"review {story['id']}", as_agent=pin)
         rran = _agent_of(d)
         log[-1].update({"authors": sorted(authors), "same_family": bool(rran and rran in authors)})
         if rran and rran in authors:
@@ -531,7 +670,11 @@ def story_evidence(tasks: list[dict], project: str, sprint: str, story_id: str) 
     review = next((t for t in sorted(mine, key=lambda t: t.get("created_at") or "", reverse=True)
                    if (t.get("payload") or {}).get("role") == "reviewer" and t.get("status") == "done"), None)
     agents = sorted({t.get("agent") for t in mine if t.get("agent")})
-    return {"tasks": len(mine), "done": sum(1 for t in mine if t.get("status") == "done"),
+    tester = next((t for t in sorted(mine, key=lambda t: t.get("created_at") or "", reverse=True)
+                   if (t.get("payload") or {}).get("role") == "tester"), None)
+    validation = (parse_validation(answer(tester)) if tester and tester.get("status") == "done"
+                  else ({"passed": None, "error": "the tester task did not finish", "counts": {}, "criteria": []} if tester else None))
+    return {"validation": validation, "tasks": len(mine), "done": sum(1 for t in mine if t.get("status") == "done"),
             "stuck": [t["id"][:8] for t in mine if t.get("status") in ("failed", "needs_human")],
             "agents": agents, "pull_requests": prs, "reviewed": review is not None,
             "review_excerpt": answer(review)[:700] if review else ""}

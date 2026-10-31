@@ -200,6 +200,23 @@ def git_closure_dates(repo: Path, rel: str, head: str) -> dict[str, str]:
     return result
 
 
+def active_items(text: str) -> list[dict[str, Any]]:
+    """The rows that are in progress, in review or blocked, with the evidence cell, for the review queue."""
+    out: list[dict[str, Any]] = []
+    for header, rows in _tables(text):
+        low = [h.lower() for h in header]
+        ev = next((i for i, h in enumerate(low) if h.startswith("evidence")), None)
+        for r in rows:
+            m = _ID.search(re.sub(r"[*_`]", "", r[0])) if r else None
+            if not m:
+                continue
+            st = next((x for x in (_status_in(c) for c in r[1:]) if x), None)
+            if st in ("in_progress", "in_review", "blocked"):
+                out.append({"id": m.group(1), "status": st, "title": re.sub(r"^[^\w\[\(]+", "", re.sub(r"[*_`]", "", r[1] if len(r) > 1 else "")).strip()[:160],
+                            "evidence": re.sub(r"[*_`]", "", r[ev]).strip()[:400] if ev is not None and ev < len(r) else ""})
+    return out
+
+
 def trends(backlog: dict[str, str], dates: dict[str, str], sprints: list[dict]) -> dict[str, Any]:
     """Velocity and S-curve inputs, from what the files actually record.
 
@@ -277,7 +294,11 @@ def load(repo: str | Path) -> dict[str, Any]:
             head = _head(root)
             for i, d_ in git_closure_dates(root, f"{d.name}/product-backlog.md", head).items():
                 dates.setdefault(i, d_)                    # an explicit date in the status cell wins
-        projects.append({"project": d.name, "stories": len(backlog), "counts": counts, "closed": closed,
+        try:
+            items = active_items(bl_file.read_text(encoding="utf-8")) if bl_file.exists() else []
+        except OSError:
+            items = []
+        projects.append({"project": d.name, "stories": len(backlog), "counts": counts, "closed": closed, "active_items": items,
                          "complete_pct": round(100 * closed / len(backlog), 1) if backlog else None,
                          "sprints": sprints, **trends(backlog, dates, sprints)})
     return {"repo": str(root), "projects": projects}

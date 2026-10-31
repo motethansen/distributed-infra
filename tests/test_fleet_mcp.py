@@ -21,6 +21,11 @@ class FakeQueue:
         self.created: list[dict] = []
         self.finish_with = finish_with or (lambda payload: {"ok": True, "agent": "claude", "response": "hi"})
         self.down_urls = set(down_urls)
+        self.board = {"projects": [{"project": "demo", "closed": 3, "stories": 9, "counts": {"in_review": 1},
+                                    "active_items": [{"id": "D-1", "status": "in_review", "title": "T", "evidence": "PR 2", "x": 1}]}],
+                      "digest": {"as_of": "2026-10-31", "review_queue": [{"project": "demo", "id": "D-1", "title": "T", "evidence": "PR 2"}],
+                                 "decisions": [{"project": "other", "kind": "stalled", "text": "other stalled"}],
+                                 "adjustments": ["1 stories are waiting"], "projects": [{"project": "demo"}], "opus": None}}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         base = f"{request.url.scheme}://{request.url.host}:{request.url.port}"
@@ -42,6 +47,8 @@ class FakeQueue:
             return httpx.Response(200, json=self.tasks[path.rsplit("/", 1)[1]])
         if request.method == "GET" and path == "/tasks":
             return httpx.Response(200, json=list(self.tasks.values()))
+        if path == "/scrum/sprints":
+            return httpx.Response(200, json=self.board)
         if path == "/machines":
             return httpx.Response(200, json=[{"name": "mac-mini", "worker_active": True, "last_seen_ago_secs": 3,
                                               "capabilities": ["agent_run"]}])
@@ -153,3 +160,16 @@ def test_without_a_role_the_default_route_is_unchanged(tmp_path):
     asyncio.run(_tools(tmp_path, q).ask("hello"))
     p = q.created[0]["payload"]
     assert p["task_kind"] == "default" and "role" not in p
+
+
+def test_scrum_digest_and_one_project_view_and_an_old_orchestrator(tmp_path):
+    q = FakeQueue()
+    t = _tools(tmp_path, q)
+    d = asyncio.run(t.scrum())
+    assert d["review_queue"][0]["id"] == "D-1" and d["adjustments"] == ["1 stories are waiting"] and d["decisions"][0]["kind"] == "stalled"
+    one = asyncio.run(t.scrum("demo"))
+    assert one["in_flight"] == [{"id": "D-1", "status": "in_review", "title": "T", "evidence": "PR 2"}]
+    assert one["review_queue"][0]["id"] == "D-1" and one["decisions"] == []                 # other projects' decisions are not shown
+    assert "unknown project" in asyncio.run(t.scrum("nosuch"))["error"]
+    q.board = {"projects": []}
+    assert "too old" in asyncio.run(t.scrum())["error"]
