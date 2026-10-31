@@ -48,7 +48,15 @@ def _tables(text: str):
             i += 1
 
 
+# "cancelled" has no emoji of its own: a cell that STARTS with the word (after an optional ❌ or markdown) is a status.
+# Starting-with is deliberate: a story title or a note that merely mentions "cancelled" must not change a status.
+_CANCELLED = re.compile(r"^[\s*_`❌🚫]*cancel+ed\b", re.I)
+CANCEL_VISIBLE_DAYS = 60
+
+
 def _status_in(text: str) -> str | None:
+    if _CANCELLED.match(text or ""):
+        return "cancelled"
     m = _EMOJI.search(text or "")
     return STATUS[m.group(0)] if m else None
 
@@ -139,9 +147,10 @@ def parse_sprint(text: str, backlog: dict[str, str], filename: str = "") -> dict
                 d, p = r[0].strip(), _points(r[ir]) if len(r) > ir else None
                 if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) and p is not None:
                     burn.append({"date": d, "remaining": p, "recorded": True})
-    total = sum(s["points"] for s in stories)
-    remaining = sum(s["points"] for s in stories if s["status"] not in CLOSED)
-    remaining_as_written = sum(s["points"] for s in stories if s["sprint_status"] not in CLOSED)
+    live = [s for s in stories if s["status"] != "cancelled"]          # a cancelled story is neither scope nor remaining work
+    total = sum(s["points"] for s in live)
+    remaining = sum(s["points"] for s in live if s["status"] not in CLOSED)
+    remaining_as_written = sum(s["points"] for s in live if s["sprint_status"] not in CLOSED + ("cancelled",))
     if burn or stories:
         burn.append({"date": date.today().isoformat(), "remaining": remaining, "recorded": False})
     started = fm.get("started")
@@ -157,14 +166,14 @@ def parse_sprint(text: str, backlog: dict[str, str], filename: str = "") -> dict
 
 
 BULK = 30            # a single commit closing this many stories is an import/restructure, not a day's work
-_GIT_CACHE: dict[tuple[str, str], dict[str, str]] = {}
+_GIT_CACHE: dict[tuple, dict[str, str]] = {}
 
 
-def git_closure_dates(repo: Path, rel: str, head: str) -> dict[str, str]:
+def git_closure_dates(repo: Path, rel: str, head: str, kinds: tuple = CLOSED) -> dict[str, str]:
     """{story id: YYYY-MM-DD} = the commit date on which the row first appears closed in `rel`.
     This is when the NOTE was committed, which can trail the real completion. Commits that close
     BULK or more stories at once are skipped (their date says nothing about when work finished)."""
-    key = (str(repo / rel), head)
+    key = (str(repo / rel), head, kinds)
     if key in _GIT_CACHE:
         return _GIT_CACHE[key]
     try:
@@ -185,7 +194,7 @@ def git_closure_dates(repo: Path, rel: str, head: str) -> dict[str, str]:
             m = _ID.search(re.sub(r"[*_`]", "", cells[0])) if cells else None
             if m and m.group(1) not in batch:
                 st = next((x for x in (_status_in(c) for c in cells[1:]) if x), None) or _status_in(cells[0])
-                if st in CLOSED:
+                if st in kinds:
                     batch[m.group(1)] = day
     if day:
         commits.append((day, batch))
@@ -215,6 +224,31 @@ def active_items(text: str) -> list[dict[str, Any]]:
                 out.append({"id": m.group(1), "status": st, "title": re.sub(r"^[^\w\[\(]+", "", re.sub(r"[*_`]", "", r[1] if len(r) > 1 else "")).strip()[:160],
                             "evidence": re.sub(r"[*_`]", "", r[ev]).strip()[:400] if ev is not None and ev < len(r) else ""})
     return out
+
+
+def backlog_rows(text: str) -> list[dict[str, Any]]:
+    """Every row that is not closed, plus cancelled rows, with priority, the evidence/reason cell and a status date."""
+    out: list[dict[str, Any]] = []
+    for header, rows in _tables(text):
+        low = [h.lower() for h in header]
+        col = lambda name: next((i for i, h in enumerate(low) if h.startswith(name)), None)   # noqa: E731
+        ev, pr, sc_ = col("evidence"), col("priority"), col("status")
+        if sc_ is None:
+            continue
+        for r in rows:
+            m = _ID.search(re.sub(r"[*_`]", "", r[0])) if r else None
+            if not m or len(r) <= sc_:
+                continue
+            st = _status_in(r[sc_]) or next((x for x in (_status_in(c) for c in r[1:]) if x), None) or _status_in(r[0])
+            if not st or st in CLOSED:
+                continue
+            d = _DATE.search(r[sc_])
+            out.append({"id": m.group(1), "status": st, "priority": re.sub(r"[*_`]", "", r[pr]).strip()[:20] if pr is not None and pr < len(r) else "",
+                        "title": re.sub(r"^[^\w\[\(]+", "", re.sub(r"[*_`]", "", r[1] if len(r) > 1 else "")).strip()[:160],
+                        "evidence": re.sub(r"[*_`]", "", r[ev]).strip()[:320] if ev is not None and ev < len(r) else "",
+                        "date": d.group(1) if d else None})
+    seen: set[str] = set()
+    return [x for x in out if not (x["id"] in seen or seen.add(x["id"]))]
 
 
 def trends(backlog: dict[str, str], dates: dict[str, str], sprints: list[dict]) -> dict[str, Any]:
@@ -247,7 +281,8 @@ def trends(backlog: dict[str, str], dates: dict[str, str], sprints: list[dict]) 
         velocity.append({"sprint": sp["sprint"], "ended": (recorded[-1] if recorded else None) or (sp["updated"] or None),
                          "started": sp["started"], "points_done": sp["points_done"], "points_total": sp["points_total"],
                          "stories_done": sum(1 for st in sp["stories"] if st["status"] in CLOSED)})
-    return {"scurve": {"scope_stories": len(backlog), "scope_points": sum(pts.get(i, 0.0) for i in backlog) or None,
+    return {"scurve": {"scope_stories": sum(1 for st in backlog.values() if st != "cancelled"),
+                       "scope_points": sum(pts.get(i, 0.0) for i, st in backlog.items() if st != "cancelled") or None,
                        "points_known_for": sum(1 for i in backlog if i in pts), "curve": curve,
                        "dated_closed": sum(1 for i in closed_ids if i in dates),
                        "undated_closed": sum(1 for i in closed_ids if i not in dates)},
@@ -274,7 +309,7 @@ def load(repo: str | Path) -> dict[str, Any]:
             backlog = parse_backlog(bl_file.read_text(encoding="utf-8")) if bl_file.exists() else {}
         except OSError:
             backlog = {}
-        counts = {k: 0 for k in ("done", "superseded", "in_progress", "in_review", "blocked", "planned")}
+        counts = {k: 0 for k in ("done", "superseded", "in_progress", "in_review", "blocked", "planned", "cancelled")}
         for st in backlog.values():
             counts[st] += 1
         sprints = []
@@ -296,9 +331,17 @@ def load(repo: str | Path) -> dict[str, Any]:
                 dates.setdefault(i, d_)                    # an explicit date in the status cell wins
         try:
             items = active_items(bl_file.read_text(encoding="utf-8")) if bl_file.exists() else []
+            rows = backlog_rows(bl_file.read_text(encoding="utf-8")) if bl_file.exists() else []
         except OSError:
-            items = []
-        projects.append({"project": d.name, "stories": len(backlog), "counts": counts, "closed": closed, "active_items": items,
-                         "complete_pct": round(100 * closed / len(backlog), 1) if backlog else None,
+            items, rows = [], []
+        if any(x["status"] == "cancelled" and not x["date"] for x in rows):
+            cdates = git_closure_dates(root, f"{d.name}/product-backlog.md", _head(root), ("cancelled",))
+            for x in rows:
+                if x["status"] == "cancelled" and not x["date"]:
+                    x["date"] = cdates.get(x["id"])
+        scope = len(backlog) - counts["cancelled"]
+        projects.append({"project": d.name, "stories": scope, "counts": counts, "closed": closed, "active_items": items,
+                         "backlog_items": rows,
+                         "complete_pct": round(100 * closed / scope, 1) if scope else None,
                          "sprints": sprints, **trends(backlog, dates, sprints)})
     return {"repo": str(root), "projects": projects}

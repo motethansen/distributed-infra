@@ -446,7 +446,9 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
             sprints.append({**sp, "stories": stories, "agents_involved": fleet_agents,
                             "machines_involved": fleet_machines,
                             "agent_count": len(fleet_agents)})
-        projects.append({**p, "sprints": sprints, "backlog_open_work_only": p["project"] in _OPEN_ONLY_BACKLOGS,
+        view = scrum_digest.backlog_view(p)
+        p = {k: v for k, v in p.items() if k != "backlog_items"}          # the view carries what the page needs
+        projects.append({**p, "backlog_view": view, "sprints": sprints, "backlog_open_work_only": p["project"] in _OPEN_ONLY_BACKLOGS,
                          "complete_pct": None if p["project"] in _OPEN_ONLY_BACKLOGS else p["complete_pct"]})
     recent = await db.list_tasks(limit=25)
     opus = None

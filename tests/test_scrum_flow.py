@@ -545,3 +545,18 @@ def test_groom_returns_the_review_and_refuses_a_reply_without_one():
     q = _po_queue(ok)
     sf.groom_backlog(q.client(), "demo", "ctx")
     assert q.payloads()[0]["role"] == "product_owner" and q.payloads()[0]["sprint"] == "grooming" and "OPEN stories" in q.payloads()[0]["prompt"]
+
+
+def test_cancel_marks_the_story_with_the_date_and_reason_and_cannot_be_undone_or_reasonless(vrepo):
+    work, origin = vrepo
+    with pytest.raises(sf.PlanError, match="needs a reason"):
+        sf.cancel_story(work, "demo", "DM-001", "michael", "2026-10-31", "  ")
+    r = sf.cancel_story(work, "demo", "DM-001", "michael", "2026-10-31", "superseded by the new design")
+    assert r["committed"] and r["pushed"]
+    row = next(l for l in (work / "demo" / "product-backlog.md").read_text().split("\n") if l.startswith("| DM-001"))
+    assert "❌ cancelled 2026-10-31" in row and "cancelled by michael: superseded by the new design" in row
+    from shared import scrum
+    assert scrum.parse_backlog((work / "demo" / "product-backlog.md").read_text())["DM-001"] == "cancelled"
+    assert "cancelled by michael" in _git(origin, "log", "-1", "--format=%s", "main")
+    with pytest.raises(sf.PlanError, match="already closed"):
+        sf.mark_story(work, "demo", "DM-001", "🏃 in progress", None)                     # a cancelled story is not quietly revived

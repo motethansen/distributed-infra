@@ -678,3 +678,12 @@ def story_evidence(tasks: list[dict], project: str, sprint: str, story_id: str) 
             "stuck": [t["id"][:8] for t in mine if t.get("status") in ("failed", "needs_human")],
             "agents": agents, "pull_requests": prs, "reviewed": review is not None,
             "review_excerpt": answer(review)[:700] if review else ""}
+
+
+def cancel_story(repo: Path, project: str, bid: str, who: str, day: str, reason: str, run=subprocess.run) -> dict:
+    """Mark a story cancelled (a human decision, with a reason). It stays visible for 60 days, then drops off the board."""
+    from shared import backlog_edit
+    if not reason.strip():
+        raise PlanError("a cancellation needs a reason")
+    return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, f"❌ cancelled {day}", f"cancelled by {who}: {reason.strip()}", closing=True), None),
+                        f"{project}: {bid} cancelled by {who}", run=run)
