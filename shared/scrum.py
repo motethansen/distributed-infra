@@ -210,20 +210,22 @@ def git_closure_dates(repo: Path, rel: str, head: str, kinds: tuple = CLOSED) ->
 
 
 def active_items(text: str) -> list[dict[str, Any]]:
-    """The rows that are in progress, in review or blocked, with the evidence cell, for the review queue."""
-    out: list[dict[str, Any]] = []
-    for header, rows in _tables(text):
-        low = [h.lower() for h in header]
-        ev = next((i for i, h in enumerate(low) if h.startswith("evidence")), None)
-        for r in rows:
-            m = _ID.search(re.sub(r"[*_`]", "", r[0])) if r else None
-            if not m:
-                continue
-            st = next((x for x in (_status_in(c) for c in r[1:]) if x), None)
-            if st in ("in_progress", "in_review", "blocked"):
-                out.append({"id": m.group(1), "status": st, "title": re.sub(r"^[^\w\[\(]+", "", re.sub(r"[*_`]", "", r[1] if len(r) > 1 else "")).strip()[:160],
-                            "evidence": re.sub(r"[*_`]", "", r[ev]).strip()[:400] if ev is not None and ev < len(r) else ""})
-    return out
+    """The rows that are in progress, in review or blocked, with their reason/evidence, for the review queue."""
+    return [{"id": r["id"], "status": r["status"], "title": r["title"], "evidence": r["evidence"][:400]}
+            for r in backlog_rows(text) if r["status"] in ("in_progress", "in_review", "blocked")]
+
+
+_STATUS_WORDS = re.compile(r"^(blocked|in progress|in review|planned|cancelled|canceled)\b[\s:,\-—]*", re.I)
+
+
+def status_note(cell: str, status: str) -> str:
+    """What the STATUS cell says beyond the status itself: "🚧 blocked on BA-090" -> "blocked on BA-090",
+    "🔍 in review — PR #85" -> "PR #85", "🔵 planned" -> "". The reason a story is blocked often lives here."""
+    t = re.sub(r"[*_`]", "", cell or "")
+    t = re.sub(r"^[^\w]+", "", t).strip()
+    if status == "blocked":
+        return "" if t.lower().rstrip(".") == "blocked" else t
+    return _STATUS_WORDS.sub("", t).strip(" —-:,")
 
 
 def backlog_rows(text: str) -> list[dict[str, Any]]:
@@ -232,7 +234,8 @@ def backlog_rows(text: str) -> list[dict[str, Any]]:
     for header, rows in _tables(text):
         low = [h.lower() for h in header]
         col = lambda name: next((i for i, h in enumerate(low) if h.startswith(name)), None)   # noqa: E731
-        ev, pr, sc_ = col("evidence"), col("priority"), col("status")
+        ev = next((i for i, h in enumerate(low) if h.startswith(("evidence", "note"))), None)
+        pr, sc_ = col("priority"), col("status")
         if sc_ is None:
             continue
         for r in rows:
@@ -243,10 +246,12 @@ def backlog_rows(text: str) -> list[dict[str, Any]]:
             if not st or st in CLOSED:
                 continue
             d = _DATE.search(r[sc_])
+            ev_text = re.sub(r"[*_`]", "", r[ev]).strip() if ev is not None and ev < len(r) else ""
+            note = status_note(r[sc_], st)
+            reason = " — ".join(x for x in (note if note and note not in ev_text else "", ev_text) if x)[:320]
             out.append({"id": m.group(1), "status": st, "priority": re.sub(r"[*_`]", "", r[pr]).strip()[:20] if pr is not None and pr < len(r) else "",
                         "title": re.sub(r"^[^\w\[\(]+", "", re.sub(r"[*_`]", "", r[1] if len(r) > 1 else "")).strip()[:160],
-                        "evidence": re.sub(r"[*_`]", "", r[ev]).strip()[:320] if ev is not None and ev < len(r) else "",
-                        "date": d.group(1) if d else None})
+                        "evidence": reason, "date": d.group(1) if d else None})
     seen: set[str] = set()
     return [x for x in out if not (x["id"] in seen or seen.add(x["id"]))]
 

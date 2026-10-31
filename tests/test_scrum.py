@@ -351,3 +351,30 @@ def test_cancelled_work_is_neither_scope_nor_remaining_in_a_sprint_or_the_comple
     sp = pr["sprints"][0]
     assert sp["points_total"] == 5 and sp["points_remaining"] == 3 and sp["points_done"] == 2    # the 5 cancelled points vanish
     assert [s["status"] for s in sp["stories"]] == ["planned", "cancelled", "done"]
+
+
+# ── where a blocked story's reason actually lives ────────────────────────────
+
+def test_status_note_keeps_what_the_status_cell_says_beyond_the_status():
+    assert scrum.status_note("🚧 blocked on BA-090", "blocked") == "blocked on BA-090"
+    assert scrum.status_note("🚧 blocked", "blocked") == "" and scrum.status_note("🚧 **blocked**.", "blocked") == ""
+    assert scrum.status_note("🔍 in review — PR #85", "in_review") == "PR #85"
+    assert scrum.status_note("🔵 planned", "planned") == "" and scrum.status_note("🏃 in progress: day 2", "in_progress") == "day 2"
+
+
+def test_the_reason_joins_the_status_note_and_the_evidence_or_note_column():
+    bl = ("| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n"
+          "| RR-1 | one | High | 🚧 blocked on RR-0 | needs the login flow first |\n"
+          "| RR-2 | two | High | 🚧 blocked | |\n"
+          "| RR-3 | three | Low | 🔍 in review — PR #8 | merged to a branch |\n\n"
+          "| ID | Story | Priority | Status | Note |\n|---|---|---|---|---|\n"
+          "| RR-4 | four | Low | 🚧 blocked on credentials | the broker needs a live session |\n"
+          "| RR-5 | five | Low | 🚧 blocked on RR-0 | blocked on RR-0 again |\n| RR-6 | six | Low | 🔵 planned | later |\n")
+    r = {x["id"]: x["evidence"] for x in scrum.backlog_rows(bl)}
+    assert r["RR-1"] == "blocked on RR-0 — needs the login flow first"
+    assert r["RR-2"] == ""
+    assert r["RR-3"] == "PR #8 — merged to a branch"
+    assert r["RR-4"] == "blocked on credentials — the broker needs a live session"          # a "Note" column counts as evidence
+    assert r["RR-5"] == "blocked on RR-0 again"                                              # not said twice
+    act = {x["id"]: x["evidence"] for x in scrum.active_items(bl)}
+    assert act["RR-1"].startswith("blocked on RR-0") and set(act) == {"RR-1", "RR-2", "RR-3", "RR-4", "RR-5"}      # planned RR-6 is not active
