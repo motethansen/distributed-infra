@@ -10,6 +10,11 @@
   dis-agent approve PLAN                          you approve exactly that plan
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, PRs to look at, what is stuck
+  dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
+
+A story is open (planned) once you approve its plan, in progress while `go` runs, in review when the work
+is finished, and closed only by `close` after you have read the review. VIZNEO_REPO points at the
+vizneoprojects checkout whose backlog is edited (default ~/Projects/github/techstartups/vizneoprojects).
 
 Everything it queues carries project/sprint/story/role, so Vantage's Scrum page shows who did what.
 """
@@ -44,6 +49,14 @@ HELP = """/model auto|claude|codex|agy|deepseek|opus   pick who answers (opus = 
 /project <name>     tag what you ask with a project (shows on the Scrum board); /project off
 /new                forget this conversation          /who   show current settings
 /help               this text                          /quit  leave"""
+
+
+def viz_repo() -> Path:
+    return Path(os.environ.get("VIZNEO_REPO", "~/Projects/github/techstartups/vizneoprojects")).expanduser()
+
+
+def _report(what: str, r: dict) -> None:
+    print(f"  backlog: {what} (committed{', pushed' if r['pushed'] else '; NOT pushed — ' + ' '.join(r['push_error'] or []) + ' — push when online'})")
 
 
 def projects_cfg() -> dict:
@@ -165,9 +178,19 @@ def cmd_plan(a) -> None:
 
 def cmd_approve(a) -> None:
     path = Path(a.plan)
-    plan = sf.approve_plan(path, os.environ.get("USER", "human"), datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    print(f"approved {path.name} by {plan['approval']['by']} (digest {plan['approval']['digest']}). Editing the tasks voids this.\n"
-          f"Run it:  dis-agent go {path}")
+    who = os.environ.get("USER", "human")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    plan = sf.approve_plan(path, who, now)
+    print(f"approved {path.name} by {plan['approval']['by']} (digest {plan['approval']['digest']}). Editing the tasks voids this.")
+    if not plan.get("backlog_id"):
+        try:
+            r = sf.register_story(viz_repo(), plan["project"], plan["story"], who, now[:10], path.name)
+            plan["backlog_id"] = r["id"]
+            path.write_text(json.dumps(plan, indent=2, ensure_ascii=False))
+            _report(f"{r['id']} registered as planned", r)
+        except sf.PlanError as e:
+            print(f"  backlog NOT updated: {e}")
+    print(f"Run it:  dis-agent go {path}")
 
 
 def cmd_go(a) -> None:
@@ -178,12 +201,26 @@ def cmd_go(a) -> None:
     ok = sf.is_approved(plan)
     if not ok:
         print("NOT APPROVED — showing a dry run. " + ("The plan changed since you approved it." if plan.get("approval") else f"Approve first: dis-agent approve {path}"))
+    bid = plan.get("backlog_id")
+    if ok and bid:
+        try:
+            _report(f"{bid} in progress", sf.mark_story(viz_repo(), plan["project"], bid, "🏃 in progress", None))
+        except sf.PlanError as e:
+            print(f"  backlog NOT updated: {e}")
     log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], plan["story"], tasks, go=ok,
                       approved=a.approved, cwd=a.cwd, project_cfg=(cfg["projects"] or {}).get(plan["project"]))
     if ok:
         out = path.with_suffix(".run.json")
         out.write_text(json.dumps(log, indent=2))
-        print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}")
+        rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+        ev = sf.story_evidence(rows, plan["project"], plan["sprint"], plan["story"]["id"])
+        if bid:
+            try:
+                _report(f"{bid} in review", sf.mark_story(viz_repo(), plan["project"], bid, "🔍 in review",
+                        "work finished; PRs " + (", ".join(ev["pull_requests"]) or "none found") + "; awaiting sprint review"))
+            except sf.PlanError as e:
+                print(f"  backlog NOT updated: {e}")
+        print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
 def cmd_review(a) -> None:
@@ -196,6 +233,51 @@ def cmd_review(a) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "review.md").write_text(md)
     print(md + f"\n(saved {d / 'review.md'})")
+
+
+def cmd_close(a) -> None:
+    base = ROOT / "data" / "scrum" / a.project / a.sprint
+    plans = {}
+    for f in sorted(base.glob("*.plan.json")):
+        pl = json.loads(f.read_text())
+        if pl.get("backlog_id"):
+            plans[pl["story"]["id"]] = pl
+    want = a.story or list(plans)
+    if not want:
+        sys.exit(f"no registered stories under {base}; approve a plan first")
+    rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+    who = os.environ.get("USER", "human")
+    for sid in want:
+        pl = plans.get(sid)
+        if not pl:
+            print(f"{sid}: no registered plan, skipping")
+            continue
+        ev, bid = sf.story_evidence(rows, a.project, a.sprint, sid), pl["backlog_id"]
+        print(f"\n{bid} ({sid}) {pl['story']['title']}\n  tasks {ev['done']}/{ev['tasks']} done, agents {', '.join(ev['agents']) or '-'}, "
+              f"reviewed: {'yes' if ev['reviewed'] else 'NO'}\n  PRs: {', '.join(ev['pull_requests']) or 'none found'}"
+              + (f"\n  stuck: {', '.join(ev['stuck'])}" if ev["stuck"] else ""))
+        if ev["review_excerpt"]:
+            print("  review says: " + ev["review_excerpt"].replace("\n", " ")[:400])
+        problems = [m for m, bad in (("not every task is done", ev["done"] < ev["tasks"] or ev["tasks"] == 0), ("no review ran", not ev["reviewed"])) if bad]
+        if problems and not a.force:
+            print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
+            continue
+        if a.yes:
+            ok = True
+        elif sys.stdin.isatty():
+            ok = input(f"  Close {bid}? You confirm the sprint review accepts it [y/N] ").strip().lower() == "y"
+        else:
+            print("  not closing: needs your confirmation (run this in a terminal, or pass --yes)")
+            continue
+        if ok:
+            try:
+                r = sf.close_story(viz_repo(), a.project, bid, who, datetime.now(timezone.utc).date().isoformat(),
+                                   "PRs " + (", ".join(ev["pull_requests"]) or "none"))
+                _report(f"{bid} CLOSED", r)
+            except sf.PlanError as e:
+                print(f"  not closed: {e}")
+        else:
+            print("  left in review")
 
 
 def main() -> None:
@@ -217,6 +299,10 @@ def main() -> None:
     pl.add_argument("-p", "--project", required=True); pl.add_argument("-s", "--sprint", required=True); pl.add_argument("--story", required=True)
     ap_ = sub.add_parser("approve"); ap_.set_defaults(fn=cmd_approve); ap_.add_argument("plan")
     go = sub.add_parser("go", parents=[common]); go.set_defaults(fn=cmd_go); go.add_argument("plan"); go.add_argument("--cwd")
+    cl = sub.add_parser("close"); cl.set_defaults(fn=cmd_close)
+    cl.add_argument("-p", "--project", required=True); cl.add_argument("-s", "--sprint", required=True)
+    cl.add_argument("--story", action="append"); cl.add_argument("--yes", action="store_true", help="you have read the review and confirm")
+    cl.add_argument("--force", action="store_true")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
     rv.add_argument("-p", "--project", required=True); rv.add_argument("-s", "--sprint", required=True)
     a = ap.parse_args()

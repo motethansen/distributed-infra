@@ -153,6 +153,7 @@ async def test_aliases_are_folded_and_open_only_backlogs_are_flagged(api, tmp_pa
     repo = pathlib.Path(api.SCRUM_REPO)
     (repo / "vantage").mkdir(); (repo / "vantage" / "product-backlog.md").write_text(BACKLOG)
     api._SCRUM_CACHE["ts"] = 0
+    api._OPEN_ONLY_BACKLOGS.add("vantage")                       # the mechanism still works for a project listed here
     sp = await api.scrum_sprints(x_secret_key="k")
     flags = {p["project"]: (p["backlog_open_work_only"], p["complete_pct"]) for p in sp["projects"]}
     assert flags["vantage"] == (True, None) and flags["demo"] == (False, 50.0)
@@ -269,3 +270,50 @@ def test_load_prefers_the_date_written_in_the_status_cell_over_the_commit_date(t
     _repo_with(tmp_path, [("2026-09-01T10:00:00+00:00", {"proj/product-backlog.md": text})])
     curve = scrum.load(tmp_path)["projects"][0]["scurve"]["curve"]
     assert [(c["date"], c["day_stories"]) for c in curve] == [("2026-07-01", 1), ("2026-09-01", 1)]
+
+
+# ── the board pulls its own notes repo ───────────────────────────────────────
+
+def _clone_pair(tmp_path):
+    import os
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    g = lambda cwd, *a: subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True, env=env)   # noqa: E731
+    origin = tmp_path / "o.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    a, b = tmp_path / "a", tmp_path / "b"
+    subprocess.run(["git", "clone", "-q", str(origin), str(a)], check=True, capture_output=True)
+    (a / "p").mkdir()
+    (a / "p" / "product-backlog.md").write_text("| ID | Story | Status |\n|---|---|---|\n| PP-001 | s | 🔵 planned |\n")
+    g(a, "add", "."); g(a, "commit", "-qm", "1"); g(a, "push", "-q", "origin", "HEAD:main")
+    subprocess.run(["git", "clone", "-q", str(origin), str(b)], check=True, capture_output=True)
+    return g, a, b
+
+
+@pytest.mark.asyncio
+async def test_board_fast_forwards_its_repo_at_most_every_interval_and_drops_the_cache(api, tmp_path, monkeypatch):
+    g, a, b = _clone_pair(tmp_path)
+    monkeypatch.setattr(api, "SCRUM_REPO", str(b))
+    api._PULL.update(ts=0.0, ok=None, error=None, at=None)
+    first = (await api.scrum_sprints(x_secret_key="k"))["projects"][0]["stories"]
+    assert first == 1 and api._PULL["ok"] is True
+    (a / "p" / "product-backlog.md").write_text((a / "p" / "product-backlog.md").read_text() + "| PP-002 | t | 🏃 in progress |\n")
+    g(a, "commit", "-qam", "2"); g(a, "push", "-q", "origin", "HEAD:main")
+    assert (await api.scrum_sprints(x_secret_key="k"))["projects"][0]["stories"] == 1          # inside the interval: no pull yet
+    api._PULL["ts"] = 0.0
+    sp = await api.scrum_sprints(x_secret_key="k")
+    assert sp["projects"][0]["stories"] == 2 and sp["repo"]["pull"]["ok"] is True              # pulled, cache dropped, new row seen
+
+
+@pytest.mark.asyncio
+async def test_a_failed_pull_is_reported_not_fatal_and_can_be_turned_off(api, tmp_path, monkeypatch):
+    g, a, b = _clone_pair(tmp_path)
+    g(b, "remote", "remove", "origin")
+    monkeypatch.setattr(api, "SCRUM_REPO", str(b))
+    api._PULL.update(ts=0.0, ok=None, error=None, at=None)
+    sp = await api.scrum_sprints(x_secret_key="k")
+    assert sp["projects"][0]["stories"] == 1 and sp["repo"]["pull"]["ok"] is False and sp["repo"]["pull"]["error"]
+    api._PULL.update(ts=0.0, ok=None, error=None, at=None)
+    monkeypatch.setenv("SCRUM_REPO_PULL", "0")
+    sp = await api.scrum_sprints(x_secret_key="k")
+    assert sp["repo"]["pull"]["ok"] is None                                                     # never attempted
