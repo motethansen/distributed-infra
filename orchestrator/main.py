@@ -219,6 +219,9 @@ async def _apply_role(payload: dict) -> None:
     `_allow_opus` is policy, never input: whatever the caller sent is discarded first. An explicit
     payload.agent/model still wins over the role's choice, as with task-class routing."""
     payload.pop("_allow_opus", None)
+    blocked = scrum_roles.isolated_violation(payload)     # every task, with or without a role
+    if blocked:
+        raise HTTPException(status_code=422, detail=blocked)
     role = payload.get("role")
     if not role:
         return

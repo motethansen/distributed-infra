@@ -113,19 +113,18 @@ JSON array; each entry is `{id, label, kind, payload, note}` where `kind` is `au
 |---|---|---|
 | `auto` | auto | `{}`: no agent, model or role, so the router's `default_class` applies (claude/sonnet) |
 | `claude`, `codex`, `agy`, `deepseek` | agent | `{agent: <id>}` |
-| `claude-opus` | role | `{role: opus_chat}` |
 | `role:<name>` | role | `{role: <name>}` only, never an agent or model |
 
 - Role entries come from `config/roles.yaml`, one per role, so adding a role there adds a choice with
-  no code change. `opus_chat` is not listed a second time; it backs `claude-opus`.
-- `opus_chat` grants Opus through the role mechanism (`allow_opus: true`). `BLOCKED_MODEL_SUBSTRINGS`
-  in `agents/claude_agent.py` is unchanged, so Opus is still refused for any task without that grant.
-- Opus spend is fleet-wide: chat Opus draws on the same monthly budget as `product_owner`. Accepted;
-  there is no per-role ledger. Once the cap is spent, `opus_chat` falls back to Sonnet.
+  no code change. Opus is not a chat choice: it is reachable only as `role:product_owner`, which holds
+  the only `allow_opus` grant and a monthly cost cap (falls back to Sonnet when spent).
+  `BLOCKED_MODEL_SUBSTRINGS` in `agents/claude_agent.py` still refuses Opus for any task without that grant.
 - Privacy guard still wins: `deepseek` is rerouted to claude/sonnet for unlisted projects or
   secret-looking prompts, and `role:dev_backend` on a private project resolves to its
   `private_fallback` (claude/sonnet).
-- Isolated projects (e.g. `urbanlife`) still need `payload.approved: true` whichever choice is used.
+- Isolated projects (e.g. `urbanlife`) need `payload.approved: true` on EVERY task: the orchestrator checks the
+  project tag and the working directory before it looks at any role, so a direct agent choice (`auto`, `claude`,
+  `deepseek`, ...) cannot bypass it. A task carrying neither a project tag nor a recognisable `cwd` cannot be recognised.
 - Role names are matched case-insensitively and trimmed. An unknown role is rejected with HTTP 422
   listing the valid names, and nothing is queued.
 

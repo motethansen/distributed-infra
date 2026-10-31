@@ -89,7 +89,7 @@ def test_shipped_policy_is_loadable_and_safe_by_default():
     with pytest.raises(roles.RoleError, match="isolated"):
         roles.resolve("dev_backend", project="urbanlife")
     opus_roles = [n for n, s in p["roles"].items() if roles.is_opus(s.get("model"))]
-    assert opus_roles == ["product_owner", "opus_chat"] and p["roles"]["product_owner"]["allow_opus"] is True
+    assert opus_roles == ["product_owner"] and p["roles"]["product_owner"]["allow_opus"] is True
     assert roles.resolve("dev_backend", project="budgetapp")["agent"] == "deepseek"
     assert roles.resolve("dev_backend", project="budgetapp", sensitivity="private")["agent"] == "claude"
 
@@ -213,3 +213,27 @@ async def test_unknown_role_is_422_and_dev_backend_defaults_to_claude_for_unlist
 def test_role_is_a_summary_group():
     rows = [{"status": "done", "role": "reviewer", "agent": "codex"}, {"status": "done", "role": None}]
     assert {g["key"] for g in tracking.summarise(rows, "role")} == {"reviewer", "(untagged)"}
+
+
+# ── isolated projects: every task, not only role tasks ───────────────────────
+
+def test_isolated_violation_covers_project_tag_and_cwd_whatever_the_role_or_client():
+    pol = {"isolated_projects": ["Walled"]}
+    assert "isolated" in roles.isolated_violation({"project": "walled", "agent": "claude", "prompt": "x"}, pol)
+    assert "isolated" in roles.isolated_violation({"cwd": "~/Projects/github/Vizneo/walled_works", "agent": "codex"}, pol)
+    assert roles.isolated_violation({"project": "walled", "approved": True}, pol) is None
+    assert "isolated" in roles.isolated_violation({"project": "walled", "approved": "yes"}, pol)      # only a real True counts
+    assert roles.isolated_violation({"project": "other", "cwd": "~/Projects/other"}, pol) is None
+    assert roles.isolated_violation({"agent": "claude"}, pol) is None and roles.isolated_violation({}, {}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_task_with_no_role_for_an_isolated_project_is_refused_unless_approved(api):
+    for payload in ({"agent": "claude", "project": "walled", "prompt": "x"},
+                    {"agent": "deepseek", "cwd": "~/Projects/walled_app", "prompt": "x"}):
+        with pytest.raises(HTTPException) as e:
+            await _queue(api, dict(payload))
+        assert e.value.status_code == 422 and "isolated" in e.value.detail
+    assert await api.db.list_tasks(limit=10) == []                                        # nothing was queued
+    t = await _queue(api, {"agent": "claude", "project": "walled", "approved": True, "prompt": "x"})
+    assert t.payload["agent"] == "claude"

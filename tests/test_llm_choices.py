@@ -1,4 +1,4 @@
-"""GET /llm-choices: one list, a fixed choice -> payload mapping, Opus only via the role grant."""
+"""GET /llm-choices: one list, a fixed choice -> payload mapping, Opus only via the product_owner role."""
 from __future__ import annotations
 
 import pytest
@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from agents import roles
 from shared.models import TaskType
 
-IDS = ["auto", "claude", "claude-opus", "codex", "agy", "deepseek"]
+IDS = ["auto", "claude", "codex", "agy", "deepseek"]
 ROLE_NAMES = ["product_owner", "scrum_master", "analyst", "dev_frontend", "dev_backend", "integrator", "reviewer"]
 
 
@@ -33,16 +33,16 @@ async def _queue(api, payload):
 
 
 @pytest.mark.asyncio
-async def test_list_is_ordered_and_roles_come_from_the_file(api):
+async def test_list_is_ordered_and_roles_come_from_the_file(api, monkeypatch):
     got = await _choices(api)
     assert [c["id"] for c in got] == IDS + [f"role:{n}" for n in ROLE_NAMES]
     assert all(set(c) == {"id", "label", "kind", "payload", "note"} for c in got)
     assert {c["kind"] for c in got} == {"auto", "agent", "role"}
     # a role added to the file shows up with no code change
     pol = roles.load_policy()
-    pol["roles"]["tester"] = {"agent": "claude", "model": "haiku", "best_for": "run tests"}
-    api.scrum_roles.load_policy = lambda: pol
-    assert "role:tester" in [c["id"] for c in await _choices(api)]
+    pol["roles"]["newcomer"] = {"agent": "claude", "model": "haiku", "best_for": "run tests"}
+    monkeypatch.setattr(api.scrum_roles, "load_policy", lambda: pol)        # restored by the fixture: no leak to later tests
+    assert "role:newcomer" in [c["id"] for c in await _choices(api)]
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,8 @@ async def test_mapping_is_fixed(api):
     assert by["auto"] == {}
     assert by["claude"] == {"agent": "claude"} and by["codex"] == {"agent": "codex"}
     assert by["agy"] == {"agent": "agy"} and by["deepseek"] == {"agent": "deepseek"}
-    assert by["claude-opus"] == {"role": "opus_chat"}
+    assert "claude-opus" not in by and not any("opus" in k for k in by)        # Opus is not a chat choice
+    assert by["role:product_owner"] == {"role": "product_owner"}
     for n in ROLE_NAMES:
         assert by[f"role:{n}"] == {"role": n}
 
@@ -65,10 +66,10 @@ async def test_response_has_only_short_strings_and_agent_model_role(api):
         assert all(isinstance(v, str) and len(v) <= 200 for v in c["payload"].values())
 
 
-def test_opus_chat_role_is_the_only_new_grant():
-    spec = roles.load_policy()["roles"]["opus_chat"]
-    assert spec["allow_opus"] is True and spec["monthly_cost_cap_usd"] and spec["warn_at"]
-    assert spec["cap_fallback"] == {"agent": "claude", "model": "sonnet"}
+def test_product_owner_is_the_only_role_that_may_use_opus():
+    pol = roles.load_policy()["roles"]
+    assert [n for n, sp in pol.items() if sp.get("allow_opus")] == ["product_owner"]
+    assert "opus_chat" not in pol
 
 
 @pytest.mark.asyncio
@@ -83,24 +84,27 @@ async def test_opus_without_role_is_still_refused_by_the_agent(api, tmp_path, mo
 
 async def _spend(api, usd):
     from shared.models import Task, TaskStatus
-    t = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="t", payload={"role": "opus_chat"}))
+    t = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="t", payload={"role": "product_owner"}))
     await api.db.update_task(t.id, {"status": TaskStatus.done, "result": {
         "agent": "claude", "model": "opus", "usage": {"tokens_in": 1, "tokens_out": 1, "cost_usd": usd}}})
 
 
 @pytest.mark.asyncio
-async def test_claude_opus_cap_and_warning(api):
-    cap = roles.load_policy()["roles"]["opus_chat"]["monthly_cost_cap_usd"]
-    warn = roles.load_policy()["roles"]["opus_chat"]["warn_at"]
-    opus = {"role": "opus_chat", "prompt": "hi"}
-    t = await _queue(api, dict(opus))
+async def test_product_owner_opus_cap_boundary_and_warning(api):
+    spec = roles.load_policy()["roles"]["product_owner"]
+    cap, warn = spec["monthly_cost_cap_usd"], spec["warn_at"]
+    po = {"role": "product_owner", "prompt": "hi"}
+    t = await _queue(api, dict(po))
     assert t.payload["model"] == "opus" and t.payload["_allow_opus"] is True and "_role_note" not in t.payload
-    await _spend(api, cap * warn + 0.01)                                   # between warn_at and cap
-    t = await _queue(api, dict(opus))
+    await _spend(api, cap * warn + 0.01)                                   # between warn_at and the cap: still Opus, flagged
+    t = await _queue(api, dict(po))
     assert t.payload["model"] == "opus" and t.payload["_allow_opus"] is True and "_role_note" in t.payload
-    await _spend(api, cap)                                                 # at/above the cap
-    t = await _queue(api, dict(opus))
-    assert t.payload["model"] == "sonnet" and "_allow_opus" not in t.payload
+    await _spend(api, cap - (cap * warn + 0.01) - 0.01)                    # total is now cap - 0.01: still under
+    t = await _queue(api, dict(po))
+    assert t.payload["model"] == "opus" and t.payload["_allow_opus"] is True
+    await _spend(api, 0.01)                                                # total is EXACTLY the cap: falls back
+    t = await _queue(api, dict(po))
+    assert t.payload["agent"] == "claude" and t.payload["model"] == "sonnet" and "_allow_opus" not in t.payload
     assert "cap reached" in t.payload["_role_note"]
 
 
@@ -109,7 +113,7 @@ async def test_unknown_role_is_4xx_lists_valid_roles_and_queues_nothing(api):
     with pytest.raises(HTTPException) as e:
         await _queue(api, {"role": "nonexistent", "prompt": "x"})
     assert 400 <= e.value.status_code < 500
-    assert all(n in e.value.detail for n in ROLE_NAMES + ["opus_chat"])
+    assert all(n in e.value.detail for n in ROLE_NAMES)
     assert await api.db.list_tasks(limit=10) == []
 
 

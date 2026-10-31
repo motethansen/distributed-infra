@@ -9,8 +9,6 @@ from typing import Any
 
 _MAX_STR = 200
 _PAYLOAD_KEYS = {"agent", "model", "role"}
-# Backs the claude-opus choice, so it is not listed a second time as role:opus_chat.
-_OPUS_ROLE = "opus_chat"
 
 
 def _short(value: Any) -> str:
@@ -28,8 +26,6 @@ def _choice(id_: str, label: str, kind: str, payload: dict[str, str], note: str)
 STATIC_CHOICES: list[dict[str, Any]] = [
     _choice("auto", "Auto", "auto", {}, "Router default: claude/sonnet."),
     _choice("claude", "Claude", "agent", _payload(agent="claude"), "Claude agent, default model."),
-    _choice("claude-opus", "Claude Opus", "role", _payload(role=_OPUS_ROLE),
-            "Opus through the opus_chat role grant; monthly cap applies, falls back to sonnet."),
     _choice("codex", "Codex", "agent", _payload(agent="codex"), "Codex agent."),
     _choice("agy", "Agy", "agent", _payload(agent="agy"), "Agy agent."),
     _choice("deepseek", "DeepSeek", "agent", _payload(agent="deepseek"),
@@ -38,10 +34,10 @@ STATIC_CHOICES: list[dict[str, Any]] = [
 
 
 def build_llm_choices(roles: dict[str, Any]) -> list[dict[str, Any]]:
-    """Static choices, then one `role:<name>` entry per role in the file (opus_chat excluded)."""
+    """Static choices, then one `role:<name>` entry per role in the file. Opus is reachable only as role:product_owner."""
     out = [{**c, "payload": dict(c["payload"])} for c in STATIC_CHOICES]
     for name, spec in (roles or {}).items():
-        if not isinstance(name, str) or not name or name == _OPUS_ROLE:
+        if not isinstance(name, str) or not name:
             continue
         note = spec.get("best_for") if isinstance(spec, dict) else ""
         out.append(_choice(f"role:{name}"[:_MAX_STR], name.replace("_", " ").title(), "role",

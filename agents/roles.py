@@ -42,6 +42,22 @@ def load_policy() -> dict:
         return {}
 
 
+def isolated_violation(payload: dict, policy: dict | None = None) -> str | None:
+    """A message when this task touches an isolated project without payload.approved, else None.
+
+    Applies to EVERY task, whatever its role or client: the project tag, or the working directory
+    naming the project, is enough. (A task with neither cannot be recognised; the guard is only as
+    good as the tag/cwd it is given.)"""
+    p = policy if policy is not None else load_policy()
+    iso = [str(x).strip().lower() for x in (p.get("isolated_projects") or []) if str(x).strip()]
+    proj = str(payload.get("project") or "").strip().lower()
+    cwd = str(payload.get("cwd") or "").lower()
+    hit = next((n for n in iso if n == proj or (n and n in cwd)), None)
+    if hit and payload.get("approved") is not True:
+        return f"project {hit!r} is isolated: a human must approve every task (payload.approved: true)"
+    return None
+
+
 def role_names() -> list[str]:
     return sorted((load_policy().get("roles") or {}).keys())
 
