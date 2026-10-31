@@ -103,6 +103,31 @@ Two levels, built in this order:
 - **Per conversation:** the existing conversation hand-over carries the
   transcript, so switching mid-chat keeps context.
 
+#### 3.3.1 `GET /llm-choices` (built)
+
+Clients build their picker from one endpoint instead of hard-coding the list. It returns an ordered
+JSON array; each entry is `{id, label, kind, payload, note}` where `kind` is `auto`, `agent` or
+`role` and `payload` is exactly what the client merges into the task payload.
+
+| id | kind | payload sent |
+|---|---|---|
+| `auto` | auto | `{}`: no agent, model or role, so the router's `default_class` applies (claude/sonnet) |
+| `claude`, `codex`, `agy`, `deepseek` | agent | `{agent: <id>}` |
+| `role:<name>` | role | `{role: <name>}` only, never an agent or model |
+
+- Role entries come from `config/roles.yaml`, one per role, so adding a role there adds a choice with
+  no code change. Opus is not a chat choice: it is reachable only as `role:product_owner`, which holds
+  the only `allow_opus` grant and a monthly cost cap (falls back to Sonnet when spent).
+  `BLOCKED_MODEL_SUBSTRINGS` in `agents/claude_agent.py` still refuses Opus for any task without that grant.
+- Privacy guard still wins: `deepseek` is rerouted to claude/sonnet for unlisted projects or
+  secret-looking prompts, and `role:dev_backend` on a private project resolves to its
+  `private_fallback` (claude/sonnet).
+- Isolated projects (e.g. `urbanlife`) need `payload.approved: true` on EVERY task: the orchestrator checks the
+  project tag and the working directory before it looks at any role, so a direct agent choice (`auto`, `claude`,
+  `deepseek`, ...) cannot bypass it. A task carrying neither a project tag nor a recognisable `cwd` cannot be recognised.
+- Role names are matched case-insensitively and trimmed. An unknown role is rejected with HTTP 422
+  listing the valid names, and nothing is queued.
+
 ### 3.4 Chat interface
 
 Recommendation: **keep the queue as the single back end and put thin clients in
