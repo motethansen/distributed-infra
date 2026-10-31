@@ -47,6 +47,10 @@ roles:
     best_for: "apply another agent's returned code to a branch, run the tests, open the PR."
     agent: claude
     model: sonnet
+  tester:
+    best_for: "independent validation: writes tests from the acceptance criteria (not from the code), runs the full suite on the story branch, reports pass/fail per criterion. Added by the dispatcher, never planned."
+    agent: agy
+    fallback: { agent: claude, model: sonnet }
   reviewer:
     best_for: "independent read-only check of a change; different model family from the author."
     agent: codex
