@@ -185,3 +185,42 @@ review findings per PR, rework tasks per story. Keep a model on a role only if
 its cost per accepted story point is competitive. Subscription logins (Claude,
 Codex, agy) report tokens but no dollars, so for those compare tokens and
 wall-clock time; only DeepSeek has real spend.
+
+## 6. Operating model (2026-10-31)
+
+### One interface for every project
+
+| Where you are | What you use | Model doing the chat |
+|---|---|---|
+| T3 Code / Claude Code on the MacBook | slash commands `/scrum`, `/review`, `/backlog <p>`, `/sm`, `/po`, `/groom` (`clients/claude-commands/`) | Haiku (cheapest); the fleet does the real work |
+| Any terminal (MacBook, mac-mini, thinkpad, SSH from the iPad) | `dis-agent` | none for the commands; fleet agents on request |
+| Codex, agy, pi, OpenCode | the `fleet_scrum` and `fleet_ask` MCP tools | whatever that harness runs |
+| iPad / phone | Vantage `scrum.html` (read-only view of the same digest); Flutter terminal for chat | n/a |
+
+Everything runs against the one queue and the one backlog repo, so the numbers cannot disagree.
+
+### Your three meetings
+
+- **Sprint planning** (`dis-agent planning -p P -s S`): the Product Owner proposes stories aligned with the architecture notes and the open
+  backlog, with a brief per agent role and its concerns. You give feedback, it revises (one Opus call per round), you accept.
+  Then `plan` (Scrum Master), you `approve`, `go`.
+- **Sprint review** (`dis-agent review`, then `dis-agent close`): the review queue shows what is waiting. For each story you see the
+  independent tester's per-criterion verdict, the reviewer's findings and the PRs. A story closes only on your yes, and only with a
+  passing validation (`--force` is the explicit override for criteria no machine can check).
+- **Scrum of scrums** (`dis-agent scrum`, or the Vantage card): one digest across all projects: ready for review, needs a decision,
+  stalled, suggested adjustments. `--narrate` has the Scrum Master (Sonnet) write the briefing.
+
+### Who validates what
+
+Author (Claude or DeepSeek) → **tester (agy, a different model family; writes tests from the acceptance criteria and runs the full suite)** →
+**reviewer (Codex, read-only; reads the diff and the tester's verdict)** → **you**. The tester's pass/fail is computed from its per-criterion
+table (`parse_validation`), never taken from its own claim of success.
+
+### Opus, used well
+
+Opus is only the Product Owner. It earns its cost where a wrong decision multiplies downstream: turning a request into stories, checking
+them against the architecture and the existing backlog, and writing the briefs the cheaper agents will follow. One real call so far
+(5 stories, 236k tokens in mostly cached context, 6.5k out) cost about $0.56, so the $50 month is roughly 90 planning calls.
+To spend it well: one call per planning or grooming session, give it the context it needs in that call (the tool does), batch your
+feedback into one revision round, and never use it for implementation, review, status or chat. At the cap it falls back to Sonnet and
+the digest warns from 80%.
