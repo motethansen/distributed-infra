@@ -3,6 +3,9 @@
 # Workers keep clones in different places (~/Projects/<dir>, ~/Projects/github/<org>/<dir>), so the
 # task prompt tells the agent to find an existing clone before cloning.
 
+# A sprint is 1-2 days of AGENT work. Human steps do not count. Calibrate from velocity after two real sprints.
+sprint_capacity_points: 15
+
 machines:
   mac-mini:    "macOS, always on. iOS/Xcode/Flutter builds, the orchestrator, WhatsApp bridge, Docker. Prefer for anything Apple or long-running."
   thinkpad-x1: "Linux. Android, Python, Node, Docker; second orchestrator. Prefer for Linux/Android work and to spread load."

@@ -164,7 +164,7 @@ def test_po_revise_sends_the_stored_stories_and_keeps_the_earlier_round(tmp_path
     monkeypatch.setattr(sc, "client", lambda: object())
     seen = {}
 
-    def fake(c, project, sprint, request, ctx, approved, as_agent, previous=None, feedback=""):
+    def fake(c, project, sprint, request, ctx, approved, as_agent, previous=None, feedback="", previous_concerns=None, capacity=15):
         seen.update(request=request, previous=previous, feedback=feedback)
         return [{"id": "S-1", "title": "new", "acceptance": ["a"]}], {"agent": "claude", "model": "opus", "concerns": ["hmm"]}
     monkeypatch.setattr(da.sf, "propose_stories", fake)
@@ -184,7 +184,7 @@ def test_planning_loops_on_feedback_until_accepted_and_refuses_a_non_terminal(tm
     monkeypatch.setattr(sc, "client", lambda: object())
     rounds = []
 
-    def fake(c, project, sprint, request, ctx, approved, as_agent, previous=None, feedback=""):
+    def fake(c, project, sprint, request, ctx, approved, as_agent, previous=None, feedback="", previous_concerns=None, capacity=15):
         rounds.append((request, feedback))
         return [{"id": "S-1", "title": f"v{len(rounds)}", "acceptance": ["a"]}], {"agent": "claude", "model": "opus", "concerns": []}
     monkeypatch.setattr(da.sf, "propose_stories", fake)
@@ -690,3 +690,123 @@ def test_a_fresh_po_round_without_feedback_archives_the_proposal_it_replaces(tmp
     da._po_round(argparse.Namespace(project="demo", sprint="S", as_agent=None, approved=False, context_file=None, no_context=True), "r2")
     assert json.loads((d / "stories.json").read_text())["stories"][0]["id"] == "N-1"
     assert [x["id"] for x in json.loads((d / "stories.v1.json").read_text())["stories"]] == ["S-1", "S-2", "S-3"]      # the earlier proposal survives
+
+
+# ── proposal discipline in the CLI ───────────────────────────────────────────
+
+def _vproposal(tmp_path, monkeypatch, revisions=None):
+    import json
+    d = tmp_path / "data" / "scrum" / "demo" / "1"
+    d.mkdir(parents=True)
+    stories = [{"id": "S-1", "title": "agent work", "points": 3, "acceptance": ["a"], "depends_on": ["S-2 must be done before this is deployed"]},
+               {"id": "S-2", "title": "HUMAN: set the key", "points": 1, "acceptance": ["key set", "401 without it"], "human_only": True},
+               {"id": "S-3", "title": "stretch thing", "points": 2, "acceptance": ["a"], "stretch": True}]
+    doc = {"project": "demo", "sprint": "1", "request": "r", "concerns": ["cut S-3 first"], "stories": stories}
+    if revisions:
+        doc["revisions"] = revisions
+    (d / "stories.json").write_text(json.dumps(doc))
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    return d
+
+
+def _ns2(**kw):
+    import argparse
+    base = dict(project="demo", sprint="1", as_agent=None, approved=False, context_file=None, no_context=True, request=None, revise=None, again=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_the_same_feedback_is_refused_within_the_hour_unless_again_and_a_different_one_is_not(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    _vproposal(tmp_path, monkeypatch, revisions=[{"feedback": "add VN-007", "at": (now - timedelta(minutes=2)).isoformat(timespec="seconds")}])
+    rounds = []
+    monkeypatch.setattr(da, "_po_round", lambda a, req, prev, fb, concerns=None: rounds.append((fb, concerns)))
+    with pytest.raises(SystemExit, match="already applied 2 minutes ago"):
+        da.cmd_po(_ns2(revise="add VN-007"))
+    with pytest.raises(SystemExit, match="already applied"):
+        da.cmd_po(_ns2(revise="  add VN-007  "))                                          # whitespace does not make it new
+    assert rounds == []
+    da.cmd_po(_ns2(revise="add VN-007", again=True))
+    da.cmd_po(_ns2(revise="a different request"))
+    assert [r[0] for r in rounds] == ["add VN-007", "a different request"] and rounds[0][1] == ["cut S-3 first"]       # earlier concerns are carried
+
+
+def test_old_feedback_may_be_repeated_after_an_hour(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    _vproposal(tmp_path, monkeypatch, revisions=[{"feedback": "x", "at": (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat(timespec="seconds")}])
+    rounds = []
+    monkeypatch.setattr(da, "_po_round", lambda a, req, prev, fb, concerns=None: rounds.append(fb))
+    da.cmd_po(_ns2(revise="x"))
+    assert rounds == ["x"]
+
+
+def test_plan_refuses_a_human_step_and_points_at_the_steps_list(tmp_path, monkeypatch):
+    import argparse
+    _vproposal(tmp_path, monkeypatch)
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"machines": {}, "projects": {}})
+    with pytest.raises(SystemExit, match="HUMAN step.*dis-agent steps -p demo -s 1.*dis-agent done"):
+        da.cmd_plan(argparse.Namespace(project="demo", sprint="1", story="S-2", approved=False, as_agent=None))
+
+
+def test_steps_lists_yours_with_what_they_block_and_done_records_evidence_only_on_a_yes(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    d = _vproposal(tmp_path, monkeypatch)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path / "viz")
+    da.cmd_steps(argparse.Namespace(project="demo", sprint="1"))
+    out = capsys.readouterr().out
+    assert "[TODO] S-2" in out and "blocks: S-1" in out and "- key set" in out and "agent work" not in out
+    monkeypatch.setattr("sys.stdin", type("S", (), {"isatty": lambda self: False})())
+    ns = lambda **k: argparse.Namespace(**{"project": "demo", "sprint": "1", "story": "S-2", "evidence": "set it, curl gave 401", "yes": False, **k})   # noqa: E731
+    with pytest.raises(SystemExit, match="needs your confirmation"):
+        da.cmd_done(ns())
+    with pytest.raises(SystemExit, match="done with evidence"):
+        da.cmd_done(ns(evidence="  ", yes=True))
+    with pytest.raises(SystemExit, match="not a human step"):
+        da.cmd_done(ns(story="S-1", yes=True))                                              # an agent story is not marked done by hand
+    assert not (d / "human-steps.json").exists()
+    da.cmd_done(ns(yes=True))
+    saved = json.loads((d / "human-steps.json").read_text())["S-2"]
+    assert saved["evidence"] == "set it, curl gave 401" and saved["by"] and "Now unblocked" in capsys.readouterr().out
+    da.cmd_steps(argparse.Namespace(project="demo", sprint="1"))
+    out = capsys.readouterr().out
+    assert "[DONE " in out and "evidence: set it, curl gave 401" in out and "blocks:" not in out
+
+
+def test_next_puts_a_blocking_human_step_first_and_forgets_it_once_done(tmp_path, monkeypatch):
+    import json
+    d = _vproposal(tmp_path, monkeypatch)
+    got = da._local_human_steps()["demo"]
+    assert got == [{"id": "S-2", "title": "HUMAN: set the key", "sprint": "1", "blocks": ["S-1"]}]
+    (d / "human-steps.json").write_text(json.dumps({"S-2": {"done_at": "2026-10-31T00:00:00+00:00", "by": "me", "evidence": "e"}}))
+    assert da._local_human_steps() == {}
+    (d / ".dismissed").write_text("x")
+    (d / "human-steps.json").unlink()
+    assert da._local_human_steps() == {}                                                    # a dismissed proposal has no pending steps
+
+
+def test_go_warns_when_the_story_depends_on_one_of_your_unfinished_steps(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    d = _vproposal(tmp_path, monkeypatch)
+    plan = {"project": "demo", "sprint": "1", "story": json.loads((d / "stories.json").read_text())["stories"][0],
+            "tasks": [{"key": "t1", "role": "dev_backend", "depends_on": [], "prompt": "p", "machine": None, "machine_required": False}]}
+    (d / "S-1.plan.json").write_text(json.dumps(plan))
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"machines": {}, "projects": {}})
+    monkeypatch.setattr(da.sf, "dispatch", lambda *a, **k: [])
+    monkeypatch.setattr(sc, "client", lambda: object())
+    da.cmd_go(argparse.Namespace(plan=str(d / "S-1.plan.json"), approved=False, cwd=None))
+    assert "depends on YOUR step(s) S-2" in capsys.readouterr().out
+    (d / "human-steps.json").write_text(json.dumps({"S-2": {"done_at": "2026-10-31T00:00:00+00:00", "by": "me", "evidence": "e"}}))
+    da.cmd_go(argparse.Namespace(plan=str(d / "S-1.plan.json"), approved=False, cwd=None))
+    assert "depends on YOUR step" not in capsys.readouterr().out
+
+
+def test_the_proposal_printout_shows_agent_work_stretch_capacity_and_human_steps(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"sprint_capacity_points": 4})
+    da._show_stories([{"id": "S-1", "title": "a", "points": 3}, {"id": "S-2", "title": "h", "points": 1, "human_only": True},
+                      {"id": "S-3", "title": "b", "points": 3}, {"id": "S-4", "title": "c", "points": 2, "stretch": True}], ["watch out"])
+    out = capsys.readouterr().out
+    assert "AGENT WORK 8 pts (3 stories): committed 6, stretch 2 (S-4) · capacity ~4" in out and "exceeds capacity by 2 pts" in out
+    assert "HUMAN STEPS 1 pts (1: S-2)" in out and "! concern: watch out" in out

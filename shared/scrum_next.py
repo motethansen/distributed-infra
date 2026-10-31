@@ -32,7 +32,7 @@ def _s(project: str, pri: int, title: str, why: str, command: str, kind: str, co
 
 
 def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: str | None = None, limit: int = 6,
-            proposals: dict[str, dict] | None = None) -> list[dict]:
+            proposals: dict[str, dict] | None = None, steps: dict[str, list[dict]] | None = None) -> list[dict]:
     """plans: [{project, sprint, sprint_number, story_id, backlog_id, title, approved, ran, path}]; groomed: {project: date}."""
     out: list[dict] = []
     projects = {p["project"]: p for p in board.get("projects", [])}
@@ -70,6 +70,15 @@ def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: st
                       "this is the planning meeting: give the Product Owner feedback to revise it, or plan the stories you accept",
                       f'dis-agent po -p {pn} -s {pr_["sprint"]} --revise "<your feedback>"   or   dis-agent plan -p {pn} -s {pr_["sprint"]} --story <ID>',
                       QUEUES, "a revision is one Opus call (about $0.3); plan is Sonnet (cents)"))
+    for pn, sts in (steps or {}).items():
+        if project and pn != project:
+            continue
+        for st in sts:
+            out.append(_s(pn, 1 if st["blocks"] else 3, f"Your step {st['id']} for {pn} sprint {st['sprint']} is waiting: {st['title'][:80]}"
+                          + (f" (blocks {', '.join(st['blocks'])})" if st["blocks"] else ""),
+                          "agents cannot do this one" + ("; doing it first keeps the stories it blocks from shipping broken" if st["blocks"] else ""),
+                          f'dis-agent steps -p {pn} -s {st["sprint"]}   then   dis-agent done -p {pn} -s {st["sprint"]} --story {st["id"]} --evidence "..."',
+                          READ + "; marking it done only records your evidence", "free"))
     review_total: list[dict] = []
     ungroomed: list[tuple[int, str]] = []
     stalled: list[str] = []

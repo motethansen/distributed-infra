@@ -14,6 +14,8 @@
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
   dis-agent next [-p PROJ]                        what to do next: ranked suggestions, each with the exact command, effect and cost
   dis-agent dismiss -p PROJ -s SPR                stop `next` offering a sprint proposal you will not pursue (files are kept)
+  dis-agent steps -p PROJ -s SPR                  YOUR steps in a sprint proposal (human-only stories) with what each blocks
+  dis-agent done -p PROJ -s SPR --story S-2 --evidence "..."   mark one of your steps done
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
@@ -226,21 +228,38 @@ def _show_stories(stories: list[dict], concerns: list[str]) -> None:
             print(f"           briefs for: {', '.join(s_['briefs'])}")
     for c_ in concerns:
         print(f"  ! concern: {c_}")
+    try:
+        cap = int((projects_cfg() or {}).get("sprint_capacity_points", 15))
+    except (OSError, ValueError, TypeError):
+        cap = 15
+    m = sf.proposal_summary(stories, cap)
+    print(f"\n  AGENT WORK {m['agent_points']:g} pts ({len(m['agent'])} stories): committed {m['committed_points']:g}"
+          + (f", stretch {m['stretch_points']:g} ({', '.join(m['stretch'])})" if m["stretch"] else "") + f" · capacity ~{cap}"
+          + (f"  ⚠ committed work exceeds capacity by {m['committed_points'] - cap:g} pts: cut or mark stretch" if m["over_capacity"] else "")
+          + f"\n  HUMAN STEPS {m['human_points']:g} pts ({len(m['human'])}: {', '.join(m['human']) or '-'}): yours, not planned for agents; see `dis-agent steps`")
 
 
-def _po_round(a, request: str, previous: list[dict] | None = None, feedback: str = "") -> list[dict]:
+def _po_round(a, request: str, previous: list[dict] | None = None, feedback: str = "", previous_concerns: list[str] | None = None) -> list[dict]:
     ctx = Path(a.context_file).read_text() if getattr(a, "context_file", None) else ""
     if not getattr(a, "no_context", False):
         ctx = sf.load_context(viz_repo(), a.project) + ("\n\n" + ctx if ctx else "")
+    try:
+        capacity = int((projects_cfg() or {}).get("sprint_capacity_points", 15))
+    except (OSError, ValueError, TypeError):
+        capacity = 15
     stories, done = sf.propose_stories(sc.client(), a.project, a.sprint, request, ctx, a.approved, a.as_agent,
-                                       previous=previous, feedback=feedback)
+                                       previous=previous, feedback=feedback, previous_concerns=previous_concerns, capacity=capacity)
     d = ROOT / "data" / "scrum" / a.project / a.sprint
     f = d / "stories.json"
+    revisions = list(json.loads(f.read_text()).get("revisions", [])) if f.exists() and previous is not None else []
+    if feedback:
+        revisions.append({"feedback": feedback, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     if f.exists():                                                  # never lose an earlier round, revision or not
         (d / f"stories.v{len(list(d.glob('stories.v*.json'))) + 1}.json").write_text(f.read_text())
     (d / ".dismissed").unlink(missing_ok=True)
     p = sf.save(ROOT, a.project, a.sprint, "stories.json", {"project": a.project, "sprint": a.sprint, "request": request,
-                "proposed_by": done.get("agent"), "model": done.get("model"), "concerns": done.get("concerns", []), "stories": stories})
+                "proposed_by": done.get("agent"), "model": done.get("model"), "concerns": done.get("concerns", []),
+                "revisions": revisions, "stories": stories})
     print(f"Product Owner ({done.get('agent')} {done.get('model') or ''}) proposed {len(stories)} stories -> {p}")
     _show_stories(stories, done.get("concerns", []))
     return stories
@@ -259,7 +278,14 @@ def cmd_po(a) -> None:
         if not f.exists():
             sys.exit(f"{f} not found; run `po` with a request first")
         prev = json.loads(f.read_text())
-        _po_round(a, prev["request"], prev["stories"], a.revise)
+        last = (prev.get("revisions") or [{}])[-1]
+        if not getattr(a, "again", False) and last.get("feedback") == a.revise.strip() and last.get("at"):
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last["at"])).total_seconds()
+            if age < 3600:
+                sys.exit(f"this exact feedback was already applied {int(age // 60)} minutes ago (revision {len(prev['revisions'])}): running it again is another Opus call "
+                         "on the already-revised proposal and can change the Product Owner's recommendations. Read the result with "
+                         f"`dis-agent next -p {a.project}`, or pass --again if you really want a second pass.")
+        _po_round(a, prev["request"], prev["stories"], a.revise.strip(), prev.get("concerns"))
     else:
         if not a.request:
             sys.exit("give the request, or --revise 'feedback' to adjust the existing stories")
@@ -289,7 +315,8 @@ def cmd_planning(a) -> None:
             break
         rounds += 1
         print("  (each round is one Product Owner call; Opus is capped, then falls back to Sonnet)")
-        stories = _po_round(a, request, stories, fb)
+        cur = json.loads(f.read_text()) if f.exists() else {}
+        stories = _po_round(a, request, stories, fb, cur.get("concerns"))
     print(f"\n{'Accepted' if fb != 'q' else 'Stopped'} after {rounds} revision(s). For each story you want built:\n"
           f"  dis-agent plan -p {a.project} -s {a.sprint} --story <ID>   then   dis-agent approve <plan>")
 
@@ -333,6 +360,9 @@ def cmd_plan(a) -> None:
     story = next((s for s in json.loads(f.read_text())["stories"] if s["id"] == a.story), None)
     if not story:
         sys.exit(f"story {a.story} not in {f}")
+    if story.get("human_only"):
+        sys.exit(f"{a.story} is a HUMAN step, not agent work, so there is nothing to plan. It is on your list: `dis-agent steps -p {a.project} -s {a.sprint}`; "
+                 f"when it is done: `dis-agent done -p {a.project} -s {a.sprint} --story {a.story} --evidence \"what you did\"`.")
     cfg = projects_cfg()
     tasks, done = sf.plan_story(sc.client(), a.project, a.sprint, story, sc.role_hints(), a.approved, a.as_agent,
                                 machines=cfg["machines"])
@@ -382,6 +412,12 @@ def cmd_go(a) -> None:
     cfg = projects_cfg()
     tasks = sf.parse_plan(json.dumps({"tasks": plan["tasks"]}), set(sc.role_hints()), set(cfg["machines"]))
     ok = sf.is_approved(plan)
+    sd = path.parent
+    if (sd / "stories.json").exists():
+        blockers = sf.blocking_steps(plan["story"], json.loads((sd / "stories.json").read_text())["stories"], set(_steps_done(sd)))
+        if blockers:
+            print(f"  ⚠ this story depends on YOUR step(s) {', '.join(blockers)}, not marked done (`dis-agent steps -p {plan['project']} -s {plan['sprint']}`). "
+                  "Agents will do their part, but check the dependency note before anything is deployed.")
     if not ok:
         print("NOT APPROVED — showing a dry run. " + ("The plan changed since you approved it." if plan.get("approval") else f"Approve first: dis-agent approve {path}"))
     bid = plan.get("backlog_id")
@@ -509,6 +545,79 @@ def _local_proposals() -> dict[str, dict]:
     return out
 
 
+def _steps_done(d: Path) -> dict:
+    f = d / "human-steps.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def _local_human_steps() -> dict[str, list[dict]]:
+    """Pending human steps of waiting proposals, with the agent stories each one blocks."""
+    out: dict[str, list[dict]] = {}
+    for f in sorted((ROOT / "data" / "scrum").glob("*/*/stories.json")):
+        if (f.parent / ".dismissed").exists():
+            continue
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        done = set(_steps_done(f.parent))
+        for st in d.get("stories", []):
+            if st.get("human_only") and st["id"] not in done:
+                blocks = [o["id"] for o in d["stories"] if not o.get("human_only") and st["id"] in sf.blocking_steps(o, d["stories"], done)]
+                out.setdefault(d["project"], []).append({"id": st["id"], "title": st["title"], "sprint": d["sprint"], "blocks": blocks})
+    return out
+
+
+def cmd_steps(a) -> None:
+    sprint = resolve_sprint_dir(a.project, a.sprint)
+    d = ROOT / "data" / "scrum" / a.project / sprint
+    if not (d / "stories.json").exists():
+        sys.exit(f"no proposal at {d}")
+    stories = json.loads((d / "stories.json").read_text())["stories"]
+    done = _steps_done(d)
+    steps = [s for s in stories if s.get("human_only")]
+    if not steps:
+        print("This proposal has no human steps.")
+        return
+    print(f"Your steps for {a.project} sprint {sprint} (agents never do these):\n")
+    for st in steps:
+        mark = f"DONE {done[st['id']]['done_at'][:10]}" if st["id"] in done else "TODO"
+        blocks = [o["id"] for o in stories if not o.get("human_only") and st["id"] in sf.blocking_steps(o, stories, set(done))]
+        print(f"  [{mark}] {st['id']}  {st['title']}  ({st.get('points') or 0:g} pt)" + (f"   blocks: {', '.join(blocks)}" if blocks and st["id"] not in done else ""))
+        for c in st.get("acceptance", []):
+            print(f"           - {c}")
+        if st["id"] in done:
+            print(f"           evidence: {done[st['id']]['evidence']}")
+    todo = [s["id"] for s in steps if s["id"] not in done]
+    if todo:
+        print(f"\nWhen one is finished: dis-agent done -p {a.project} -s {sprint} --story <ID> --evidence \"what you did and how you checked it\"")
+
+
+def cmd_done(a) -> None:
+    sprint = resolve_sprint_dir(a.project, a.sprint)
+    d = ROOT / "data" / "scrum" / a.project / sprint
+    stories = json.loads((d / "stories.json").read_text())["stories"] if (d / "stories.json").exists() else []
+    st = next((s for s in stories if s["id"] == a.story), None)
+    if not st or not st.get("human_only"):
+        sys.exit(f"{a.story} is not a human step of this proposal (`dis-agent steps -p {a.project} -s {sprint}` lists them)")
+    if not (a.evidence or "").strip():
+        sys.exit("a step is done with evidence: --evidence \"what you did and how you checked it\" (never put a secret in it)")
+    if a.yes:
+        ok = True
+    elif sys.stdin.isatty():
+        ok = input(f"Mark {a.story} done: {st['title'][:70]} ? [y/N] ").strip().lower() == "y"
+    else:
+        sys.exit("not marking it done: needs your confirmation (run this in a terminal, or pass --yes)")
+    if not ok:
+        print("left as TODO")
+        return
+    done = _steps_done(d)
+    done[a.story] = {"done_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "by": os.environ.get("USER", "human"), "evidence": a.evidence.strip()}
+    (d / "human-steps.json").write_text(json.dumps(done, indent=2, ensure_ascii=False))
+    unblocked = [o["id"] for o in stories if not o.get("human_only") and a.story in re.findall(r"\bS-\d+\b", " ".join(map(str, o.get("depends_on") or [])))]
+    print(f"{a.story} marked done." + (f" Now unblocked (this step was one of their dependencies): {', '.join(unblocked)}" if unblocked else ""))
+
+
 def cmd_dismiss(a) -> None:
     """Stop `next` offering a sprint proposal you will not pursue (the files are kept; a new `po` round revives it)."""
     sprint = resolve_sprint_dir(a.project, a.sprint)
@@ -534,7 +643,7 @@ def cmd_next(a) -> None:
     groomed = {}
     for g in sorted((ROOT / "data" / "scrum").glob("*/grooming/groom-*.json")):
         groomed[g.parent.parent.name] = g.stem.removeprefix("groom-")
-    sugs = scrum_next.suggest(_board(), _local_plans(), groomed, a.project, a.limit, proposals=_local_proposals())
+    sugs = scrum_next.suggest(_board(), _local_plans(), groomed, a.project, a.limit, proposals=_local_proposals(), steps=_local_human_steps())
     if a.json:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
@@ -738,6 +847,7 @@ def main() -> None:
     po.add_argument("-p", "--project", required=True); po.add_argument("-s", "--sprint", help="sprint label or number (default: the next free number)")
     po.add_argument("--context-file"); po.add_argument("--no-context", action="store_true", help="skip the architecture + backlog context")
     po.add_argument("--revise", metavar="FEEDBACK", help="adjust the existing stories with your planning feedback")
+    po.add_argument("--again", action="store_true", help="apply the same feedback again (normally refused within an hour)")
     po.add_argument("request", nargs="?")
     pn = sub.add_parser("planning", parents=[common]); pn.set_defaults(fn=cmd_planning)
     pn.add_argument("-p", "--project", required=True); pn.add_argument("-s", "--sprint", help="sprint label or number (default: the next free number)")
@@ -758,6 +868,11 @@ def main() -> None:
     vl.add_argument("--branch", help="for a story already merged: test this branch (usually main); new tests go on a separate PR branch")
     ds = sub.add_parser("dismiss"); ds.set_defaults(fn=cmd_dismiss)
     ds.add_argument("-p", "--project", required=True); ds.add_argument("-s", "--sprint", required=True)
+    stp = sub.add_parser("steps"); stp.set_defaults(fn=cmd_steps)
+    stp.add_argument("-p", "--project", required=True); stp.add_argument("-s", "--sprint", required=True)
+    dn = sub.add_parser("done"); dn.set_defaults(fn=cmd_done)
+    dn.add_argument("-p", "--project", required=True); dn.add_argument("-s", "--sprint", required=True); dn.add_argument("--story", required=True)
+    dn.add_argument("--evidence"); dn.add_argument("--yes", action="store_true")
     nx = sub.add_parser("next"); nx.set_defaults(fn=cmd_next); nx.add_argument("-p", "--project")
     nx.add_argument("--limit", type=int, default=6); nx.add_argument("--json", action="store_true")
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
