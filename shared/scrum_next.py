@@ -31,7 +31,8 @@ def _s(project: str, pri: int, title: str, why: str, command: str, kind: str, co
     return {"project": project, "priority": pri, "title": title, "why": why, "command": command, "kind": kind, "cost": cost}
 
 
-def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: str | None = None, limit: int = 6) -> list[dict]:
+def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: str | None = None, limit: int = 6,
+            proposals: dict[str, dict] | None = None) -> list[dict]:
     """plans: [{project, sprint, sprint_number, story_id, backlog_id, title, approved, ran, path}]; groomed: {project: date}."""
     out: list[dict] = []
     projects = {p["project"]: p for p in board.get("projects", [])}
@@ -60,6 +61,15 @@ def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: st
                           "read the task table first (roles, agents, machines); editing the plan voids an approval",
                           f"dis-agent approve {pl['path']}", CHANGES, "free"))
 
+    proposals = proposals or {}
+    for pn, pr_ in proposals.items():
+        if project and pn != project:
+            continue
+        out.append(_s(pn, 1, f"A sprint proposal for {pn} is waiting for you: sprint {pr_['sprint']}, {pr_['stories']} stories, {pr_['points']:g} points, "
+                              f"{len(pr_['todo'])} not planned yet ({', '.join(pr_['todo'][:5])}{'…' if len(pr_['todo']) > 5 else ''})",
+                      "this is the planning meeting: give the Product Owner feedback to revise it, or plan the stories you accept",
+                      f'dis-agent po -p {pn} -s {pr_["sprint"]} --revise "<your feedback>"   or   dis-agent plan -p {pn} -s {pr_["sprint"]} --story <ID>',
+                      QUEUES, "a revision is one Opus call (about $0.3); plan is Sonnet (cents)"))
     review_total: list[dict] = []
     ungroomed: list[tuple[int, str]] = []
     stalled: list[str] = []
@@ -76,7 +86,7 @@ def suggest(board: dict, plans: list[dict], groomed: dict[str, str], project: st
         open_sprint = any((sp.get("points_remaining") or 0) > 0 and sp.get("stories") for sp in v.get("sprints", []))
         open_n = len(v.get("unscheduled") or [])
         has_plan = any(pl["project"] == pn for pl in plans)
-        if open_n and not open_sprint and not has_plan:
+        if open_n and not open_sprint and not has_plan and pn not in proposals:
             if pn in groomed:
                 out.append(_s(pn, 2, f"{pn} has {_n(open_n, 'open story', 'open stories')} and no sprint running (groomed {groomed[pn]})",
                               "the Product Owner has reviewed the backlog; the next step is to plan a sprint with it",
