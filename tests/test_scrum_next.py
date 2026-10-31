@@ -140,3 +140,13 @@ def test_a_waiting_proposal_is_first_and_replaces_the_start_a_sprint_or_groom_su
     assert any(x["command"] == "/groom b" for x in s)                                                    # other projects are unaffected
     only_b = sn.suggest(board([proj("a", open_), proj("b", open_)]), [], {}, project="b", proposals=props)
     assert not any("proposal" in x["title"] for x in only_b)                                             # -p filters proposals too
+
+
+def test_a_human_step_that_blocks_agent_work_comes_first_and_one_that_does_not_is_lower():
+    steps = {"a": [{"id": "S-2", "title": "set the key", "sprint": "1", "blocks": ["S-1"]}, {"id": "S-5", "title": "install", "sprint": "1", "blocks": []}]}
+    s = sn.suggest(board([proj("a")]), [], {}, steps=steps)
+    by = {x["title"].split(":")[0]: x for x in s}
+    assert by["Your step S-2 for a sprint 1 is waiting"]["priority"] == 1 and "(blocks S-1)" in s[0]["title"]
+    assert by["Your step S-5 for a sprint 1 is waiting"]["priority"] == 3 and "blocks" not in by["Your step S-5 for a sprint 1 is waiting"]["title"]
+    assert 'dis-agent done -p a -s 1 --story S-2 --evidence "..."' in s[0]["command"]
+    assert sn.suggest(board([proj("a")]), [], {}, steps=steps, project="b") == []

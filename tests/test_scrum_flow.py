@@ -650,3 +650,42 @@ def test_verify_pr_merged_trusts_only_github_saying_merged():
         raise FileNotFoundError("gh")
     with pytest.raises(sf.PlanError, match="could not ask GitHub"):
         sf.verify_pr_merged("u", run=boom)
+
+
+# ── proposal discipline: capacity, stretch, human steps, consistent revisions ─
+
+def _story(i, pts, human=False, stretch=None, title=None, deps=None):
+    s = {"id": i, "title": title or f"title {i}", "points": pts, "acceptance": ["a"], "human_only": human, "depends_on": deps or []}
+    if stretch is not None:
+        s["stretch"] = stretch
+    return s
+
+
+def test_proposal_summary_separates_agent_work_human_steps_and_stretch_and_flags_over_capacity():
+    st = [_story("S-1", 3), _story("S-2", 1, human=True), _story("S-3", 5), _story("S-4", 4, stretch=True),
+          _story("S-5", 6, title="Second app — STRETCH"), _story("S-6", 1, human=True)]
+    m = sf.proposal_summary(st, capacity=10)
+    assert (m["agent_points"], m["human_points"], m["stretch_points"], m["committed_points"]) == (18, 2, 10, 8)
+    assert m["stretch"] == ["S-4", "S-5"] and m["human"] == ["S-2", "S-6"] and m["agent"] == ["S-1", "S-3", "S-4", "S-5"]
+    assert m["over_capacity"] is False and sf.proposal_summary(st, capacity=7)["over_capacity"] is True
+    assert sf.proposal_summary(st, capacity=8)["over_capacity"] is False                           # exactly at capacity is fine
+    assert sf.proposal_summary([_story("S-1", None)], 5)["agent_points"] == 0                       # a missing point value is zero, not a crash
+
+
+def test_a_story_waits_on_the_human_steps_its_depends_on_names_until_they_are_done():
+    st = [_story("S-1", 3, deps=["S-2 must be done on the mini before this is deployed", "S-9 is unrelated text for an agent story"]),
+          _story("S-2", 1, human=True), _story("S-9", 3), _story("S-7", 2, deps=["S-1", "S-6"]), _story("S-6", 1, human=True)]
+    assert sf.blocking_steps(st[0], st, set()) == ["S-2"]                                          # S-9 is an agent story: not a human step
+    assert sf.blocking_steps(st[0], st, {"S-2"}) == []
+    assert sf.blocking_steps(st[3], st, set()) == ["S-6"]                                          # S-1 is agent work, only S-6 blocks
+    assert sf.blocking_steps(_story("S-2", 1, human=True, deps=["S-2"]), st, set()) == []          # never blocked by itself
+    assert sf.blocking_steps(_story("S-3", 1), st, set()) == []
+
+
+def test_the_product_owner_is_told_the_capacity_the_stretch_field_and_its_own_earlier_concerns_on_a_revision():
+    first = sf.po_prompt("p", "1", "req", capacity=12)
+    assert "roughly 12 agent points" in first and '"stretch":false' in first and "state the order in which scope is cut ONCE" in first
+    assert "previous round" not in first
+    rev = sf.po_prompt("p", "1", "req", previous=[{"id": "S-1"}], feedback="smaller", previous_concerns=["cut S-8 before S-11"], capacity=12)
+    assert "concerns from the previous round" in rev and "cut S-8 before S-11" in rev and "keep the same scope-cut order" in rev
+    assert "previous round" not in sf.po_prompt("p", "1", "req", previous=[{"id": "S-1"}], feedback="smaller")        # nothing to carry: nothing said

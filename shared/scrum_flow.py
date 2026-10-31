@@ -36,7 +36,7 @@ class PlanError(ValueError):
 # ── prompts ──────────────────────────────────────────────────────────────────
 
 def po_prompt(project: str, sprint: str, request: str, context: str = "", previous: list[dict] | None = None,
-              feedback: str = "") -> str:
+              feedback: str = "", previous_concerns: list[str] | None = None, capacity: int = 15) -> str:
     ctx = ("\nContext (architecture notes and the open backlog, read-only):\n" + context.strip()) if context.strip() else ""
     rev = ""
     if previous:
@@ -44,6 +44,10 @@ def po_prompt(project: str, sprint: str, request: str, context: str = "", previo
                + "\n\nThe human product owner gave this feedback at sprint planning. Revise the stories to take it into account; "
                "keep story IDs that still stand, drop or merge the rest, and say in `concerns` anything in the feedback you "
                "disagree with and why:\n" + feedback.strip() + "\n")
+        if previous_concerns:
+            rev += ("\nYour concerns from the previous round were:\n- " + "\n- ".join(c[:500] for c in previous_concerns[:12])
+                    + "\nBe consistent with them: keep the same scope-cut order and the same recommendations unless the feedback changes them, "
+                    "and say so if you change one.\n")
     return f"""You are the Product Owner for the project "{project}" (sprint {sprint}).
 
 Business request:
@@ -58,9 +62,13 @@ which files or interfaces, what not to touch. Briefs are prompts for other model
 Mark stories that need a human-only step (payment dashboard, app-store console). Spend your effort on trade-offs, not on restating
 the request.
 
+Capacity: a sprint is 1-2 days of AGENT work, roughly {capacity} agent points (human steps do not count). Set "stretch": true on any
+story that should only start when the earlier ones are done or a spike has passed, state the order in which scope is cut ONCE in
+`concerns`, and keep the committed (non-stretch) agent points within that capacity.
+
 Answer with ONLY a JSON object, no prose:
 {{"concerns":["..."],"stories":[{{"id":"S-1","title":"...","points":3,"acceptance":["..."],"edge_cases":["..."],
-"out_of_scope":["..."],"depends_on":[],"risks":["..."],"architecture_notes":"...","briefs":{{"dev_backend":"..."}},"human_only":false}}]}}"""
+"out_of_scope":["..."],"depends_on":[],"risks":["..."],"architecture_notes":"...","briefs":{{"dev_backend":"..."}},"human_only":false,"stretch":false}}]}}"""
 
 
 def groom_prompt(project: str, context: str) -> str:
@@ -304,10 +312,11 @@ def tags(project: str, sprint: str, story: str | None, role: str, approved: bool
 
 def propose_stories(c: FleetClient, project: str, sprint: str, request: str, context: str = "",
                     approved: bool = False, as_agent: str | None = None, sleep=time.sleep,
-                    previous: list[dict] | None = None, feedback: str = "") -> tuple[list[dict], dict]:
+                    previous: list[dict] | None = None, feedback: str = "", previous_concerns: list[str] | None = None,
+                    capacity: int = 15) -> tuple[list[dict], dict]:
     """Returns (stories, task). `task["concerns"]` carries the Product Owner's concerns about the request."""
     t = c.queue(tags(project, sprint, None, "product_owner", approved, as_agent, None,
-                     prompt=po_prompt(project, sprint, request, context, previous, feedback), timeout=900), f"PO {project} {sprint}")
+                     prompt=po_prompt(project, sprint, request, context, previous, feedback, previous_concerns, capacity), timeout=900), f"PO {project} {sprint}")
     done = c.wait([t["id"]], sleep=sleep)[t["id"]]
     if done["status"] != "done":
         raise PlanError(f"product owner task {done['status']}: {done.get('notes') or ''}")
@@ -761,3 +770,28 @@ def verify_pr_merged(url: str, run=subprocess.run) -> dict:
     if info.get("state") != "MERGED":
         raise PlanError(f"{url} is {info.get('state')}, not merged")
     return {"merged_at": (info.get("mergedAt") or "")[:10], "title": info.get("title", "")}
+
+
+# ── proposal discipline: capacity, stretch, human steps ──────────────────────
+
+def is_stretch(story: dict) -> bool:
+    return bool(story.get("stretch")) or "stretch" in (story.get("title") or "").lower()
+
+
+def proposal_summary(stories: list[dict], capacity: int = 15) -> dict:
+    """Agent work vs human steps vs stretch, against the sprint's capacity. Human steps never count toward capacity."""
+    agent = [s for s in stories if not s.get("human_only")]
+    human = [s for s in stories if s.get("human_only")]
+    stretch = [s for s in agent if is_stretch(s)]
+    committed = [s for s in agent if not is_stretch(s)]
+    pts = lambda xs: sum(float(x.get("points") or 0) for x in xs)          # noqa: E731
+    return {"agent_points": pts(agent), "human_points": pts(human), "stretch_points": pts(stretch), "committed_points": pts(committed),
+            "capacity": capacity, "over_capacity": pts(committed) > capacity, "stretch": [s["id"] for s in stretch],
+            "human": [s["id"] for s in human], "agent": [s["id"] for s in agent]}
+
+
+def blocking_steps(story: dict, stories: list[dict], done: set[str]) -> list[str]:
+    """Human steps this story's depends_on names that are not done yet (a free-text depends_on is searched for story IDs)."""
+    human = {s["id"] for s in stories if s.get("human_only")}
+    text = " ".join(str(x) for x in (story.get("depends_on") or []))
+    return [i for i in dict.fromkeys(re.findall(r"\bS-\d+\b", text)) if i in human and i not in done and i != story["id"]]
