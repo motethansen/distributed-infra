@@ -491,3 +491,43 @@ def test_close_takes_the_story_by_plan_id_or_backlog_id(tmp_path, monkeypatch, c
         assert "DM-002 (S-1)" in capsys.readouterr().out, ident
     da.cmd_close(argparse.Namespace(project="demo", sprint="S-roles", story=["DM-777"], yes=False, force=False, check=True))
     assert "DM-777: no registered plan" in capsys.readouterr().out
+
+
+# ── dis-agent next ───────────────────────────────────────────────────────────
+
+def test_local_plans_report_approval_and_whether_the_plan_ran(tmp_path, monkeypatch):
+    import json
+    from shared import scrum_flow
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    d = tmp_path / "data" / "scrum" / "demo" / "S"
+    d.mkdir(parents=True)
+    plan = {"project": "demo", "sprint": "S", "story": {"id": "S-1", "title": "T"}, "tasks": [{"key": "t1"}], "backlog_id": "DM-1", "sprint_number": 2}
+    f = d / "S-1.plan.json"
+    f.write_text(json.dumps(plan))
+    got = da._local_plans()
+    assert got == [{"project": "demo", "sprint": "S", "sprint_number": 2, "story_id": "S-1", "backlog_id": "DM-1", "title": "T",
+                    "approved": False, "ran": False, "path": "data/scrum/demo/S/S-1.plan.json"}]
+    scrum_flow.approve_plan(f, "me", "2026-10-31T00:00:00+00:00")
+    f.with_suffix(".run.json").write_text("[]")
+    got = da._local_plans()[0]
+    assert got["approved"] is True and got["ran"] is True
+    (d / "broken.plan.json").write_text("{not json")
+    assert len(da._local_plans()) == 1                                           # an unreadable plan file is skipped, not fatal
+
+
+def test_next_prints_ranked_suggestions_or_json_and_reads_the_grooming_reports(tmp_path, monkeypatch, capsys):
+    import argparse
+    import json
+    monkeypatch.setattr(da, "ROOT", tmp_path)
+    g = tmp_path / "data" / "scrum" / "demo" / "grooming"
+    g.mkdir(parents=True)
+    (g / "groom-2026-10-31.json").write_text("{}")
+    board = {"projects": [{"project": "demo", "backlog_view": {"sprints": [], "unscheduled": [{"id": "D-1", "status": "planned", "evidence": ""}], "cancelled": []}}],
+             "digest": {"review_queue": [], "decisions": [], "opus": None}}
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: board})())
+    da.cmd_next(argparse.Namespace(project=None, limit=6, json=False))
+    out = capsys.readouterr().out
+    assert "demo has 1 open story and no sprint running (groomed 2026-10-31)" in out and "command: /sprint demo" in out
+    da.cmd_next(argparse.Namespace(project="demo", limit=6, json=True))
+    data = json.loads(capsys.readouterr().out)
+    assert data[0]["command"] == "/sprint demo" and data[0]["kind"].startswith("queues agent work")

@@ -12,6 +12,7 @@
   dis-agent plan -p PROJ -s SPR --story ID        Scrum Master plans roles, machines, order (nothing queued)
   dis-agent approve PLAN                          you approve exactly that plan
   dis-agent go PLAN                               run an approved plan (dry run unless approved)
+  dis-agent next [-p PROJ]                        what to do next: ranked suggestions, each with the exact command, effect and cost
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
@@ -457,6 +458,32 @@ def cmd_cancel(a) -> None:
             viz_repo(), a.project, n, a.story, f"❌ cancelled {day}", day, closing=True))
 
 
+def _local_plans() -> list[dict]:
+    from shared import scrum_flow
+    out = []
+    for f in sorted((ROOT / "data" / "scrum").glob("*/*/*.plan.json")):
+        try:
+            pl = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        out.append({"project": pl["project"], "sprint": pl["sprint"], "sprint_number": pl.get("sprint_number"), "story_id": pl["story"]["id"],
+                    "backlog_id": pl.get("backlog_id"), "title": pl["story"]["title"], "approved": scrum_flow.is_approved(pl),
+                    "ran": f.with_suffix(".run.json").exists(), "path": str(f.relative_to(ROOT))})
+    return out
+
+
+def cmd_next(a) -> None:
+    from shared import scrum_next
+    groomed = {}
+    for g in sorted((ROOT / "data" / "scrum").glob("*/grooming/groom-*.json")):
+        groomed[g.parent.parent.name] = g.stem.removeprefix("groom-")
+    sugs = scrum_next.suggest(_board(), _local_plans(), groomed, a.project, a.limit)
+    if a.json:
+        print(json.dumps(sugs, indent=2, ensure_ascii=False))
+        return
+    print(scrum_next.render(sugs))
+
+
 def _board() -> dict:
     b = sc.client()._call("GET", "/scrum/sprints")
     if "digest" not in b:
@@ -635,6 +662,8 @@ def main() -> None:
     vl.add_argument("-p", "--project", required=True); vl.add_argument("-s", "--sprint", required=True)
     vl.add_argument("--story", required=True, help="the plan's story id (S-1) or its backlog id (DI-056)")
     vl.add_argument("--branch", help="for a story already merged: test this branch (usually main); new tests go on a separate PR branch")
+    nx = sub.add_parser("next"); nx.set_defaults(fn=cmd_next); nx.add_argument("-p", "--project")
+    nx.add_argument("--limit", type=int, default=6); nx.add_argument("--json", action="store_true")
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
     bk.add_argument("-p", "--project", required=True); bk.add_argument("--limit", type=int, default=40)
     bk.add_argument("--all", action="store_true", help="also list sprints with no stories")
