@@ -415,6 +415,17 @@ async def _pull_scrum_repo() -> None:
         _SCRUM_CACHE["ts"] = 0.0
 
 
+@app.post("/scrum/refresh")
+async def scrum_refresh(x_secret_key: str = Header(default="")):
+    """Pull the notes repo and drop the cached board NOW, so a change just pushed shows immediately. Returns the commit the
+    board is reading, so the caller can check it matches what it pushed."""
+    _check_auth(x_secret_key)
+    _PULL["ts"] = 0.0
+    await _pull_scrum_repo()
+    _SCRUM_CACHE["ts"] = 0.0
+    return {"head": _repo_head(SCRUM_REPO).get("commit"), "pull": {k: _PULL[k] for k in ("at", "ok", "error")}}
+
+
 @app.get("/scrum/sprints")
 async def scrum_sprints(x_secret_key: str = Header(default="")):
     """Per project: backlog completion; per sprint: stories, points, burndown; joined with the

@@ -35,6 +35,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,8 +67,23 @@ def viz_repo() -> Path:
     return Path(os.environ.get("VIZNEO_REPO", "~/Projects/github/techstartups/vizneoprojects")).expanduser()
 
 
+def _refresh_board() -> None:
+    """After a pushed change, make the board re-read the notes repo now and say whether it has our commit. Never fatal."""
+    try:
+        head = subprocess.run(["git", "-C", str(viz_repo()), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip()
+        got = (sc.client()._call("POST", "/scrum/refresh") or {}).get("head") or ""
+        if head and got and (got.startswith(head) or head.startswith(got)):
+            print(f"  board: refreshed, it is now reading {got}: your change is visible")
+        else:
+            print(f"  board: asked to refresh but it reads {got or 'an older commit'}, not {head}; it catches up within ~3 minutes")
+    except Exception as e:                                   # noqa: BLE001 — a refresh problem must not look like a failed change
+        print(f"  board: could not be refreshed now ({type(e).__name__}); it catches up within ~3 minutes")
+
+
 def _report(what: str, r: dict) -> None:
     print(f"  backlog: {what} (committed{', pushed' if r['pushed'] else '; NOT pushed — ' + ' '.join(r['push_error'] or []) + ' — push when online'})")
+    if r["pushed"]:
+        _refresh_board()
 
 
 def _sprint_number(project: str, label: str) -> int:

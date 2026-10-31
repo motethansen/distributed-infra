@@ -378,3 +378,25 @@ def test_the_reason_joins_the_status_note_and_the_evidence_or_note_column():
     assert r["RR-5"] == "blocked on RR-0 again"                                              # not said twice
     act = {x["id"]: x["evidence"] for x in scrum.active_items(bl)}
     assert act["RR-1"].startswith("blocked on RR-0") and set(act) == {"RR-1", "RR-2", "RR-3", "RR-4", "RR-5"}      # planned RR-6 is not active
+
+
+@pytest.mark.asyncio
+async def test_refresh_pulls_now_and_drops_the_cache_even_inside_the_interval(api, tmp_path, monkeypatch):
+    g, a, b = _clone_pair(tmp_path)
+    monkeypatch.setattr(api, "SCRUM_REPO", str(b))
+    api._PULL.update(ts=0.0, ok=None, error=None, at=None)
+    assert (await api.scrum_sprints(x_secret_key="k"))["projects"][0]["stories"] == 1
+    (a / "p" / "product-backlog.md").write_text((a / "p" / "product-backlog.md").read_text() + "| PP-002 | t | 🏃 in progress |\n")
+    g(a, "commit", "-qam", "2"); g(a, "push", "-q", "origin", "HEAD:main")
+    new_head = g(a, "rev-parse", "--short", "HEAD").stdout.strip()
+    assert (await api.scrum_sprints(x_secret_key="k"))["projects"][0]["stories"] == 1          # still inside the 2-minute window: stale
+    r = await api.scrum_refresh(x_secret_key="k")
+    assert r["head"] == new_head and r["pull"]["ok"] is True
+    assert (await api.scrum_sprints(x_secret_key="k"))["projects"][0]["stories"] == 2          # visible at once, no waiting
+    with pytest.raises(Exception):
+        await api.scrum_refresh(x_secret_key="wrong")
+    # even with no new commit the cached board is dropped, so edits that are not commits (a hand-edited checkout) show too
+    import time
+    api._SCRUM_CACHE["ts"] = time.time()
+    await api.scrum_refresh(x_secret_key="k")
+    assert api._SCRUM_CACHE["ts"] == 0.0
