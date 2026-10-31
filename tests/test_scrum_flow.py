@@ -517,6 +517,11 @@ def test_context_has_the_estate_architecture_in_full_other_notes_by_title_and_on
     assert "ESTATE RULES" in c and "DEMO DESIGN NOTE" in c and "SHOULD NOT APPEAR" not in c
     assert "Other architecture notes (titles only): unrelated.md" in c
     assert "DM-001" in c and "DM-005" not in c and "1 open rows" in c
+    (tmp_path / "demo" / "product-backlog.md").write_text(
+        "| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n| DM-001 | x | High | 🚧 blocked on DM-000 | waiting for the login flow |\n"
+        "| DM-002 | gone | Low | ❌ cancelled 2026-10-01 | dropped |\n")
+    c2 = sf.load_context(tmp_path, "demo")
+    assert "blocked on DM-000 — waiting for the login flow" in c2 and "| High |" in c2 and "DM-002" not in c2     # reasons are sent, cancelled are not
     assert len(sf.load_context(tmp_path, "demo", max_chars=50)) == 50                     # capped
 
 
