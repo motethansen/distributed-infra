@@ -5,5 +5,6 @@ Claude model (`model: haiku`) for the chat, so chatting costs almost nothing; th
 command asks the fleet (Product Owner = Opus, capped; Scrum Master = Sonnet).
 
 `/scrum` `/review` `/backlog <project>` `/sm <project> <question>` `/po <project> <sprint> <request>` `/groom <project>`
+`/sprint <project> [goal]` start a sprint step by step · `/close <project> <sprint> <story>` close a story you have reviewed
 
-Closing a story always needs the human's own yes in a terminal (`dis-agent close`); no command passes `--yes`.
+The human decides every state change. A command may approve, run or close only when he asks for it in that chat message, and `/close` shows the evidence first and relies on the CLI's own gates (no review, failed validation or unfinished tasks refuse). No command ever passes `--force`.

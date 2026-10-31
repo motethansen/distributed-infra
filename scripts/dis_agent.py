@@ -17,6 +17,7 @@
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
   dis-agent review                                the review queue: everything waiting for your sprint review, on demand
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
+  dis-agent validate -p PROJ -s SPR --story ID    run the independent tester (agy) on a story; --branch main when it is already merged
   dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
 
 A story is open (planned) once you approve its plan, in progress while `go` runs, in review when the work
@@ -78,6 +79,30 @@ def _sprint_number(project: str, label: str) -> int:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(mapping, indent=2))
     return n
+
+
+def _sprint_maps(project: str) -> dict:
+    f = ROOT / "data" / "scrum" / project / "sprints.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def next_sprint(project: str) -> str:
+    """The next free sprint number as the board shows it (the number a new sprint file will get)."""
+    from shared import sprint_edit
+    return str(sprint_edit.number_for(viz_repo(), project, "__new__", _sprint_maps(project)))
+
+
+def resolve_sprint(project: str, s: str) -> str:
+    """The folder name holding the plans: accept the sprint's label (S-roles) or the number the board shows (1)."""
+    base = ROOT / "data" / "scrum" / project
+    if (base / s).is_dir():
+        return s
+    for label, n in _sprint_maps(project).items():
+        if str(n) == s.lstrip("0") and (base / label).is_dir():
+            return label
+    have = sorted(d.name for d in base.iterdir() if d.is_dir() and any(d.glob("*.plan.json"))) if base.is_dir() else []
+    sys.exit(f"no plans for sprint {s!r} in {project}. Sprints with plans: {', '.join(have) or 'none'}. "
+             f"Use the label or the number the board shows (a label's number: {json.dumps(_sprint_maps(project)) if _sprint_maps(project) else 'none yet'}).")
 
 
 def _sprint_step(what: str, fn) -> bool:
@@ -201,7 +226,14 @@ def _po_round(a, request: str, previous: list[dict] | None = None, feedback: str
     return stories
 
 
+def _default_sprint(a) -> None:
+    if not a.sprint:
+        a.sprint = next_sprint(a.project)
+        print(f"(no -s given: using sprint {a.sprint}, the next free number for {a.project})")
+
+
 def cmd_po(a) -> None:
+    _default_sprint(a)
     f = ROOT / "data" / "scrum" / a.project / a.sprint / "stories.json"
     if a.revise:
         if not f.exists():
@@ -216,6 +248,7 @@ def cmd_po(a) -> None:
 
 
 def cmd_planning(a) -> None:
+    _default_sprint(a)
     if not sys.stdin.isatty():
         sys.exit("planning is interactive: run it in a terminal (or use `po --revise` for one round)")
     f = ROOT / "data" / "scrum" / a.project / a.sprint / "stories.json"
@@ -472,6 +505,7 @@ def cmd_review(a) -> None:
         return cmd_review_queue(a)
     if not a.sprint:
         sys.exit("give -s SPRINT as well, or run `dis-agent review` alone for the queue")
+    a.sprint = resolve_sprint(a.project, a.sprint)
     c = sc.client()
     rows = c._call("GET", "/tasks", params={"limit": 500})
     board = c._call("GET", "/scrum/sprints")
@@ -483,7 +517,33 @@ def cmd_review(a) -> None:
     print(md + f"\n(saved {d / 'review.md'})")
 
 
+def cmd_validate(a) -> None:
+    sprint = resolve_sprint(a.project, a.sprint)
+    base = ROOT / "data" / "scrum" / a.project / sprint
+    plan = next((json.loads(f.read_text()) for f in sorted(base.glob("*.plan.json"))
+                 if a.story in (json.loads(f.read_text()).get("backlog_id"), json.loads(f.read_text())["story"]["id"])), None)
+    if not plan:
+        sys.exit(f"no plan for {a.story} under {base}")
+    cfg = projects_cfg()
+    pre = sf.repo_preamble(a.project, (cfg["projects"] or {}).get(a.project), plan["story"]["id"])
+    c = sc.client()
+    t = c.queue(sf.tags(a.project, sprint, plan["story"]["id"], "tester", a.approved, None, None,
+                        prompt=pre + sf.validate_prompt(plan["story"], a.branch), timeout=1800, flow_key="validate"), f"validate {plan['story']['id']}")
+    print(f"tester queued ({t['id'][:8]}); this takes a few minutes ...")
+    done = c.wait([t["id"]])[t["id"]]
+    if done["status"] != "done":
+        sys.exit(f"the tester task ended {done['status']}: {done.get('notes') or ''}")
+    v = sf.parse_validation(sf.answer(done), len(plan["story"].get("acceptance", [])) or None)
+    (base / f"validation-{plan['story']['id']}.json").write_text(json.dumps(v, indent=2))
+    print(f"validation by {done.get('agent')}: {sf.validation_summary(v)}")
+    for cr in v["criteria"]:
+        print(f"  {cr['n']}. {cr['status']:<10} {cr['evidence'][:130]}")
+    if v["passed"] is not True:
+        print("\nNot a pass: dis-agent close will refuse. Read the evidence above; --force on close is yours to use if you accept it.")
+
+
 def cmd_close(a) -> None:
+    a.sprint = resolve_sprint(a.project, a.sprint)
     base = ROOT / "data" / "scrum" / a.project / a.sprint
     plans = {}
     for f in sorted(base.glob("*.plan.json")):
@@ -514,6 +574,9 @@ def cmd_close(a) -> None:
                                      ("validation did not pass: " + sf.validation_summary(v), not (v and v.get("passed") is True))) if bad]
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
+            continue
+        if getattr(a, "check", False):
+            print("  CHECK ONLY: every gate passes; run again with --yes (or answer y in a terminal) to close it")
             continue
         if a.yes:
             ok = True
@@ -550,12 +613,12 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--as", dest="as_agent"); common.add_argument("--approved", action="store_true")
     po = sub.add_parser("po", parents=[common]); po.set_defaults(fn=cmd_po)
-    po.add_argument("-p", "--project", required=True); po.add_argument("-s", "--sprint", required=True)
+    po.add_argument("-p", "--project", required=True); po.add_argument("-s", "--sprint", help="sprint label or number (default: the next free number)")
     po.add_argument("--context-file"); po.add_argument("--no-context", action="store_true", help="skip the architecture + backlog context")
     po.add_argument("--revise", metavar="FEEDBACK", help="adjust the existing stories with your planning feedback")
     po.add_argument("request", nargs="?")
     pn = sub.add_parser("planning", parents=[common]); pn.set_defaults(fn=cmd_planning)
-    pn.add_argument("-p", "--project", required=True); pn.add_argument("-s", "--sprint", required=True)
+    pn.add_argument("-p", "--project", required=True); pn.add_argument("-s", "--sprint", help="sprint label or number (default: the next free number)")
     pn.add_argument("--context-file"); pn.add_argument("--no-context", action="store_true")
     gm = sub.add_parser("groom", parents=[common]); gm.set_defaults(fn=cmd_groom); gm.add_argument("-p", "--project", required=True)
     pl = sub.add_parser("plan", parents=[common]); pl.set_defaults(fn=cmd_plan)
@@ -566,6 +629,11 @@ def main() -> None:
     cl.add_argument("-p", "--project", required=True); cl.add_argument("-s", "--sprint", required=True)
     cl.add_argument("--story", action="append"); cl.add_argument("--yes", action="store_true", help="you have read the review and confirm")
     cl.add_argument("--force", action="store_true")
+    cl.add_argument("--check", action="store_true", help="show the evidence and whether it would close; never closes and never prompts")
+    vl = sub.add_parser("validate", parents=[common]); vl.set_defaults(fn=cmd_validate)
+    vl.add_argument("-p", "--project", required=True); vl.add_argument("-s", "--sprint", required=True)
+    vl.add_argument("--story", required=True, help="the plan's story id (S-1) or its backlog id (DI-056)")
+    vl.add_argument("--branch", help="for a story already merged: test this branch (usually main); new tests go on a separate PR branch")
     bk = sub.add_parser("backlog"); bk.set_defaults(fn=cmd_backlog)
     bk.add_argument("-p", "--project", required=True); bk.add_argument("--limit", type=int, default=40)
     bk.add_argument("--all", action="store_true", help="also list sprints with no stories")

@@ -607,3 +607,12 @@ def test_a_hand_written_sprint_file_is_refused_and_so_are_uncommitted_edits(vrep
     g.write_text(g.read_text() + "\nhuman typing\n")
     with pytest.raises(sf.PlanError, match="uncommitted changes"):
         sf.sprint_mark(work, "demo", 6, "DM-009", "🏃 in progress", "2026-11-01")
+
+
+def test_validate_prompt_for_a_merged_story_tests_that_branch_and_never_pushes_to_it():
+    st = {"id": "S-1", "title": "T", "acceptance": ["one"]}
+    own = sf.validate_prompt(st)
+    assert "Work on the story branch `dis/S-1`" in own and "already merged" not in own
+    merged = sf.validate_prompt(st, "main")
+    assert "check out `main`" in merged and "Do NOT push to `main`" in merged and "dis/S-1-validation" in merged and "open a pull request" in merged
+    assert "Work on the story branch" not in merged and "ACCEPTANCE CRITERIA" in merged and "1. one" in merged
