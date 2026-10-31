@@ -346,3 +346,86 @@ def test_an_analyst_is_not_an_author_of_the_code_under_review():
     out, _ = _run(q, [_t("ui", "dev_frontend"), _t("doc", "analyst")])
     assert out[-1]["authors"] == ["claude"] and out[-1]["same_family"] is False
     assert q.payloads()[-1].get("agent") is None
+
+
+# ── backlog sync (git) ───────────────────────────────────────────────────────
+
+BACKLOG = """# Demo
+
+## Open items
+
+| ID | Story | Priority | Status | Evidence |
+|---|---|---|---|---|
+| DM-001 | First | High | 🔵 planned | |
+"""
+
+
+def _git(cwd, *a):
+    import os
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    return subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, text=True, env=env).stdout
+
+
+@pytest.fixture
+def vrepo(tmp_path, monkeypatch):
+    for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.setenv(k, "t" if "NAME" in k else "t@t")
+    import subprocess
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    work = tmp_path / "work"
+    subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+    (work / "demo").mkdir()
+    (work / "demo" / "product-backlog.md").write_text(BACKLOG)
+    _git(work, "add", "."); _git(work, "commit", "-qm", "init"); _git(work, "push", "-q", "origin", "HEAD:main")
+    return work, origin
+
+
+def test_register_then_progress_then_review_then_close_only_with_the_confirmed_path(vrepo):
+    work, origin = vrepo
+    story = {"id": "S-1", "title": "Pick the LLM from any client"}
+    r = sf.register_story(work, "demo", story, "michael", "2026-10-31", "S-1.plan.json")
+    assert r["id"] == "DM-002" and r["committed"] and r["pushed"]
+    assert "story registered as planned" in _git(origin, "log", "-1", "--format=%s", "main")
+    sf.mark_story(work, "demo", "DM-002", "🏃 in progress", None)
+    with pytest.raises(sf.PlanError, match="not in review"):
+        sf.close_story(work, "demo", "DM-002", "michael", "2026-10-31", "PR 1")          # still in progress: cannot close
+    sf.mark_story(work, "demo", "DM-002", "🔍 in review", "PR https://github.com/o/r/pull/9")
+    sf.close_story(work, "demo", "DM-002", "michael", "2026-10-31", "PR https://github.com/o/r/pull/9")
+    text = (work / "demo" / "product-backlog.md").read_text()
+    row = next(l for l in text.split("\n") if l.startswith("| DM-002"))
+    assert "✅ done 2026-10-31" in row and "confirmed by michael" in row and "pull/9" in row
+    assert "closed after sprint review, confirmed by michael" in _git(origin, "log", "-1", "--format=%s", "main")
+    from shared import scrum
+    assert scrum.parse_backlog(text) == {"DM-001": "planned", "DM-002": "done"}
+
+
+def test_edits_refuse_to_run_over_the_humans_uncommitted_changes_and_report_a_failed_push(vrepo):
+    work, origin = vrepo
+    f = work / "demo" / "product-backlog.md"
+    f.write_text(f.read_text() + "\nhuman typing...\n")
+    with pytest.raises(sf.PlanError, match="uncommitted changes"):
+        sf.mark_story(work, "demo", "DM-001", "🏃 in progress", None)
+    assert "human typing" in f.read_text() and "in progress" not in f.read_text()          # untouched
+    _git(work, "checkout", "--", "."); _git(work, "remote", "remove", "origin")
+    r = sf.mark_story(work, "demo", "DM-001", "🏃 in progress", None)
+    assert r["committed"] is True and r["pushed"] is False and r["push_error"]
+    with pytest.raises(sf.PlanError, match="not in the backlog"):
+        sf.mark_story(work, "demo", "DM-099", "🏃 in progress", None)
+    with pytest.raises(sf.PlanError, match="not found"):
+        sf.mark_story(work, "nosuch", "X-1", "🏃 in progress", None)
+
+
+def test_story_evidence_is_scoped_to_the_story_and_ignores_planning_tasks():
+    def t(i, story="S-1", role="dev_frontend", status="done", resp="", created="2026-10-31T10:0%d:00" % 0, sprint="S", project="p"):
+        return {"id": f"{i:08d}x", "status": status, "agent": "claude", "created_at": created,
+                "payload": {"project": project, "sprint": sprint, "story": story, "role": role}, "result": {"response": resp}}
+    rows = [t(1, resp="PR https://github.com/o/r/pull/5"), t(2, role="reviewer", resp="LGTM, one nit", created="2026-10-31T10:09:00"),
+            t(3, role="reviewer", resp="older review", created="2026-10-31T10:01:00"),
+            t(4, story="S-2", resp="https://github.com/o/r/pull/6"), t(5, role="scrum_master", resp="https://github.com/o/r/pull/7"),
+            t(6, status="needs_human"), t(7, sprint="other")]
+    ev = sf.story_evidence(rows, "p", "S", "S-1")
+    assert ev["tasks"] == 4 and ev["done"] == 3 and ev["stuck"] == ["00000006"] and ev["pull_requests"] == ["https://github.com/o/r/pull/5"]
+    assert ev["reviewed"] is True and ev["review_excerpt"] == "LGTM, one nit"
+    assert sf.story_evidence(rows, "p", "S", "S-9")["reviewed"] is False
