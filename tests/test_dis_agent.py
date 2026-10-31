@@ -585,3 +585,49 @@ def test_next_prints_ranked_suggestions_or_json_and_reads_the_grooming_reports(t
     da.cmd_next(argparse.Namespace(project="demo", limit=6, json=True))
     data = json.loads(capsys.readouterr().out)
     assert data[0]["command"] == "/sprint demo" and data[0]["kind"].startswith("queues agent work")
+
+
+# ── the board refreshes right after a change ─────────────────────────────────
+
+def _git_repo_with_commit(tmp_path):
+    import os
+    import subprocess
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "f").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "c"], check=True, env=env)
+    return subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def test_after_a_pushed_change_the_board_is_refreshed_and_the_user_is_told_if_it_has_the_commit(tmp_path, monkeypatch, capsys):
+    head = _git_repo_with_commit(tmp_path)
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path)
+    calls = []
+
+    def client_returning(h):
+        return lambda: type("C", (), {"_call": lambda self, m, p, **k: calls.append((m, p)) or {"head": h}})()
+    ok = {"committed": True, "pushed": True, "push_error": None}
+    monkeypatch.setattr(sc, "client", client_returning(head))
+    da._report("DM-1 ACCEPTED", ok)
+    out = capsys.readouterr().out
+    assert calls == [("POST", "/scrum/refresh")] and f"refreshed, it is now reading {head}: your change is visible" in out
+    monkeypatch.setattr(sc, "client", client_returning("deadbee"))
+    da._report("DM-1 ACCEPTED", ok)
+    out = capsys.readouterr().out
+    assert "reads deadbee, not " + head in out and "catches up within ~3 minutes" in out and "visible" not in out
+
+
+def test_no_refresh_when_nothing_was_pushed_and_a_failed_refresh_never_looks_like_a_failed_change(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(da, "viz_repo", lambda: tmp_path)
+    calls = []
+    monkeypatch.setattr(sc, "client", lambda: type("C", (), {"_call": lambda self, *a, **k: calls.append(a)})())
+    da._report("x", {"committed": True, "pushed": False, "push_error": ["offline"]})
+    assert calls == [] and "NOT pushed" in capsys.readouterr().out                       # unpushed: the board cannot have it, so do not pretend
+
+    def boom():
+        raise RuntimeError("no orchestrator")
+    monkeypatch.setattr(sc, "client", boom)
+    da._report("x", {"committed": True, "pushed": True, "push_error": None})
+    out = capsys.readouterr().out
+    assert "committed, pushed" in out and "could not be refreshed now (RuntimeError)" in out
