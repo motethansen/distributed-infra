@@ -68,7 +68,7 @@ class Queue:
     """POST /tasks completes the task at once. `agent_for(payload)` decides who 'ran' it."""
 
     def __init__(self, agent_for=None, fail_keys=(), down=()):
-        self.tasks, self.order, self.down = {}, [], set(down)
+        self.tasks, self.order, self.down, self.events = {}, [], set(down), []
         self.agent_for = agent_for or (lambda p: {"dev_backend": "deepseek", "reviewer": "codex"}.get(p.get("role"), "claude"))
         self.fail_keys = set(fail_keys)
 
@@ -88,9 +88,12 @@ class Queue:
                                "notes": "boom" if bad else None,
                                "result": {"ok": not bad, "agent": agent, "response": f"output of {p.get('flow_key') or p['role']}"}}
             self.order.append(tid)
+            self.events.append(("POST", p.get("flow_key") or p["role"]))
             return httpx.Response(201, json={"id": tid})
         if req.method == "GET" and req.url.path.startswith("/tasks/"):
-            return httpx.Response(200, json=self.tasks[req.url.path.rsplit("/", 1)[1]])
+            t = self.tasks[req.url.path.rsplit("/", 1)[1]]
+            self.events.append(("GET", t["payload"].get("flow_key") or t["payload"]["role"]))
+            return httpx.Response(200, json=t)
         return httpx.Response(404)
 
     def client(self, urls=("http://a:1",)):
@@ -132,21 +135,8 @@ def test_dependency_results_are_handed_to_the_next_task_and_waves_run_in_order()
     assert keys.index("api") < keys.index("ui")
 
 
-def test_deepseek_code_gets_an_integrator_then_a_review_of_the_integrated_work():
-    q = Queue()
-    out, _ = _run(q, [_t("api", "dev_backend")])
-    roles = [(p["role"]) for p in q.payloads()]
-    assert roles == ["dev_backend", "integrator", "reviewer"]
-    rev = q.payloads()[2]
-    assert "output of integrator" in rev["prompt"] and "deepseek" in rev["prompt"]
-    assert [e["key"] for e in out] == ["api", "api:integrate", "api:review"]
 
 
-def test_a_claude_dev_task_needs_no_integrator_but_is_still_reviewed():
-    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
-    out, _ = _run(q, [_t("ui", "dev_frontend")])
-    assert [p["role"] for p in q.payloads()] == ["dev_frontend", "reviewer"]
-    assert out[-1]["author"] == "claude" and out[-1]["agent"] == "codex" and out[-1]["same_family"] is False
 
 
 def test_reviewer_is_pinned_off_codex_when_codex_was_the_author_and_a_same_family_review_is_flagged():
@@ -258,17 +248,6 @@ def test_machine_choice_reaches_the_queue_soft_or_hard():
 CFG = {"repo": "git@github.com:x/y.git", "dir": "y", "note": "careful"}
 
 
-def test_dev_tasks_and_the_integrator_are_told_where_the_code_is_but_reviews_are_not():
-    q = Queue()
-    _run(q, [_t("api", "dev_backend")], project_cfg=CFG)
-    by_role = {p["role"]: p["prompt"] for p in q.payloads()}
-    for role in ("dev_backend", "integrator"):
-        assert "git@github.com:x/y.git" in by_role[role] and "dis/BA-201-api" in by_role[role] and "careful" in by_role[role]
-    assert "never merge" in by_role["dev_backend"]
-    assert "git@github.com:x/y.git" not in by_role["reviewer"]
-    q2 = Queue()
-    _run(q2, [_t("api", "dev_backend")])                       # no project config -> prompt untouched
-    assert q2.payloads()[0]["prompt"] == "do it"
 
 
 def test_approval_binds_to_the_exact_tasks_and_editing_voids_it(tmp_path):
@@ -304,3 +283,66 @@ def test_analyst_tasks_get_no_repo_instructions():
     q = Queue(agent_for=lambda p: "agy")
     _run(q, [_t("doc", "analyst")], project_cfg=CFG)
     assert q.payloads()[0]["prompt"] == "do it"
+
+
+# ── one branch per story, batched integration, serialized editors, one review ─
+
+def test_all_deepseek_code_of_a_wave_is_applied_by_ONE_integrator_then_the_story_is_reviewed_once():
+    q = Queue()
+    out, _ = _run(q, [_t("a", "dev_backend"), _t("b", "dev_backend"), _t("c", "dev_frontend", ["a", "b"])])
+    roles = [p["role"] for p in q.payloads()]
+    assert roles.count("integrator") == 1 and roles.count("reviewer") == 1 and roles[-1] == "reviewer"
+    integ = next(p for p in q.payloads() if p["role"] == "integrator")
+    assert "task a" in integ["prompt"] and "task b" in integ["prompt"] and "output of a" in integ["prompt"] and "output of b" in integ["prompt"]
+    assert roles.index("integrator") < roles.index("dev_frontend")        # later tasks see the code on the branch
+    assert [e["key"] for e in out if e["role"] == "reviewer"] == ["review"]
+
+
+def test_everything_works_on_one_story_branch_and_reviews_are_not_told_where_the_code_is():
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
+    _run(q, [_t("ui", "dev_frontend"), _t("ui2", "dev_frontend", ["ui"])], project_cfg=CFG)
+    by = {p.get("flow_key") or p["role"]: p["prompt"] for p in q.payloads()}
+    for k in ("ui", "ui2"):
+        assert "git@github.com:x/y.git" in by[k] and "`dis/BA-201`" in by[k] and "ONE branch" in by[k] and "careful" in by[k]
+        assert "never merge" in by[k].lower()
+    assert "git@github.com:x/y.git" not in by["review"]
+    q2 = Queue()
+    _run(q2, [_t("api", "dev_backend")])                                  # no project config -> prompt untouched
+    assert q2.payloads()[0]["prompt"] == "do it"
+
+
+def test_file_editing_tasks_run_one_at_a_time_but_text_tasks_run_together():
+    q = Queue(agent_for=lambda p: "claude")
+    _run(q, [_t("e1", "dev_frontend"), _t("e2", "dev_frontend")])
+    ev = [e for e in q.events if e[1] in ("e1", "e2")]
+    assert ev == [("POST", "e1"), ("GET", "e1"), ("POST", "e2"), ("GET", "e2")]      # e2 queued only after e1 finished
+    q2 = Queue()
+    _run(q2, [_t("d1", "dev_backend"), _t("d2", "dev_backend")])
+    ev2 = [e for e in q2.events if e[1] in ("d1", "d2")]
+    assert [e[0] for e in ev2[:2]] == ["POST", "POST"]                                # both queued before either is polled
+
+
+def test_the_story_review_is_pinned_to_claude_when_codex_wrote_any_of_it_and_flags_same_family():
+    q = Queue(agent_for=lambda p: "codex" if p["role"] == "dev_frontend" else "claude")
+    out, _ = _run(q, [_t("ui", "dev_frontend")])
+    assert q.payloads()[-1]["role"] == "reviewer" and q.payloads()[-1].get("agent") == "claude"
+    assert out[-1]["same_family"] is False and out[-1]["authors"] == ["codex"]
+    q2 = Queue(agent_for=lambda p: "claude")
+    out2, log2 = _run(q2, [_t("ui", "dev_frontend")])
+    assert out2[-1]["same_family"] is True and any("SAME model family" in l for l in log2)
+
+
+def test_a_claude_dev_task_needs_no_integrator_and_an_analyst_only_story_is_not_reviewed():
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
+    _run(q, [_t("ui", "dev_frontend")])
+    assert [p["role"] for p in q.payloads()] == ["dev_frontend", "reviewer"]
+    q2 = Queue(agent_for=lambda p: "agy")
+    _run(q2, [_t("doc", "analyst")])
+    assert [p["role"] for p in q2.payloads()] == ["analyst"]
+
+
+def test_an_analyst_is_not_an_author_of_the_code_under_review():
+    q = Queue(agent_for=lambda p: {"dev_frontend": "claude"}.get(p["role"], "codex"))
+    out, _ = _run(q, [_t("ui", "dev_frontend"), _t("doc", "analyst")])
+    assert out[-1]["authors"] == ["claude"] and out[-1]["same_family"] is False
+    assert q.payloads()[-1].get("agent") is None
