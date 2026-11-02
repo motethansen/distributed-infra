@@ -28,7 +28,7 @@ def test_in_review_stories_form_the_review_queue_and_blocked_ones_need_a_decisio
     d = sd.build([proj("a", {"in_review": 1, "blocked": 1}, [item("A-1", "in_review", "PR 3"), item("A-2", "blocked"), item("A-3", "in_progress")])], TODAY)
     assert [r["id"] for r in d["review_queue"]] == ["A-1"] and d["review_queue"][0]["evidence"] == "PR 3"
     assert [x["kind"] for x in d["decisions"]] == ["blocked"] and "A-2" in d["decisions"][0]["text"]
-    assert d["adjustments"][0].startswith("1 stories are waiting for your sprint review")
+    assert d["adjustments"][0]["text"].startswith("1 stories are waiting for your sprint review")
 
 
 def test_a_project_with_open_work_and_no_recent_closure_is_stalled_only_at_the_threshold():
@@ -45,7 +45,7 @@ def test_a_project_with_open_work_and_no_recent_closure_is_stalled_only_at_the_t
 def test_sprint_adjustments_cover_zero_progress_old_sprints_and_drift():
     d = sd.build([proj("a", sprints=[sprint(1, 8, 0)]), proj("b", sprints=[sprint(2, 10, 4, started="2026-10-20")]),
                   proj("c", sprints=[sprint(3, 10, 5, drift=["C-1", "C-2"])])], TODAY)
-    txt = " | ".join(d["adjustments"])
+    txt = " | ".join(a["text"] for a in d["adjustments"])
     assert "a sprint 1: 0 of 8 points done" in txt and "b sprint 2: started 11 days ago with 6 of 10" in txt
     assert "c sprint 3: 2 stories where the sprint file and the backlog disagree" in txt
     assert "b sprint 2" in txt and "started 1 days ago" not in txt
@@ -59,8 +59,8 @@ def test_velocity_is_the_mean_of_the_last_three_sprints_and_projects_sort_review
 
 
 def test_opus_budget_warning_starts_at_eighty_percent():
-    assert not any("Opus" in a for a in sd.build([], TODAY, {"spent": 39.99, "cap": 50})["adjustments"])
-    assert any("Opus budget is 80% used" in a for a in sd.build([], TODAY, {"spent": 40.0, "cap": 50})["adjustments"])
+    assert not any("Opus" in a["text"] for a in sd.build([], TODAY, {"spent": 39.99, "cap": 50})["adjustments"])
+    assert any("Opus budget is 80% used" in a["text"] for a in sd.build([], TODAY, {"spent": 40.0, "cap": 50})["adjustments"])
 
 
 def test_markdown_lists_every_section_and_truncates_long_evidence():

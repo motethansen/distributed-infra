@@ -79,6 +79,20 @@ SCRUM_RESPONSES_DDL = [
     "CREATE INDEX IF NOT EXISTS idx_scrum_responses_status_id ON scrum_responses (status, id)",
     "CREATE INDEX IF NOT EXISTS idx_scrum_responses_idempotency_key ON scrum_responses (idempotency_key)",
 ]
+SCRUM_SUGGESTIONS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS scrum_suggestions (
+        id TEXT PRIMARY KEY,
+        item_key TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        text TEXT NOT NULL,
+        model TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        UNIQUE (item_key, evidence_hash)
+    )
+    """,
+]
+_SUG_COLS = "id, text, generated_at, model"
 _RESP_PUBLIC = ("id, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, "
                 "actor, created_at, status, consumed_at, consumed_by")
 _INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, section, action, suggestion_id, "
@@ -179,7 +193,7 @@ async def ensure_schema() -> None:
     orchestrator startup — rqlite persists it in the Raft log, so it need not run per
     operation. Idempotent, and safe if two orchestrators start at once."""
     await _execute([[CREATE_TABLE]])
-    await _execute([[stmt] for stmt in SCRUM_RESPONSES_DDL])
+    await _execute([[stmt] for stmt in SCRUM_RESPONSES_DDL + SCRUM_SUGGESTIONS_DDL])
     res = await _query([["SELECT name FROM pragma_table_info('tasks')"]], level="weak")
     have = {r["name"] for r in _rows(res[0])} if res else set()
     for col, typ in tracking.TRACK_COLUMNS.items():
@@ -377,3 +391,26 @@ async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
         return "ok"
     res = await _query([["SELECT 1 FROM scrum_responses WHERE id=?", response_id]], level="strong")
     return "already_consumed" if res and _rows(res[0]) else "not_found"
+
+
+# ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──
+
+async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None:
+    res = await _query([[f"SELECT {_SUG_COLS} FROM scrum_suggestions WHERE item_key = ? AND evidence_hash = ?",
+                         item_key, evidence_hash]], level="strong")
+    rows = _rows(res[0]) if res else []
+    return rows[0] if rows else None
+
+
+async def get_scrum_suggestion_by_id(suggestion_id: str) -> dict | None:
+    res = await _query([[f"SELECT {_SUG_COLS}, item_key, evidence_hash FROM scrum_suggestions WHERE id = ?", suggestion_id]],
+                       level="strong")
+    rows = _rows(res[0]) if res else []
+    return rows[0] if rows else None
+
+
+async def save_scrum_suggestion(row: dict) -> None:
+    """Keep the first suggestion stored for (item_key, evidence_hash); a concurrent duplicate is ignored."""
+    await _execute([["INSERT OR IGNORE INTO scrum_suggestions (id, item_key, evidence_hash, text, model, generated_at) "
+                     "VALUES (?, ?, ?, ?, ?, ?)",
+                     row["id"], row["item_key"], row["evidence_hash"], row["text"], row["model"], row["generated_at"]]])
