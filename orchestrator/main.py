@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -10,11 +11,12 @@ import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from fastapi import Body, FastAPI, HTTPException, Header, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
@@ -168,6 +170,16 @@ async def _init_backend() -> None:
 
 def _check_auth(x_secret_key: str = "") -> None:
     if SECRET_KEY and x_secret_key != SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Invalid secret key")
+
+
+def _require_secret_key(x_secret_key: str = Header(default="")) -> None:
+    """Auth for routes that change what the fleet does (owner responses). Unlike _check_auth it fails CLOSED:
+    with no SECRET_KEY configured the route is unavailable, not open. As a dependency it runs before the request
+    body is validated, so a missing or wrong key is always 401, never 422."""
+    if not SECRET_KEY:
+        raise HTTPException(status_code=503, detail="orchestrator has no SECRET_KEY configured; refusing")
+    if not hmac.compare_digest(x_secret_key.encode(), SECRET_KEY.encode()):
         raise HTTPException(status_code=401, detail="Invalid secret key")
 
 
@@ -424,6 +436,65 @@ async def scrum_refresh(x_secret_key: str = Header(default="")):
     await _pull_scrum_repo()
     _SCRUM_CACHE["ts"] = 0.0
     return {"head": _repo_head(SCRUM_REPO).get("commit"), "pull": {k: _PULL[k] for k in ("at", "ok", "error")}}
+
+
+# ── Owner responses to board items ───────────────────────────────────────────
+
+class ScrumResponseIn(BaseModel):
+    item_key: str
+    project: str
+    item_id: str | None = None
+    section: Literal["review", "decision", "adjustment"]
+    action: Literal["confirm", "comment"]
+    suggestion_id: str | None = None
+    suggestion_text: str | None = None
+    comment: str | None = Field(default=None, max_length=4000)
+    actor: str
+
+    @field_validator("item_key", "project", "actor")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v
+
+    @model_validator(mode="after")
+    def _action_needs(self):
+        if self.action == "confirm" and not self.suggestion_id:
+            raise ValueError("action=confirm requires suggestion_id")
+        if self.action == "comment" and not (self.comment or "").strip():
+            raise ValueError("action=comment requires a non-empty comment")
+        return self
+
+
+@app.post("/scrum/responses", status_code=201, dependencies=[Depends(_require_secret_key)])
+async def scrum_response_create(body: ScrumResponseIn, x_secret_key: str = Header(default=""),
+                                idempotency_key: str | None = Header(default=None)):
+    """Record an owner's answer to a board item. Append-only: nothing is overwritten."""
+    try:
+        return await db.insert_scrum_response(body.model_dump(), idempotency_key)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different response")
+
+
+@app.get("/scrum/responses", dependencies=[Depends(_require_secret_key)])
+async def scrum_response_list(status: str | None = None, project: str | None = None, latest: bool = False,
+                              x_secret_key: str = Header(default="")):
+    """Recorded responses, newest first. latest=1 → only the newest per item_key. status=pending means not yet consumed."""
+    status = "recorded" if status == "pending" else status
+    return await db.list_scrum_responses(status=status, project=project, latest=latest)
+
+
+@app.post("/scrum/responses/{response_id}/consume", dependencies=[Depends(_require_secret_key)])
+async def scrum_response_consume(response_id: int, x_secret_key: str = Header(default=""),
+                                 x_actor: str = Header(default="")):
+    """Mark a response consumed (once). A second call is 409."""
+    outcome = await db.consume_scrum_response(response_id, x_actor or "unknown")
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="No such response")
+    if outcome == "already_consumed":
+        raise HTTPException(status_code=409, detail="Response already consumed")
+    return {"id": response_id, "status": "consumed"}
 
 
 @app.get("/scrum/sprints")
