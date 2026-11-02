@@ -12,7 +12,11 @@ machines:
 # macbook-pro is Michael's own machine: no work is assigned to it.
 
 projects:
-  distributed-infra: { repo: "git@github.com:motethansen/distributed-infra.git", dir: distributed-infra }
+  # Stories for this repo are built in a SEPARATE clone (~/Projects/distributed-infra-stories on mac-mini and
+  # thinkpad-x1). ~/Projects/distributed-infra is the checkout the live orchestrator and workers run from: a story
+  # branch checked out there would be loaded by the next restart, unreviewed.
+  distributed-infra: { repo: "git@github.com:motethansen/distributed-infra.git", dir: distributed-infra-stories,
+                       note: "work ONLY in ~/Projects/distributed-infra-stories; never edit or check out branches in ~/Projects/distributed-infra, which runs the live orchestrator. Run tests with ./.venv/bin/python -m pytest tests" }
   vantage:           { repo: "git@github.com:motethansen/service-monitor.git",   dir: service-monitor }
   motethansen:       { repo: "git@github.com:motethansen/motethansen-site.git",  dir: motethansen-site }
   simtrader:         { repo: "git@github.com:motethansen/simtrader.git",         dir: simtrader }

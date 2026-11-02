@@ -431,7 +431,10 @@ def cmd_go(a) -> None:
             _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in progress", lambda: sf.sprint_mark(
                 viz_repo(), plan["project"], plan["sprint_number"], bid, "🏃 in progress", datetime.now(timezone.utc).date().isoformat()))
     log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], plan["story"], tasks, go=ok,
-                      approved=a.approved, cwd=a.cwd, project_cfg=(cfg["projects"] or {}).get(plan["project"]))
+                      approved=a.approved, cwd=a.cwd,
+                      # A story may build in another project's repo (Vantage stories that change the orchestrator):
+                      # `repo_project` in the plan names that project so the agents are told the right clone.
+                      project_cfg=(cfg["projects"] or {}).get(plan.get("repo_project") or plan["project"]))
     if ok:
         out = path.with_suffix(".run.json")
         out.write_text(json.dumps(log, indent=2))
