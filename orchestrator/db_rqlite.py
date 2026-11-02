@@ -87,6 +87,17 @@ _INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, sectio
 _IDEM_WINDOW_SECS = 10
 
 
+_IDEM_FIELDS = ("item_key", "project", "item_id", "section", "action", "suggestion_id", "suggestion_text", "comment", "actor")
+
+
+def _replay_or_conflict(row: dict, fields: dict) -> dict:
+    """Same idempotency key seen again: an identical request replays the original answer; a different one is a conflict
+    (never silently drop a distinct response)."""
+    if any((row.get(k) or None) != (fields.get(k) or None) for k in _IDEM_FIELDS):
+        raise ValueError("idempotency_conflict")
+    return {"id": row["id"], "created_at": row["created_at"], "status": "recorded", "replayed": True}
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -339,11 +350,11 @@ async def insert_scrum_response(fields: dict, idempotency_key: str | None = None
     """Append a response. A repeat of the same idempotency_key within 10s returns the existing row."""
     if idempotency_key is not None:
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_IDEM_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        res = await _query([["SELECT id, created_at, status FROM scrum_responses WHERE idempotency_key = ? "
+        res = await _query([["SELECT id, created_at, status, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, actor FROM scrum_responses WHERE idempotency_key = ? "
                              "AND created_at >= ? ORDER BY id ASC LIMIT 1", idempotency_key, cutoff]])
         rows = _rows(res[0]) if res else []
         if rows:
-            return rows[0]
+            return _replay_or_conflict(rows[0], fields)
     created_at = _utc_now_iso()
     res = await _execute([[_INSERT_RESP, *_resp_params(fields, created_at, idempotency_key)]])
     return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "recorded"}
