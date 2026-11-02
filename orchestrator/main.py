@@ -549,7 +549,11 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
         opus = None
     digest = scrum_digest.build(projects, opus=opus)
     if os.getenv("SCRUM_SUGGESTIONS", "1") != "0":
-        await scrum_suggest.attach(digest, db, _suggest_call)          # advice only: failures leave suggestion: None
+        try:                                                           # advice only: never delays or fails the board
+            await scrum_suggest.attach_cached(digest, db)
+            scrum_suggest.refresh_async(digest, db, _suggest_call)    # missing ones are generated in the background
+        except Exception as exc:
+            log.warning("scrum suggestions skipped: %s", exc)
     return {
         "digest": digest,
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",

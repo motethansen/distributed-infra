@@ -60,40 +60,72 @@ def _public(row: dict) -> dict:
     return {k: row[k] for k in ("id", "text", "generated_at", "model")}
 
 
-async def attach(digest: dict[str, Any], store: Any, call: Callable[[str], Awaitable[str | None]],
-                 timeout: float = CALL_TIMEOUT_SECS, max_new: int = MAX_NEW_PER_LOAD) -> dict[str, Any]:
-    """Fill `suggestion` on every review/decision/adjustment entry of `digest` (in place; returned for convenience).
+_SECTIONS = (("review", "review_queue"), ("decision", "decisions"), ("adjustment", "adjustments"))
+_IN_FLIGHT: set[tuple[str, str]] = set()       # (item_key, evidence_hash) being generated, so loads never double-call
+_TASKS: set[asyncio.Task] = set()
 
-    `store` has get_scrum_suggestion(item_key, hash) and save_scrum_suggestion(row); `call(prompt)` returns the model text."""
-    work = [(sec, e) for sec, key in (("review", "review_queue"), ("decision", "decisions"), ("adjustment", "adjustments"))
-            for e in digest.get(key) or [] if isinstance(e, dict) and e.get("item_key")]
-    missing: list[tuple[str, dict, str]] = []
-    for sec, e in work:
-        h = evidence_hash(e)
+
+def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
+    return [(sec, e) for sec, key in _SECTIONS for e in digest.get(key) or [] if isinstance(e, dict) and e.get("item_key")]
+
+
+async def attach_cached(digest: dict[str, Any], store: Any) -> dict[str, Any]:
+    """Set `suggestion` on every review/decision/adjustment entry from the store only: the stored row or None.
+    Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestion(item_key, hash)."""
+    for _, e in _entries(digest):
         try:
-            row = await store.get_scrum_suggestion(e["item_key"], h)
+            row = await store.get_scrum_suggestion(e["item_key"], evidence_hash(e))
         except Exception as exc:                          # the store is optional advice too
             log.warning("scrum suggestion lookup failed for %s: %s", e["item_key"], exc)
             row = None
-        if row:
-            e["suggestion"] = _public(row)
-        else:
-            e["suggestion"] = None
-            missing.append((sec, e, h))
+        e["suggestion"] = _public(row) if row else None
+    return digest
 
-    async def one(sec: str, e: dict, h: str) -> None:
+
+async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Callable[[str], Awaitable[str | None]],
+                           timeout: float | None = None, max_new: int = MAX_NEW_PER_LOAD) -> int:
+    """Generate and store suggestions for `items` ((section, entry) pairs) that have none. Returns how many were stored."""
+    todo = []
+    for sec, e in items:
+        key = (e["item_key"], evidence_hash(e))
+        if key not in _IN_FLIGHT:
+            _IN_FLIGHT.add(key)
+            todo.append((sec, e, key))
+    todo = todo[:max_new] if len(todo) <= max_new else _release(todo, max_new)
+
+    async def one(sec: str, e: dict, key: tuple[str, str]) -> int:
         try:
-            raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e))), timeout)
+            raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e))), timeout or CALL_TIMEOUT_SECS)
             text = clean(raw)
             if not text:
-                return
-            row = {"id": suggestion_id(e["item_key"], h), "item_key": e["item_key"], "evidence_hash": h, "text": text,
-                   "model": MODEL, "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-            await store.save_scrum_suggestion(row)
-            e["suggestion"] = _public(row)
-        except Exception as exc:                          # timeout, model error, store error: no suggestion, board loads
+                return 0
+            await store.save_scrum_suggestion({"id": suggestion_id(*key), "item_key": key[0], "evidence_hash": key[1], "text": text,
+                                               "model": MODEL, "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+            return 1
+        except Exception as exc:                          # timeout, model error, store error: no suggestion
             log.warning("scrum suggestion for %s failed: %s", e["item_key"], type(exc).__name__)
+            return 0
+        finally:
+            _IN_FLIGHT.discard(key)
 
-    if missing[:max_new]:
-        await asyncio.gather(*(one(*m) for m in missing[:max_new]))
-    return digest
+    return sum(await asyncio.gather(*(one(*t) for t in todo)))
+
+
+def _release(todo: list, keep: int) -> list:
+    for _, _, key in todo[keep:]:
+        _IN_FLIGHT.discard(key)
+    return todo[:keep]
+
+
+def refresh_async(digest: dict[str, Any], store: Any, call: Callable[[str], Awaitable[str | None]]) -> None:
+    """Generate suggestions for entries whose `suggestion` is None in a background task; returns at once and never raises.
+    Entries are copied, so the digest already handed to the caller is not touched. Call after attach_cached."""
+    try:
+        missing = [(sec, dict(e)) for sec, e in _entries(digest) if e.get("suggestion") is None]
+        if not missing:
+            return
+        task = asyncio.get_running_loop().create_task(generate_missing(missing, store, call))
+        _TASKS.add(task)
+        task.add_done_callback(_TASKS.discard)
+    except Exception as exc:
+        log.warning("scrum suggestion refresh not started: %s", exc)

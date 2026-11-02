@@ -54,26 +54,39 @@ def test_every_entry_has_a_stable_item_key_and_adjustments_are_objects_with_text
     assert sd.build([proj("vantage", sprints=[sprint(2, 10, 2, started="2026-10-01")])], TODAY)["adjustments"][0]["item_key"] == "adjust:vantage:2:stale_sprint"
 
 
+async def load(d, store, call, **kw):
+    """What the endpoint does: cached suggestions now, generation in the background; returns the digest as served."""
+    await scrum_suggest.attach_cached(d, store)
+    scrum_suggest.refresh_async(d, store, call)
+    await asyncio.gather(*list(scrum_suggest._TASKS))
+    return d
+
+
 @pytest.mark.asyncio
-async def test_suggestions_are_stored_and_a_second_load_makes_no_model_calls(store):
+async def test_first_load_serves_null_and_generates_in_the_background_then_cache_makes_no_calls(store):
     call = Counting()
-    d1 = await scrum_suggest.attach(digest(), store, call)
+    d1 = digest()
+    await scrum_suggest.attach_cached(d1, store)
+    scrum_suggest.refresh_async(d1, store, call)
+    assert all(e["suggestion"] is None for e in all_entries(d1)) and call.calls == 0     # nothing waited on the request path
+    await asyncio.gather(*list(scrum_suggest._TASKS))
     n = len(all_entries(d1))
-    assert call.calls == n and all(e["suggestion"] for e in all_entries(d1))
-    s = d1["review_queue"][0]["suggestion"]
-    assert set(s) == {"id", "text", "generated_at", "model"} and s["model"] == "sonnet"
-    d2 = await scrum_suggest.attach(digest(), store, call)
-    assert call.calls == n and d2["review_queue"][0]["suggestion"] == s
+    assert call.calls == n
+    d2 = await load(digest(), store, call)
+    s = d2["review_queue"][0]["suggestion"]
+    assert set(s) == {"id", "text", "generated_at", "model"} and s["model"] == "sonnet" and all(e["suggestion"] for e in all_entries(d2))
+    d3 = await load(digest(), store, call)
+    assert call.calls == n and d3["review_queue"][0]["suggestion"] == s
 
 
 @pytest.mark.asyncio
 async def test_changed_evidence_gives_a_new_id_and_the_old_row_stays_readable(store):
     call = Counting()
-    d1 = await scrum_suggest.attach(digest(), store, call)
-    old = d1["review_queue"][0]["suggestion"]
+    await load(digest(), store, call)
+    old = (await load(digest(), store, call))["review_queue"][0]["suggestion"]
     changed = sd.build([proj("vantage", {"in_review": 1}, [item("VN-039", "in_review", "PR 3 merged, awaiting QA")])], TODAY)
-    d2 = await scrum_suggest.attach(changed, store, call)
-    new = d2["review_queue"][0]["suggestion"]
+    await load(changed, store, call)
+    new = (await load(sd.build([proj("vantage", {"in_review": 1}, [item("VN-039", "in_review", "PR 3 merged, awaiting QA")])], TODAY), store, call))["review_queue"][0]["suggestion"]
     assert new["id"] != old["id"]
     kept = await store.get_scrum_suggestion_by_id(old["id"])
     assert kept["text"] == old["text"] and kept["item_key"] == "vantage:VN-039"
@@ -81,12 +94,14 @@ async def test_changed_evidence_gives_a_new_id_and_the_old_row_stays_readable(st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["raise", "hang"])
-async def test_a_failing_or_slow_model_leaves_null_suggestions_and_the_board_loads(store, mode):
+async def test_a_failing_or_slow_model_leaves_null_suggestions_and_the_board_loads(store, mode, monkeypatch):
+    monkeypatch.setattr(scrum_suggest, "CALL_TIMEOUT_SECS", 0.2)
     loop = asyncio.get_running_loop()
     t0 = loop.time()
-    d = await scrum_suggest.attach(digest(), store, Counting(fail=mode), timeout=0.2)
+    d = await load(digest(), store, Counting(fail=mode))
     assert loop.time() - t0 < 2 and all(e["suggestion"] is None for e in all_entries(d))
     assert await store.get_scrum_suggestion("vantage:VN-039", scrum_suggest.evidence_hash(d["review_queue"][0])) is None
+    assert not scrum_suggest._IN_FLIGHT
 
 
 @pytest.mark.asyncio
@@ -94,7 +109,7 @@ async def test_a_failing_store_does_not_break_the_board():
     class Broken:
         async def get_scrum_suggestion(self, *a): raise RuntimeError("rqlite no leader")
         async def save_scrum_suggestion(self, row): raise RuntimeError("rqlite no leader")
-    d = await scrum_suggest.attach(digest(), Broken(), Counting())
+    d = await load(digest(), Broken(), Counting())
     assert all(e["suggestion"] is None for e in all_entries(d))
 
 
@@ -102,12 +117,14 @@ async def test_a_failing_store_does_not_break_the_board():
 async def test_each_suggestion_is_at_most_300_chars_names_one_step_and_is_one_line(store):
     async def rambling(prompt):          # a model that ignores the length rule: it is clamped, not stored raw
         return "Decide on VN-039 now. " + "and then also think about everything else " * 20 + "\nsecond line"
-    d = await scrum_suggest.attach(digest(), store, rambling)
+    await load(digest(), store, rambling)
+    d = await load(digest(), store, rambling)
     for e in all_entries(d):
         t = e["suggestion"]["text"]
         assert 0 < len(t) <= 300 and "\n" not in t
-    d_ok = await scrum_suggest.attach(sd.build([proj("vantage", {"in_review": 1}, [item("VN-050", "in_review")])], TODAY), store, Counting())
-    t = d_ok["review_queue"][0]["suggestion"]["text"]
+    one = lambda: sd.build([proj("vantage", {"in_review": 1}, [item("VN-050", "in_review")])], TODAY)
+    await load(one(), store, Counting())
+    t = (await load(one(), store, Counting()))["review_queue"][0]["suggestion"]["text"]
     assert len(t) <= 300 and "VN-050" in t and t.split()[0].lower() == "ask"        # an action addressed to someone, naming the item
     assert "ONE concrete next step" in scrum_suggest.PROMPT and "at most 250 characters" in scrum_suggest.PROMPT
 
@@ -130,12 +147,17 @@ def api(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_second_call_with_unchanged_backlogs_makes_zero_model_calls(api, monkeypatch):
+async def test_endpoint_serves_null_first_then_cached_and_unchanged_backlogs_make_zero_calls(api, monkeypatch):
     call = Counting()
     monkeypatch.setattr(api, "_suggest_call", call)
     first = (await api.scrum_sprints(x_secret_key="k"))["digest"]
     entries = all_entries(first)
-    assert entries and call.calls == len(entries) and all(e["suggestion"] for e in entries)
+    assert entries and all("item_key" in e and e["suggestion"] is None for e in entries)
+    await asyncio.gather(*list(scrum_suggest._TASKS))
+    assert call.calls == len(entries)
     n = call.calls
     second = (await api.scrum_sprints(x_secret_key="k"))["digest"]
-    assert call.calls == n and [e["suggestion"] for e in all_entries(second)] == [e["suggestion"] for e in entries]
+    assert all(e["suggestion"] and "item_key" in e for e in all_entries(second)) and len(all_entries(second)) == n
+    assert call.calls == n
+    third = (await api.scrum_sprints(x_secret_key="k"))["digest"]
+    assert call.calls == n and [e["suggestion"] for e in all_entries(third)] == [e["suggestion"] for e in all_entries(second)]
