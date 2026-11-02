@@ -161,3 +161,60 @@ async def test_endpoint_serves_null_first_then_cached_and_unchanged_backlogs_mak
     assert call.calls == n
     third = (await api.scrum_sprints(x_secret_key="k"))["digest"]
     assert call.calls == n and [e["suggestion"] for e in all_entries(third)] == [e["suggestion"] for e in all_entries(second)]
+
+
+class Recording(Counting):
+    def __init__(self, reply=None):
+        super().__init__()
+        self.prompts, self.reply = [], reply
+
+    async def __call__(self, prompt):
+        self.prompts.append(prompt)
+        self.calls += 1
+        return self.reply or "Ask the owner what is blocking it and record the answer."
+
+
+@pytest.mark.asyncio
+async def test_overlong_reply_is_truncated_to_300_and_stays_one_line(store):
+    call = Recording("Decide now " + "and keep going " * 60)
+    d = await load(digest(), store, call)
+    d = await load(digest(), store, call)
+    assert all(0 < len(e["suggestion"]["text"]) <= 300 for e in all_entries(d))
+
+
+@pytest.mark.asyncio
+async def test_blocked_with_no_reason_asks_for_the_reason_and_nothing_is_invented(store):
+    call = Recording()
+    d = sd.build([proj("vantage", {"blocked": 1}, [item("VN-041", "blocked", "")])], TODAY)
+    await load(d, store, call)
+    p = next(x for x in call.prompts if "vantage:VN-041" in x)
+    assert "ask the owner of the item for the reason" in p and "Do not guess or invent" in p
+    assert "no reason recorded" in p
+    stored = (await load(sd.build([proj("vantage", {"blocked": 1}, [item("VN-041", "blocked", "")])], TODAY), store, call))["decisions"][0]["suggestion"]["text"]
+    assert stored == "Ask the owner what is blocking it and record the answer."        # the model reply, stored verbatim
+
+
+@pytest.mark.asyncio
+async def test_human_only_step_names_the_step_and_console_and_forbids_agent_action(store):
+    call = Recording()
+    ev = "human-only: create the product in the App Store Connect console"
+    await load(sd.build([proj("vantage", {"blocked": 1}, [item("VN-042", "blocked", ev)])], TODAY), store, call)
+    p = next(x for x in call.prompts if "vantage:VN-042" in x)
+    assert ev in p and "human-only step" in p and "console or dashboard" in p and "Do NOT suggest that an agent act" in p
+    assert "ask the owner of the item for the reason" not in p                      # a reason is recorded
+
+
+@pytest.mark.asyncio
+async def test_cap_limits_first_refresh_to_ten_calls_and_the_rest_fill_in_next(store):
+    items = [item(f"VN-{i:03d}", "in_review", f"PR {i}") for i in range(25)]
+    mk = lambda: sd.build([proj("vantage", {"in_review": 25}, items)], TODAY)
+    call = Counting()
+    entries = [("review", dict(e)) for e in mk()["review_queue"]]
+    assert await scrum_suggest.generate_missing(entries, store, call, max_new=10) == 10 and call.calls == 10
+    todo = []
+    for sec, e in entries:
+        if await store.get_scrum_suggestion(e["item_key"], scrum_suggest.evidence_hash(e)) is None:
+            todo.append((sec, e))
+    assert len(todo) == 15
+    assert await scrum_suggest.generate_missing(todo, store, call, max_new=10) == 10 and call.calls == 20
+    assert not scrum_suggest._IN_FLIGHT

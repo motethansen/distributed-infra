@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -32,8 +33,22 @@ Rules:
 Item: {item_key}
 Section: {section}
 Facts: {evidence}
-
+{hint}
 Reply with the sentence only."""
+
+
+_HUMAN = re.compile(r"human[- ]only|human step|\b(?:console|dashboard)\b", re.I)
+
+
+def hint(entry: dict) -> str:
+    """Extra prompt rules for the two edge cases: a blocked item with no recorded reason, and a human-only step."""
+    out = []
+    if entry.get("kind") == "blocked" and not (entry.get("reason") or "").strip():
+        out.append("- No reason is recorded for this block: the step is to ask the owner of the item for the reason. Do not guess or invent a cause.")
+    if _HUMAN.search(evidence_text(entry)):
+        out.append("- This needs a human-only step: name that step and the console or dashboard it happens in, and tell the human to do it. "
+                   "Do NOT suggest that an agent act on it.")
+    return "\n".join(out) + ("\n" if out else "")
 
 
 def evidence_hash(entry: dict) -> str:
@@ -95,7 +110,7 @@ async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Call
 
     async def one(sec: str, e: dict, key: tuple[str, str]) -> int:
         try:
-            raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e))), timeout or CALL_TIMEOUT_SECS)
+            raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e), hint=hint(e))), timeout or CALL_TIMEOUT_SECS)
             text = clean(raw)
             if not text:
                 return 0
