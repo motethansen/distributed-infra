@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -54,6 +54,60 @@ CREATE TABLE IF NOT EXISTS tasks (
 _COLUMNS = ["id", "type", "status", "priority", "payload", "created_by",
             "assigned_to", "result", "notes", "created_at", "updated_at"]
 _RETURNING = ", ".join(_COLUMNS)
+
+SCRUM_RESPONSES_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS scrum_responses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_key TEXT NOT NULL,
+        project TEXT NOT NULL,
+        item_id TEXT NULL,
+        section TEXT NOT NULL,
+        action TEXT NOT NULL,
+        suggestion_id TEXT NULL,
+        suggestion_text TEXT NULL,
+        comment TEXT NULL,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'recorded',
+        consumed_at TEXT NULL,
+        consumed_by TEXT NULL,
+        idempotency_key TEXT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_scrum_responses_item_key_id ON scrum_responses (item_key, id)",
+    "CREATE INDEX IF NOT EXISTS idx_scrum_responses_status_id ON scrum_responses (status, id)",
+    "CREATE INDEX IF NOT EXISTS idx_scrum_responses_idempotency_key ON scrum_responses (idempotency_key)",
+]
+_RESP_PUBLIC = ("id, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, "
+                "actor, created_at, status, consumed_at, consumed_by")
+_INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, section, action, suggestion_id, "
+                "suggestion_text, comment, actor, created_at, status, idempotency_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?)")
+_IDEM_WINDOW_SECS = 10
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _resp_params(fields: dict, created_at: str, idempotency_key: str | None) -> tuple:
+    return (fields["item_key"], fields["project"], fields.get("item_id"), fields["section"], fields["action"],
+            fields.get("suggestion_id"), fields.get("suggestion_text"), fields.get("comment"), fields["actor"],
+            created_at, idempotency_key)
+
+
+def _list_resp_sql(status: str | None, project: str | None, latest: bool) -> tuple[str, list]:
+    where, params = [], []
+    for col, val in (("status", status), ("project", project)):
+        if val is not None:
+            where.append(f"{col} = ?")
+            params.append(val)
+    w = ("WHERE " + " AND ".join(where)) if where else ""
+    if latest:   # newest row per item_key among the rows that match the filters
+        return (f"SELECT {_RESP_PUBLIC} FROM scrum_responses WHERE id IN "
+                f"(SELECT MAX(id) FROM scrum_responses {w} GROUP BY item_key) ORDER BY id DESC"), params
+    return f"SELECT {_RESP_PUBLIC} FROM scrum_responses {w} ORDER BY id DESC", params
 
 
 class RqliteError(RuntimeError):
@@ -114,6 +168,7 @@ async def ensure_schema() -> None:
     orchestrator startup — rqlite persists it in the Raft log, so it need not run per
     operation. Idempotent, and safe if two orchestrators start at once."""
     await _execute([[CREATE_TABLE]])
+    await _execute([[stmt] for stmt in SCRUM_RESPONSES_DDL])
     res = await _query([["SELECT name FROM pragma_table_info('tasks')"]], level="weak")
     have = {r["name"] for r in _rows(res[0])} if res else set()
     for col, typ in tracking.TRACK_COLUMNS.items():
@@ -276,3 +331,38 @@ async def usage_rows(since: str | None = None, until: str | None = None,
           " ORDER BY created_at DESC LIMIT ?"
     res = await _query([[sql, *params, limit]], level="none")
     return _rows(res[0]) if res else []
+
+
+# ── Scrum responses (owner answers to board items; append-only) ──────────────
+
+async def insert_scrum_response(fields: dict, idempotency_key: str | None = None) -> dict:
+    """Append a response. A repeat of the same idempotency_key within 10s returns the existing row."""
+    if idempotency_key is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_IDEM_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        res = await _query([["SELECT id, created_at, status FROM scrum_responses WHERE idempotency_key = ? "
+                             "AND created_at >= ? ORDER BY id ASC LIMIT 1", idempotency_key, cutoff]])
+        rows = _rows(res[0]) if res else []
+        if rows:
+            return rows[0]
+    created_at = _utc_now_iso()
+    res = await _execute([[_INSERT_RESP, *_resp_params(fields, created_at, idempotency_key)]])
+    return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "recorded"}
+
+
+async def list_scrum_responses(status: str | None = None, project: str | None = None,
+                               latest: bool = False) -> list[dict]:
+    """Newest first. latest=True keeps only the newest row per item_key."""
+    sql, params = _list_resp_sql(status, project, latest)
+    res = await _query([[sql, *params]], level="strong")   # an owner's answer must never read stale
+    return _rows(res[0]) if res else []
+
+
+async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
+    """'ok' | 'not_found' | 'already_consumed'. One conditional UPDATE, so only one caller wins."""
+    res = await _execute([[
+        "UPDATE scrum_responses SET status='consumed', consumed_at=?, consumed_by=? WHERE id=? AND status='recorded'",
+        _utc_now_iso(), consumed_by, response_id]])
+    if res and res[0].get("rows_affected", 0) > 0:
+        return "ok"
+    res = await _query([["SELECT 1 FROM scrum_responses WHERE id=?", response_id]], level="strong")
+    return "already_consumed" if res and _rows(res[0]) else "not_found"
