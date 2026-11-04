@@ -776,10 +776,11 @@ def cmd_validate(a) -> None:
     if not plan:
         sys.exit(f"no plan for {a.story} under {base}")
     cfg = projects_cfg()
-    pre = sf.repo_preamble(a.project, (cfg["projects"] or {}).get(a.project), plan["story"]["id"])
+    branch = sf.story_branch(a.project, sprint, plan["story"])
+    pre = sf.repo_preamble(a.project, (cfg["projects"] or {}).get(a.project), branch)
     c = sc.client()
     t = c.queue(sf.tags(a.project, sprint, plan["story"]["id"], "tester", a.approved, None, None,
-                        prompt=pre + sf.validate_prompt(plan["story"], a.branch), timeout=1800, flow_key="validate"), f"validate {plan['story']['id']}")
+                        prompt=pre + sf.validate_prompt(plan["story"], a.branch, branch), timeout=1800, flow_key="validate"), f"validate {plan['story']['id']}")
     print(f"tester queued ({t['id'][:8]}); this takes a few minutes ...")
     done = c.wait([t["id"]])[t["id"]]
     if done["status"] != "done":
