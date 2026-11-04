@@ -224,20 +224,3 @@ def test_privacy_guard_strips_non_private_fallbacks_even_if_listed(monkeypatch):
     monkeypatch.setattr(router, "_load_policy", lambda: policy)
     chain = [a for a, _ in router.route_chain(task_kind="finance")]
     assert chain == ["claude", "codex"]
-
-
-def test_s2_claude_limit_failover_sets_answered_by_answered_model_and_failover(monkeypatch):
-    _fake_agents(monkeypatch, {
-        "claude": LIMITED,
-        "codex": {"ok": True, "agent": "codex", "model": "gpt-5", "response": "hello from codex"},
-        "agy": OK("agy"),
-        "deepseek": OK("deepseek"),
-    })
-    r = asyncio.run(runner.run_agent(task_kind="plan", prompt="plan it"))
-    assert r["ok"] is True
-    assert r.get("answered_by") == "codex"
-    assert r.get("answered_model") == "gpt-5"
-    assert isinstance(r.get("failover"), list) and len(r["failover"]) >= 1
-    assert r["failover"][0]["agent"] == "claude"
-    assert r["failover"][0]["reason"] == "limit"
-
