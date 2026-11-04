@@ -208,3 +208,31 @@ async def test_concurrent_first_requests_on_a_fresh_sqlite_db_do_not_collide_on_
         db = importlib.reload(db)
         rows = await asyncio.gather(*(db.get_scrum_suggestion(f"k{i}", "h") for i in range(30)))
         assert rows == [None] * 30
+
+
+@pytest.mark.asyncio
+async def test_a_board_larger_than_any_cap_is_fully_generated_in_one_run_and_the_next_load_makes_no_calls(store):  # noqa: F811
+    call = Counting()
+    n = len(scrum_suggest._entries(board(60)))
+    await load(board(60), store, call)
+    assert call.calls == n
+    await load(board(60), store, call)
+    assert call.calls == n
+
+
+@pytest.mark.asyncio
+async def test_a_failed_cache_read_is_not_a_miss_and_causes_no_model_call():
+    class Broken:
+        async def get_scrum_suggestion(self, *a):
+            raise RuntimeError("rqlite no leader")
+
+        async def save_scrum_suggestion(self, row):
+            raise RuntimeError("rqlite no leader")
+
+    d, unresolved, call, st = board(3), set(), Counting(), Broken()
+    await scrum_suggest.attach_cached(d, st, unresolved=unresolved)
+    assert len(unresolved) == len(scrum_suggest._entries(d)) and all(e["suggestion"] is None for e in d["review_queue"])
+    scrum_suggest.refresh_async(d, st, call, skip=unresolved)
+    await asyncio.gather(*list(scrum_suggest._TASKS))
+    assert call.calls == 0
+

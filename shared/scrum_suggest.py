@@ -19,7 +19,6 @@ from shared.scrum_digest import evidence_text
 log = logging.getLogger(__name__)
 
 MAX_CHARS = 300
-MAX_NEW_PER_RUN = 40          # safety cap on model calls in one background run; a board has far fewer items
 MAX_PARALLEL = 3              # model calls in flight at once
 LOOKUP_DEADLINE_SECS = 2.0    # all cache lookups together: slow storage shows no suggestions, never a slow board
 CALL_TIMEOUT_SECS = 12.0
@@ -101,7 +100,7 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
             row = await store.get_scrum_suggestion(e["item_key"], evidence_hash(e))
         except Exception as exc:                          # the store is optional advice too
             log.warning("scrum suggestion lookup failed for %s: %s", e["item_key"], exc)
-            row = None
+            return                                        # not a confirmed miss: stays unresolved, so no model call
         e["suggestion"] = _public(row) if row else None
         pending.discard(e["item_key"])
 
@@ -115,7 +114,7 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
 
 
 async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Callable[[str], Awaitable[str | None]],
-                           timeout: float | None = None, max_new: int = MAX_NEW_PER_RUN) -> int:
+                           timeout: float | None = None, max_new: int | None = None) -> int:
     """Generate and store suggestions for `items` ((section, entry) pairs) that have none. Returns how many were stored."""
     todo = []
     for sec, e in items:
@@ -123,7 +122,8 @@ async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Call
         if key not in _IN_FLIGHT:
             _IN_FLIGHT.add(key)
             todo.append((sec, e, key))
-    todo = todo[:max_new] if len(todo) <= max_new else _release(todo, max_new)
+    if max_new is not None and len(todo) > max_new:          # only callers that ask for a limit get one
+        todo = _release(todo, max_new)
 
     sem = asyncio.Semaphore(MAX_PARALLEL)
 
