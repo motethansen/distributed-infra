@@ -47,11 +47,25 @@ async def handle_agent_run(task: Task) -> dict:
                              task_kind=task_kind, sensitivity=sensitivity,
                              history=history, failover=failover, allow_opus=allow_opus)
 
+    from agents.runner import finish_result
+    pl = task.payload
+    requested = pl["choice"] if isinstance(pl.get("choice"), str) and pl["choice"] else {
+        "agent": pl.get("agent"), "model": pl.get("model"), "role": pl.get("role")}
+    note = pl.get("_role_note") if isinstance(pl.get("_role_note"), str) else result.get("route_note")
+    if note and "->" not in note and result.get("ok") and result.get("agent"):
+        # the privacy guard says why deepseek was skipped, not who took over
+        note = f"{note} -> {result['agent']}"
+    finish_result(result, requested, note)
+
     if not result.get("ok"):
         return {
             "needs_human": True,
             "notes": f"{result.get('agent') or agent or task_kind} agent failed: {result.get('error')}",
-            "failover": result.get("failover"),
+            "failover": result["failover"],
+            "answered_by": None,
+            "answered_model": None,
+            "requested": result["requested"],
+            **({"route_note": result["route_note"]} if "route_note" in result else {}),
         }
 
     return result
