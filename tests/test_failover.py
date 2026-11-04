@@ -224,3 +224,104 @@ def test_privacy_guard_strips_non_private_fallbacks_even_if_listed(monkeypatch):
     monkeypatch.setattr(router, "_load_policy", lambda: policy)
     chain = [a for a, _ in router.route_chain(task_kind="finance")]
     assert chain == ["claude", "codex"]
+
+
+def test_s2_claude_limit_failover_sets_answered_by_answered_model_and_failover(monkeypatch):
+    _fake_agents(monkeypatch, {
+        "claude": LIMITED,
+        "codex": {"ok": True, "agent": "codex", "model": "gpt-5", "response": "hello from codex"},
+        "agy": OK("agy"),
+        "deepseek": OK("deepseek"),
+    })
+    r = asyncio.run(runner.run_agent(task_kind="plan", prompt="plan it"))
+    assert r["ok"] is True
+    assert r.get("answered_by") == "codex"
+    assert r.get("answered_model") == "gpt-5"
+    assert isinstance(r.get("failover"), list) and len(r["failover"]) >= 1
+    assert r["failover"][0]["agent"] == "claude"
+    assert r["failover"][0]["reason"] == "limit"
+
+
+# ── provenance on the finished task result (runner + handler) ─────────────────
+def _queued(**payload):
+    from shared.models import Task, TaskType
+    return Task(type=TaskType.agent_run, created_by="t", payload={"prompt": "hi", **payload})
+
+
+def _with_model(name):
+    return lambda kw: {"ok": True, "agent": name, "model": f"{name}-model", "response": "hi"}
+
+
+def test_failover_reports_who_answered(monkeypatch):
+    from worker.handlers.agent_run import handle_agent_run
+    _fake_agents(monkeypatch, {"claude": LIMITED, "codex": _with_model("codex"), "agy": _with_model("agy"),
+                               "deepseek": _with_model("deepseek")})
+    nxt = route_chain(agent="claude")[1][0]
+    r = asyncio.run(handle_agent_run(_queued(agent="claude", model="sonnet")))
+    assert r["ok"]
+    assert r["answered_by"] == nxt and r["answered_model"] == f"{nxt}-model"
+    assert r["requested"] == {"agent": "claude", "model": "sonnet", "role": None}
+    assert r["failover"][0].items() >= {"agent": "claude", "reason": "limit"}.items()
+
+
+def test_no_failover_reports_queued_agent(monkeypatch):
+    from worker.handlers.agent_run import handle_agent_run
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": OK("deepseek")})
+    r = asyncio.run(handle_agent_run(_queued(agent="claude")))
+    assert r["answered_by"] == "claude" and r["answered_model"]
+    assert r["requested"]["agent"] == "claude"
+    assert r["failover"] == []
+
+
+def test_all_agents_fail(monkeypatch):
+    from worker.handlers.agent_run import handle_agent_run
+    lim = {"ok": False, "error": "usage limit reached"}
+    _fake_agents(monkeypatch, {n: lim for n in ("claude", "codex", "agy", "deepseek")})
+    chain = [a for a, _ in route_chain(agent="claude")]
+    r = asyncio.run(handle_agent_run(_queued(agent="claude")))
+    assert r["needs_human"] and not r.get("ok")
+    assert [s["agent"] for s in r["failover"]] == chain
+    assert all(s["reason"] == "limit" for s in r["failover"])
+    assert r["answered_by"] is None and r["answered_model"] is None
+
+
+def test_all_agents_fail_at_runner_level_is_failed(monkeypatch):
+    lim = {"ok": False, "error": "usage limit reached"}
+    _fake_agents(monkeypatch, {n: lim for n in ("claude", "codex", "agy", "deepseek")})
+    r = asyncio.run(runner.run_agent(agent="claude", prompt="hi"))
+    assert r["ok"] is False and r["answered_by"] is None
+    assert [s["agent"] for s in r["failover"]] == [a for a, _ in route_chain(agent="claude")]
+
+
+def test_route_note_is_passed_through_only_when_set(monkeypatch):
+    from worker.handlers.agent_run import handle_agent_run
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": OK("deepseek")})
+    r = asyncio.run(handle_agent_run(_queued(agent="claude", _role_note="opus cap reached -> sonnet")))
+    assert r["route_note"] == "opus cap reached -> sonnet"
+    r = asyncio.run(handle_agent_run(_queued(agent="claude")))
+    assert r.get("route_note") is None
+
+
+def test_privacy_guard_reroute_by_task_kind_alone_still_explains_itself(monkeypatch):
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": _with_model("deepseek")})
+    r = asyncio.run(runner.run_agent(agent="deepseek", task_kind="finance", prompt="hi"))
+    assert r["answered_by"] != "deepseek"
+    assert r["route_note"].startswith("deepseek not used for finance work -> ")
+
+
+def test_no_route_note_when_the_pinned_agent_answers(monkeypatch):
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": _with_model("deepseek")})
+    assert "route_note" not in asyncio.run(runner.run_agent(agent="claude", prompt="hi"))
+
+
+def test_a_task_refused_before_any_agent_runs_still_carries_the_provenance_keys():
+    from shared.models import Task, TaskType
+    from worker.handlers.agent_run import handle_agent_run
+    for payload in ({"agent": "claude"}, {"prompt": "hi"}):      # no prompt / no agent and no routing hint
+        r = asyncio.run(handle_agent_run(Task(type=TaskType.agent_run, created_by="t", payload=payload)))
+        assert r["needs_human"] and r["answered_by"] is None and r["answered_model"] is None
+        assert r["failover"] == [] and r["requested"]["agent"] == payload.get("agent")

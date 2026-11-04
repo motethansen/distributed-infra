@@ -4,6 +4,12 @@ from __future__ import annotations
 from shared.models import Task
 
 
+def _refused(notes: str, requested) -> dict:
+    """A task refused before any agent ran still carries the keys every agent_run result has."""
+    return {"needs_human": True, "notes": notes, "answered_by": None, "answered_model": None,
+            "requested": requested, "failover": []}
+
+
 async def handle_agent_run(task: Task) -> dict:
     """
     payload:
@@ -36,10 +42,13 @@ async def handle_agent_run(task: Task) -> dict:
     failover = task.payload.get("failover", True) is not False
     allow_opus = task.payload.get("_allow_opus") is True      # set by the orchestrator only
 
+    pl = task.payload
+    requested = pl["choice"] if isinstance(pl.get("choice"), str) and pl["choice"] else {
+        "agent": pl.get("agent"), "model": pl.get("model"), "role": pl.get("role")}
     if not prompt:
-        return {"needs_human": True, "notes": "prompt is required in payload"}
+        return _refused("prompt is required in payload", requested)
     if not agent and not (task_kind or sensitivity):
-        return {"needs_human": True, "notes": "either 'agent' or 'task_kind'/'sensitivity' is required"}
+        return _refused("either 'agent' or 'task_kind'/'sensitivity' is required", requested)
 
     from agents.runner import run_agent
     result = await run_agent(agent=agent, prompt=prompt, model=model, cwd=cwd, timeout=timeout,
@@ -47,11 +56,22 @@ async def handle_agent_run(task: Task) -> dict:
                              task_kind=task_kind, sensitivity=sensitivity,
                              history=history, failover=failover, allow_opus=allow_opus)
 
+    from agents.runner import finish_result
+    note = pl.get("_role_note") if isinstance(pl.get("_role_note"), str) else result.get("route_note")
+    if note and "->" not in note and result.get("ok") and result.get("agent"):
+        # the privacy guard says why deepseek was skipped, not who took over
+        note = f"{note} -> {result['agent']}"
+    finish_result(result, requested, note)
+
     if not result.get("ok"):
         return {
             "needs_human": True,
             "notes": f"{result.get('agent') or agent or task_kind} agent failed: {result.get('error')}",
-            "failover": result.get("failover"),
+            "failover": result["failover"],
+            "answered_by": None,
+            "answered_model": None,
+            "requested": result["requested"],
+            **({"route_note": result["route_note"]} if "route_note" in result else {}),
         }
 
     return result

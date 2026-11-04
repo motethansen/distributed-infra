@@ -52,6 +52,31 @@ RESUMABLE = {"claude"}
 WRAPPERS = {"content", "social"}
 
 
+def finish_result(result: dict, requested=None, route_note: str | None = None) -> dict:
+    """Stamp the provenance keys every agent_run result carries.
+
+    answered_by/answered_model: who produced the answer (None if nobody did; a '*-default'
+    model is kept as the agent reported it). failover: one entry per failed step, [] if none.
+    requested: what the caller queued. route_note: only when the cap/privacy guard changed
+    the agent or model before the task ran. Existing keys (agent, model, ...) stay as they are.
+    """
+    ok = bool(result.get("ok"))
+    if ok:
+        result.setdefault("answered_by", result.get("agent"))
+        result.setdefault("answered_model", result.get("model"))
+    else:
+        result["answered_by"] = None
+        result["answered_model"] = None
+    result["failover"] = list(result.get("failover") or [])
+    if requested is not None:
+        result["requested"] = requested
+    if route_note:
+        result["route_note"] = route_note
+    else:
+        result.pop("route_note", None)
+    return result
+
+
 async def _run_one(agent: str, model: str, prompt: str, cwd: str | None, timeout: int | None,
                    session_id: str | None, resume: bool, allow_opus: bool = False) -> dict:
     kwargs = {"prompt": prompt}
@@ -104,9 +129,14 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
         chain = chain[:1] + [c for c in chain[1:] if c[0] not in exclude]
     if not failover:
         chain = chain[:1]
+    requested = {"agent": agent, "model": model, "role": None}   # the handler replaces this with the full payload choice
+    route_note = None
+    if agent and chain and chain[0][0] != agent.strip().lower():      # the privacy guard swapped the pinned agent
+        why = f"{sensitivity} data" if sensitivity else f"{task_kind} work" if task_kind else "this request"
+        route_note = f"{agent} not used for {why} -> {chain[0][0]}"
     if not chain or chain[0][0] not in AGENTS:
         bad = chain[0][0] if chain else agent
-        return {"error": f"Unknown agent: {bad!r}. Choose from: {list(AGENTS)}", "ok": False}
+        return finish_result({"error": f"Unknown agent: {bad!r}. Choose from: {list(AGENTS)}", "ok": False}, requested, route_note)
     chain = [c for c in chain if c[0] in AGENTS]
     primary = chain[0][0]
 
@@ -147,7 +177,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
             result.setdefault("agent", a)
             if attempts:
                 result["failover"] = attempts
-            return result
+            return finish_result(result, requested, route_note)
         kind = fo.classify(result.get("error"))
         if kind is None or not failover:
             break  # a real failure — don't repeat side effects on another provider
@@ -164,7 +194,8 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
         if all(x.get("reason") in ("limit", "unavailable") for x in attempts) and len(attempts) >= len(chain):
             last["error"] = "every agent in the chain is unavailable: " + "; ".join(
                 f"{x['agent']} ({x['reason']}{', until ' + x['until'] if x.get('until') else ''})" for x in attempts)
-    return last
+    last["ok"] = False
+    return finish_result(last, requested, route_note)
 
 
 TEST_PROMPT = "Reply with exactly one sentence: confirm you are working."
