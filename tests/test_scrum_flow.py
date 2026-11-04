@@ -766,3 +766,27 @@ def test_a_project_without_a_repository_gets_no_commit_rule():
 def test_the_scrum_master_is_told_not_to_write_branches_or_commit_instructions():
     assert "Never write a branch name or an instruction about committing" in sf.sm_prompt("p", "1", {"id": "S-1"}, {"dev_backend": "writes code"})
 
+
+# ── a plan can keep an already-pushed branch without losing its approval ──────
+
+def test_a_plan_level_branch_reaches_the_story_and_does_not_void_the_approval(tmp_path):
+    plan = {"project": "vantage", "sprint": "2", "story": {"id": "S-2", "title": "T", "acceptance": ["a"]}, "tasks": [{"key": "t1"}]}
+    path = tmp_path / "S-2.plan.json"
+    path.write_text(__import__("json").dumps(plan))
+    approved = sf.approve_plan(path, "me", "2026-11-04T00:00:00+00:00")
+    assert sf.is_approved(approved) and sf.story_for_plan(approved) is approved["story"]
+    approved["branch"] = "dis/S-2"
+    assert sf.is_approved(approved)                                   # outside the digest
+    assert sf.story_for_plan(approved)["branch"] == "dis/S-2"
+    assert sf.story_branch("vantage", "2", sf.story_for_plan(approved)) == "dis/S-2"
+    assert "branch" not in approved["story"]                          # the approved story itself is untouched
+
+
+def test_a_story_level_branch_does_void_the_approval_which_is_why_the_branch_lives_on_the_plan(tmp_path):
+    plan = {"project": "p", "sprint": "1", "story": {"id": "S-1", "title": "T"}, "tasks": []}
+    path = tmp_path / "p.json"
+    path.write_text(__import__("json").dumps(plan))
+    approved = sf.approve_plan(path, "me", "2026-11-04T00:00:00+00:00")
+    approved["story"]["branch"] = "dis/S-1"
+    assert not sf.is_approved(approved)
+

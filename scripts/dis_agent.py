@@ -430,7 +430,7 @@ def cmd_go(a) -> None:
         if plan.get("sprint_number"):
             _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in progress", lambda: sf.sprint_mark(
                 viz_repo(), plan["project"], plan["sprint_number"], bid, "🏃 in progress", datetime.now(timezone.utc).date().isoformat()))
-    log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], plan["story"], tasks, go=ok,
+    log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], sf.story_for_plan(plan), tasks, go=ok,
                       approved=a.approved, cwd=a.cwd,
                       # A story may build in another project's repo (Vantage stories that change the orchestrator):
                       # `repo_project` in the plan names that project so the agents are told the right clone.
@@ -776,7 +776,7 @@ def cmd_validate(a) -> None:
     if not plan:
         sys.exit(f"no plan for {a.story} under {base}")
     cfg = projects_cfg()
-    branch = sf.story_branch(a.project, sprint, plan["story"])
+    branch = sf.story_branch(a.project, sprint, sf.story_for_plan(plan))
     pre = sf.repo_preamble(a.project, (cfg["projects"] or {}).get(a.project), branch)
     c = sc.client()
     t = c.queue(sf.tags(a.project, sprint, plan["story"]["id"], "tester", a.approved, None, None,

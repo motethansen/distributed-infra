@@ -378,6 +378,13 @@ def story_branch(project: str, sprint: str, story: dict) -> str:
     return f"dis/{clean(project)}-{clean(sprint)}-{sid}"
 
 
+def story_for_plan(plan: dict) -> dict:
+    """The plan's story, carrying the plan-level `branch` when there is one. The branch lives beside the story, not in it,
+    because the approval digest covers the story and the tasks: adding it later must not void an approved plan."""
+    story = plan["story"]
+    return {**story, "branch": plan["branch"]} if plan.get("branch") else story
+
+
 def pin_branch(text: str, story: dict, branch: str) -> str:
     """Plans written before story_branch existed (or by a Scrum Master that guessed) name the bare `dis/<id>` in a task prompt.
     The agent follows the task text over the preamble, so point every such mention at the real branch."""
