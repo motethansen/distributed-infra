@@ -83,6 +83,17 @@ def backlog_view(p: dict, today: date | None = None) -> dict[str, Any]:
             "closed_unscheduled": max(0, (p.get("closed") or 0) - len(closed_in_sprints)), "counts": p.get("counts") or {}}
 
 
+def _adj(key: str, kind: str, text: str) -> dict[str, Any]:
+    return {"item_key": key, "kind": kind, "text": text, "suggestion": None}
+
+
+def evidence_text(entry: dict) -> str:
+    """The stable string a suggestion is hashed on: it changes only when the item's own evidence changes."""
+    if "kind" in entry and "item_key" in entry and "evidence" not in entry and "title" not in entry:
+        return f"{entry.get('kind', '')}|{entry.get('text', '')}"
+    return "|".join(str(entry.get(k) or "") for k in ("id", "title", "kind", "evidence", "reason", "text"))
+
+
 def build(projects: list[dict], today: date | None = None, opus: dict | None = None) -> dict[str, Any]:
     today = today or date.today()
     lines, review, decisions, adjust = [], [], [], []
@@ -102,7 +113,8 @@ def build(projects: list[dict], today: date | None = None, opus: dict | None = N
                       "sprint": ({"sprint": sp["sprint"], "remaining": sp["points_remaining"], "total": sp["points_total"],
                                   "done": sp.get("points_done", 0)} if sp else None)})
         for it in p.get("active_items") or []:
-            row = {"project": p["project"], "id": it["id"], "title": it["title"], "evidence": it["evidence"]}
+            row = {"project": p["project"], "id": it["id"], "title": it["title"], "evidence": it["evidence"],
+                   "item_key": f"{p['project']}:{it['id']}", "suggestion": None}
             if it["status"] == "in_review":
                 review.append(row)
             elif it["status"] == "blocked":
@@ -110,21 +122,22 @@ def build(projects: list[dict], today: date | None = None, opus: dict | None = N
                 decisions.append({**row, "kind": "blocked", "reason": why[:240],
                                   "text": f"{it['id']} is blocked: {it['title']}" + (f" — {why[:200]}" if why else " — no reason recorded in the backlog")})
         if (active_n + open_n) and since is not None and since >= STALL_DAYS:
-            decisions.append({"project": p["project"], "kind": "stalled", "text": f"{p['project']}: nothing closed for {since} days with {active_n + open_n} stories still open"})
+            decisions.append({"project": p["project"], "kind": "stalled", "item_key": f"stall:{p['project']}", "suggestion": None, "text": f"{p['project']}: nothing closed for {since} days with {active_n + open_n} stories still open"})
         if sp:
             age = _days(sp.get("started"), today)
+            ak = f"adjust:{p['project']}:{sp['sprint']}:"
             if (sp.get("points_done") or 0) == 0 and sp.get("points_total"):
-                adjust.append(f"{p['project']} sprint {sp['sprint']}: 0 of {sp['points_total']:g} points done; start it or re-plan it")
+                adjust.append(_adj(ak + "no_progress", "no_progress", f"{p['project']} sprint {sp['sprint']}: 0 of {sp['points_total']:g} points done; start it or re-plan it"))
             elif age is not None and age >= SPRINT_STALE_DAYS and (sp.get("points_remaining") or 0) > 0:
-                adjust.append(f"{p['project']} sprint {sp['sprint']}: started {age} days ago with {sp['points_remaining']:g} of {sp['points_total']:g} points left; hold a sprint review or close it")
+                adjust.append(_adj(ak + "stale_sprint", "stale_sprint", f"{p['project']} sprint {sp['sprint']}: started {age} days ago with {sp['points_remaining']:g} of {sp['points_total']:g} points left; hold a sprint review or close it"))
             if sp.get("drift"):
-                adjust.append(f"{p['project']} sprint {sp['sprint']}: {len(sp['drift'])} stories where the sprint file and the backlog disagree")
+                adjust.append(_adj(ak + "drift", "drift", f"{p['project']} sprint {sp['sprint']}: {len(sp['drift'])} stories where the sprint file and the backlog disagree"))
     if review:
-        adjust.insert(0, f"{len(review)} stories are waiting for your sprint review (see the review queue)")
+        adjust.insert(0, _adj("adjust:review_waiting", "review_waiting", f"{len(review)} stories are waiting for your sprint review (see the review queue)"))
     if opus and opus.get("cap"):
         used = opus.get("spent", 0) / opus["cap"]
         if used >= 0.8:
-            adjust.append(f"Opus budget is {used:.0%} used (${opus['spent']:.2f} of ${opus['cap']:.2f}); the Product Owner falls back to Sonnet at the cap")
+            adjust.append(_adj("adjust:opus_budget", "opus_budget", f"Opus budget is {used:.0%} used (${opus['spent']:.2f} of ${opus['cap']:.2f}); the Product Owner falls back to Sonnet at the cap"))
     lines.sort(key=lambda r: (-r["in_review"], -(r["in_progress"]), r["project"]))
     return {"as_of": today.isoformat(), "review_queue": review, "decisions": decisions, "projects": lines,
             "adjustments": adjust, "opus": opus or None}
@@ -138,7 +151,7 @@ def to_markdown(d: dict[str, Any], fleet: str = "") -> str:
     L += [f"- **{r['project']} {r['id']}** {r['title']}" + (f"\n  {r['evidence'][:240]}" if r["evidence"] else "") for r in d["review_queue"]] or ["- nothing waiting"]
     L += ["", f"## Needs a decision ({len(d['decisions'])})", ""]
     L += [f"- {x['text']}" for x in d["decisions"]] or ["- nothing"]
-    L += ["", "## Suggested adjustments", ""] + ([f"- {a}" for a in d["adjustments"]] or ["- none"])
+    L += ["", "## Suggested adjustments", ""] + ([f"- {a['text'] if isinstance(a, dict) else a}" for a in d["adjustments"]] or ["- none"])
     L += ["", "## Projects", "", "| project | closed | in progress | in review | blocked | open | last closed | velocity | open sprint |", "|---|---|---|---|---|---|---|---|---|"]
     for r in d["projects"]:
         sp = r["sprint"]

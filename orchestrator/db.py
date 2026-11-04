@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -59,6 +60,20 @@ SCRUM_RESPONSES_DDL = [
     "CREATE INDEX IF NOT EXISTS idx_scrum_responses_status_id ON scrum_responses (status, id)",
     "CREATE INDEX IF NOT EXISTS idx_scrum_responses_idempotency_key ON scrum_responses (idempotency_key)",
 ]
+SCRUM_SUGGESTIONS_DDL = [
+    """
+    CREATE TABLE IF NOT EXISTS scrum_suggestions (
+        id TEXT PRIMARY KEY,
+        item_key TEXT NOT NULL,
+        evidence_hash TEXT NOT NULL,
+        text TEXT NOT NULL,
+        model TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        UNIQUE (item_key, evidence_hash)
+    )
+    """,
+]
+_SUG_COLS = "id, text, generated_at, model"
 _RESP_PUBLIC = ("id, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, "
                 "actor, created_at, status, consumed_at, consumed_by")
 _INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, section, action, suggestion_id, "
@@ -123,7 +138,7 @@ _MIGRATED: set[str] = set()   # db paths whose tracking columns are known to exi
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
     await db.execute(CREATE_TABLE)
-    for stmt in SCRUM_RESPONSES_DDL:
+    for stmt in SCRUM_RESPONSES_DDL + SCRUM_SUGGESTIONS_DDL:
         await db.execute(stmt)
     path = _db_path()
     if path not in _MIGRATED:
@@ -131,7 +146,11 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in tracking.TRACK_COLUMNS.items():
             if col not in have:
-                await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+                try:
+                    await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc):
+                        raise                    # otherwise a concurrent first request added it between our check and now
         # Backfill from data the rows already hold (only where still empty).
         for col in ("agent", "model"):
             await db.execute(f"UPDATE tasks SET {col}=json_extract(result,'$.{col}') WHERE {col} IS NULL "
@@ -379,3 +398,34 @@ async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
             return "ok"
         cur = await db.execute("SELECT 1 FROM scrum_responses WHERE id=?", (response_id,))
         return "already_consumed" if await cur.fetchone() else "not_found"
+
+
+# ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──
+
+async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(f"SELECT {_SUG_COLS} FROM scrum_suggestions WHERE item_key = ? AND evidence_hash = ?",
+                               (item_key, evidence_hash))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_scrum_suggestion_by_id(suggestion_id: str) -> dict | None:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(f"SELECT {_SUG_COLS}, item_key, evidence_hash FROM scrum_suggestions WHERE id = ?", (suggestion_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def save_scrum_suggestion(row: dict) -> None:
+    """Keep the first suggestion stored for (item_key, evidence_hash); a concurrent duplicate is ignored."""
+    async with aiosqlite.connect(_db_path()) as db:
+        await _ensure_schema(db)
+        await db.execute("INSERT OR IGNORE INTO scrum_suggestions (id, item_key, evidence_hash, text, model, generated_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         (row["id"], row["item_key"], row["evidence_hash"], row["text"], row["model"], row["generated_at"]))
+        await db.commit()

@@ -90,7 +90,7 @@ def test_load_reads_a_workspace_and_skips_unreadable_or_underscore_dirs(tmp_path
 def api(tmp_path, monkeypatch):
     import importlib
     monkeypatch.setenv("QUEUE_DB_PATH", str(tmp_path / "q.db")); monkeypatch.setenv("QUEUE_BACKEND", "sqlite")
-    monkeypatch.setenv("SECRET_KEY", "k")
+    monkeypatch.setenv("SECRET_KEY", "k"); monkeypatch.setenv("SCRUM_SUGGESTIONS", "0")      # never reach a real model
     repo = tmp_path / "repo"; (repo / "demo").mkdir(parents=True)
     (repo / "demo" / "product-backlog.md").write_text(BACKLOG); (repo / "demo" / "sprint-02.md").write_text(SPRINT)
     monkeypatch.setenv("SCRUM_REPO", str(repo))

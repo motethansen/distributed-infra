@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
-from shared import scrum, scrum_digest, tracking
+from shared import scrum, scrum_digest, scrum_suggest, tracking
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -497,6 +497,13 @@ async def scrum_response_consume(response_id: int, x_secret_key: str = Header(de
     return {"id": response_id, "status": "consumed"}
 
 
+async def _suggest_call(prompt: str) -> str | None:
+    """One Sonnet call through the claude agent (subscription CLI). Tests replace this."""
+    from agents import claude_agent
+    r = await claude_agent.run(prompt, scrum_suggest.MODEL, timeout=int(scrum_suggest.CALL_TIMEOUT_SECS), tools_off=True)
+    return r.get("response") if r.get("ok", True) else None
+
+
 @app.get("/scrum/sprints")
 async def scrum_sprints(x_secret_key: str = Header(default="")):
     """Per project: backlog completion; per sprint: stories, points, burndown; joined with the
@@ -540,8 +547,16 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
             opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap)}
     except Exception:                                    # the digest is advice; it must never break the board
         opus = None
+    digest = scrum_digest.build(projects, opus=opus)
+    if os.getenv("SCRUM_SUGGESTIONS", "1") != "0":
+        try:                                                           # advice only: never delays or fails the board
+            unresolved: set[str] = set()                          # lookups that did not finish in time are not "missing"
+            await scrum_suggest.attach_cached(digest, db, unresolved=unresolved)
+            scrum_suggest.refresh_async(digest, db, _suggest_call, skip=unresolved)    # missing ones: background
+        except Exception as exc:
+            log.warning("scrum suggestions skipped: %s", exc)
     return {
-        "digest": scrum_digest.build(projects, opus=opus),
+        "digest": digest,
         "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "repo": {"path": data["repo"], **_repo_head(SCRUM_REPO),
                  "pull": {k: _PULL[k] for k in ("at", "ok", "error")}},

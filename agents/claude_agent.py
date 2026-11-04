@@ -53,8 +53,21 @@ def _resolve_model(requested: str, allow_opus: bool = False) -> str | None:
     return chosen
 
 
+async def _stop(proc: asyncio.subprocess.Process) -> None:
+    """Kill the CLI and reap it, so a timeout or a cancelled caller never leaves a model process running."""
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        await asyncio.wait_for(proc.wait(), 5)
+    except Exception:
+        pass
+
+
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None,
-              session_id: str = "", resume: bool = False, allow_opus: bool = False) -> dict:
+              session_id: str = "", resume: bool = False, allow_opus: bool = False, tools_off: bool = False) -> dict:
     cli = _find_cli()
     if not cli:
         return {
@@ -75,7 +88,13 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         }
 
     # --output-format json: same answer, plus the exact token usage and the CLI's cost estimate.
-    args = [cli, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
+    if tools_off:
+        # for prompts that carry untrusted text (backlog evidence): no tools at all and no permission bypass, so nothing
+        # in the text can make the CLI run a command or touch a file. `--tools ""` removes the built-in tools only; the
+        # account's connectors (Gmail, Calendar, Drive ...) are MCP tools and stay unless --strict-mcp-config drops them.
+        args = [cli, "-p", prompt, "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--output-format", "json"]
+    else:
+        args = [cli, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
     # Multi-turn: --session-id pins a caller-supplied id on the first turn;
     # --resume continues that same conversation on later turns.
     if session_id:
@@ -95,8 +114,11 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
     except asyncio.TimeoutError:
-        proc.kill()
+        await _stop(proc)
         return {"error": f"claude CLI timed out after {effective_timeout}s", "agent": "claude", "ok": False}
+    except BaseException:        # the caller was cancelled (an outer timeout): do not leave the CLI running
+        await _stop(proc)
+        raise
 
     out = stdout.decode().strip()
     err = stderr.decode().strip()
