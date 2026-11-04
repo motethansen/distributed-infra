@@ -124,7 +124,8 @@ Break this story into atomic tasks for the roles below. Do not plan reviews, int
 for the story goes on one branch of its own. After each wave an integrator automatically applies the code
 that dev_backend (DeepSeek) returned as text to that branch, so later tasks can assume it is already there; never
 plan an "apply the earlier results" task. File-editing tasks run one at a time. One reviewer checks the whole story
-at the end.
+at the end. Never write a branch name or an instruction about committing, pushing or leaving changes uncommitted in a
+task prompt: the runner adds the branch and tells every file-editing task to commit and push its work.
 
 Story:
 {json.dumps(story, indent=2)}
@@ -377,6 +378,23 @@ def story_branch(project: str, sprint: str, story: dict) -> str:
     return f"dis/{clean(project)}-{clean(sprint)}-{sid}"
 
 
+def pin_branch(text: str, story: dict, branch: str) -> str:
+    """Plans written before story_branch existed (or by a Scrum Master that guessed) name the bare `dis/<id>` in a task prompt.
+    The agent follows the task text over the preamble, so point every such mention at the real branch."""
+    sid = str(story["id"])
+    if not _SPRINT_LOCAL_ID.match(sid) or branch == f"dis/{sid}":
+        return text
+    return re.sub(rf"dis/{re.escape(sid)}(?!\w)", branch, text)
+
+
+def commit_rule(branch: str) -> str:
+    """Appended after the task text so it wins over a task that says 'commit nothing': the next task, the tester and the
+    reviewer may run on another machine, so only what is pushed to the story branch exists for them."""
+    return (f"\n\nBranch and commits (this overrides anything above about branches or committing): work on `{branch}`. When the "
+            "task is done and its tests pass, commit your changes and push them to that branch. Never leave work uncommitted "
+            "in the working tree: later tasks, the tester and the reviewer only see what is pushed.")
+
+
 def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
     parts = "\n\n".join(f"--- task {t['key']}: {t['title']} ---\n{text[:12000]}" for t, text in code)
     return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text, one block per "
@@ -556,8 +574,10 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
             if _agent_of(d):
                 authors.add(_agent_of(d))
         for t in serial:       # file editors one at a time: same branch, no races
-            pre = repo_preamble(project, project_cfg, branch) if t["role"] in DEV_ROLES else ""
-            d = batch([{**t, "prompt": pre + t["prompt"]}])[t["key"]]
+            dev = t["role"] in DEV_ROLES
+            pre = repo_preamble(project, project_cfg, branch) if dev else ""
+            body = pin_branch(t["prompt"], story, branch) + (commit_rule(branch) if dev and project_cfg else "")
+            d = batch([{**t, "prompt": pre + body}])[t["key"]]
             pr_material.append(answer(d))
     validation = None
     if any(t["role"] in DEV_ROLES for t in tasks):

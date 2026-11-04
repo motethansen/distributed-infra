@@ -731,3 +731,38 @@ def test_validate_prompt_uses_the_work_branch_it_is_given_for_both_the_story_and
     assert "Work on the story branch `dis/vantage-2-S-2`." in sf.validate_prompt(st, work_branch="dis/vantage-2-S-2")
     assert "`dis/vantage-2-S-2-validation`" in sf.validate_prompt(st, "main", "dis/vantage-2-S-2")
 
+
+# ── task text must not override the runner's branch and commit rules ──────────
+
+STALE = "Repo: y, branch dis/S-2. Edit runner.py. Commit nothing; leave changes in the working tree on the branch."
+
+
+def _dispatch_s2(task_prompt, cfg=CFG):
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
+    story = {"id": "S-2", "title": "T", "acceptance": ["one"]}
+    sf.dispatch(q.client(), "vantage", "2", story, sf.parse_plan(_plan(_t("ui", "dev_frontend", prompt=task_prompt)), ROLES),
+                go=True, sleep=lambda s: None, say=lambda m: None, project_cfg=cfg)
+    return next(p["prompt"] for p in q.payloads() if p.get("flow_key") == "ui")
+
+
+def test_a_stale_bare_branch_name_in_a_task_prompt_points_at_the_real_branch():
+    text = _dispatch_s2(STALE)
+    assert "branch dis/vantage-2-S-2." in text and "branch dis/S-2." not in text
+    assert sf.pin_branch("dis/S-21 and dis/S-2-validation", {"id": "S-2"}, "dis/p-1-S-2") == "dis/S-21 and dis/p-1-S-2-validation"
+    assert sf.pin_branch("dis/BA-201 x", {"id": "BA-201"}, "dis/BA-201") == "dis/BA-201 x"
+
+
+def test_file_editing_tasks_are_told_last_to_commit_and_push_even_if_the_task_says_commit_nothing():
+    text = _dispatch_s2(STALE)
+    assert "Commit nothing" in text                                    # the task text is left alone
+    assert text.rstrip().endswith("only see what is pushed.") and text.rfind("commit your changes and push them") > text.find("Commit nothing")
+    assert "`dis/vantage-2-S-2`" in text[text.find("Branch and commits"):]
+
+
+def test_a_project_without_a_repository_gets_no_commit_rule():
+    assert "Branch and commits" not in _dispatch_s2(STALE, cfg=None)
+
+
+def test_the_scrum_master_is_told_not_to_write_branches_or_commit_instructions():
+    assert "Never write a branch name or an instruction about committing" in sf.sm_prompt("p", "1", {"id": "S-1"}, {"dev_backend": "writes code"})
+
