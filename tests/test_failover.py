@@ -302,3 +302,26 @@ def test_route_note_is_passed_through_only_when_set(monkeypatch):
     assert r["route_note"] == "opus cap reached -> sonnet"
     r = asyncio.run(handle_agent_run(_queued(agent="claude")))
     assert r.get("route_note") is None
+
+
+def test_privacy_guard_reroute_by_task_kind_alone_still_explains_itself(monkeypatch):
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": _with_model("deepseek")})
+    r = asyncio.run(runner.run_agent(agent="deepseek", task_kind="finance", prompt="hi"))
+    assert r["answered_by"] != "deepseek"
+    assert r["route_note"].startswith("deepseek not used for finance work -> ")
+
+
+def test_no_route_note_when_the_pinned_agent_answers(monkeypatch):
+    _fake_agents(monkeypatch, {"claude": _with_model("claude"), "codex": OK("codex"), "agy": OK("agy"),
+                               "deepseek": _with_model("deepseek")})
+    assert "route_note" not in asyncio.run(runner.run_agent(agent="claude", prompt="hi"))
+
+
+def test_a_task_refused_before_any_agent_runs_still_carries_the_provenance_keys():
+    from shared.models import Task, TaskType
+    from worker.handlers.agent_run import handle_agent_run
+    for payload in ({"agent": "claude"}, {"prompt": "hi"}):      # no prompt / no agent and no routing hint
+        r = asyncio.run(handle_agent_run(Task(type=TaskType.agent_run, created_by="t", payload=payload)))
+        assert r["needs_human"] and r["answered_by"] is None and r["answered_model"] is None
+        assert r["failover"] == [] and r["requested"]["agent"] == payload.get("agent")

@@ -131,8 +131,9 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
         chain = chain[:1]
     requested = {"agent": agent, "model": model, "role": None}   # the handler replaces this with the full payload choice
     route_note = None
-    if agent and sensitivity and chain and chain[0][0] != agent.strip().lower():
-        route_note = f"{agent} not used for {sensitivity} data -> {chain[0][0]}"      # the privacy guard swapped the pinned agent
+    if agent and chain and chain[0][0] != agent.strip().lower():      # the privacy guard swapped the pinned agent
+        why = f"{sensitivity} data" if sensitivity else f"{task_kind} work" if task_kind else "this request"
+        route_note = f"{agent} not used for {why} -> {chain[0][0]}"
     if not chain or chain[0][0] not in AGENTS:
         bad = chain[0][0] if chain else agent
         return finish_result({"error": f"Unknown agent: {bad!r}. Choose from: {list(AGENTS)}", "ok": False}, requested, route_note)
