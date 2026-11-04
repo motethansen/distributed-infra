@@ -223,7 +223,7 @@ async def test_c1_sprints_digest_entries_carry_stable_item_key_and_suggestion_or
 
 @pytest.mark.asyncio
 async def test_c2_sonnet_prompt_in_shared_stored_in_scrum_suggestions_and_second_call_makes_zero_model_calls(
-    s2_env, monkeypatch
+    s2_env, tmp_path, monkeypatch
 ):
     m, _dbm, _repo, db_path = s2_env
     mock_model = CountingModelMock()
@@ -253,6 +253,39 @@ async def test_c2_sonnet_prompt_in_shared_stored_in_scrum_suggestions_and_second
             assert (e["item_key"], scrum_suggest.evidence_hash(e)) in stored_keys
     finally:
         conn.close()
+
+    # Verify rqlite scrum_suggestions table DDL & operations keyed by (item_key, evidence_hash)
+    import orchestrator.db_rqlite as dbrq
+
+    rq_conn = sqlite3.connect(str(tmp_path / "rq_s2.db"))
+    try:
+        async def fake_rq_post(path, statements, params=None):
+            out = []
+            for sql, *args in statements:
+                cur = rq_conn.execute(sql, args)
+                if cur.description:
+                    out.append({"columns": [d[0] for d in cur.description], "values": [list(x) for x in cur.fetchall()]})
+                else:
+                    out.append({"last_insert_id": cur.lastrowid, "rows_affected": cur.rowcount})
+            rq_conn.commit()
+            return out
+
+        monkeypatch.setattr(dbrq, "_post", fake_rq_post)
+        await dbrq.ensure_schema()
+
+        rq_mock = CountingModelMock()
+        monkeypatch.setattr(m, "_suggest_call", rq_mock)
+        monkeypatch.setattr(m, "db", dbrq)
+
+        await _call_sprints(m, wait_tasks=True)
+        assert rq_mock.calls == len(entries1)
+        rq_resp2 = await _call_sprints(m, wait_tasks=True)
+        assert rq_mock.calls == len(entries1)  # 0 model calls on second load with rqlite backend
+        assert all(e["suggestion"] is not None for e in _all_digest_entries(rq_resp2["digest"]))
+    finally:
+        rq_conn.close()
+        monkeypatch.setattr(m, "db", _dbm)
+        monkeypatch.setattr(m, "_suggest_call", mock_model)
 
     # Second /scrum/sprints call with unchanged backlogs makes 0 model calls
     resp2 = await _call_sprints(m, wait_tasks=True)
