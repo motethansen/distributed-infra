@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -145,7 +146,11 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in tracking.TRACK_COLUMNS.items():
             if col not in have:
-                await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+                try:
+                    await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc):
+                        raise                    # otherwise a concurrent first request added it between our check and now
         # Backfill from data the rows already hold (only where still empty).
         for col in ("agent", "model"):
             await db.execute(f"UPDATE tasks SET {col}=json_extract(result,'$.{col}') WHERE {col} IS NULL "

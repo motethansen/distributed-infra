@@ -19,7 +19,9 @@ from shared.scrum_digest import evidence_text
 log = logging.getLogger(__name__)
 
 MAX_CHARS = 300
-MAX_NEW_PER_LOAD = 6          # new model calls per board load; the rest fill in on the next load
+MAX_NEW_PER_RUN = 40          # safety cap on model calls in one background run; a board has far fewer items
+MAX_PARALLEL = 3              # model calls in flight at once
+LOOKUP_DEADLINE_SECS = 2.0    # all cache lookups together: slow storage shows no suggestions, never a slow board
 CALL_TIMEOUT_SECS = 12.0
 MODEL = "sonnet"
 
@@ -84,21 +86,36 @@ def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
     return [(sec, e) for sec, key in _SECTIONS for e in digest.get(key) or [] if isinstance(e, dict) and e.get("item_key")]
 
 
-async def attach_cached(digest: dict[str, Any], store: Any) -> dict[str, Any]:
+async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str] | None = None) -> dict[str, Any]:
     """Set `suggestion` on every review/decision/adjustment entry from the store only: the stored row or None.
-    Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestion(item_key, hash)."""
-    for _, e in _entries(digest):
+    Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestion(item_key, hash).
+    The lookups run together and share one deadline (LOOKUP_DEADLINE_SECS). Item keys whose lookup did not finish
+    are added to `unresolved`: their suggestion may exist, so the caller must not generate it again."""
+    entries = [e for _, e in _entries(digest)]
+    pending = {e["item_key"] for e in entries}
+    for e in entries:
+        e["suggestion"] = None
+
+    async def look(e: dict) -> None:
         try:
             row = await store.get_scrum_suggestion(e["item_key"], evidence_hash(e))
         except Exception as exc:                          # the store is optional advice too
             log.warning("scrum suggestion lookup failed for %s: %s", e["item_key"], exc)
             row = None
         e["suggestion"] = _public(row) if row else None
+        pending.discard(e["item_key"])
+
+    try:
+        await asyncio.wait_for(asyncio.gather(*(look(e) for e in entries)), LOOKUP_DEADLINE_SECS)
+    except asyncio.TimeoutError:
+        log.warning("scrum suggestion lookups passed %.1fs; %d items show no suggestion this time", LOOKUP_DEADLINE_SECS, len(pending))
+    if unresolved is not None:
+        unresolved |= pending
     return digest
 
 
 async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Callable[[str], Awaitable[str | None]],
-                           timeout: float | None = None, max_new: int = MAX_NEW_PER_LOAD) -> int:
+                           timeout: float | None = None, max_new: int = MAX_NEW_PER_RUN) -> int:
     """Generate and store suggestions for `items` ((section, entry) pairs) that have none. Returns how many were stored."""
     todo = []
     for sec, e in items:
@@ -108,9 +125,12 @@ async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Call
             todo.append((sec, e, key))
     todo = todo[:max_new] if len(todo) <= max_new else _release(todo, max_new)
 
+    sem = asyncio.Semaphore(MAX_PARALLEL)
+
     async def one(sec: str, e: dict, key: tuple[str, str]) -> int:
         try:
-            raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e), hint=hint(e))), timeout or CALL_TIMEOUT_SECS)
+            async with sem:
+                raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e), hint=hint(e))), timeout or CALL_TIMEOUT_SECS)
             text = clean(raw)
             if not text:
                 return 0
@@ -132,11 +152,12 @@ def _release(todo: list, keep: int) -> list:
     return todo[:keep]
 
 
-def refresh_async(digest: dict[str, Any], store: Any, call: Callable[[str], Awaitable[str | None]]) -> None:
+def refresh_async(digest: dict[str, Any], store: Any, call: Callable[[str], Awaitable[str | None]],
+                  skip: set[str] | frozenset[str] = frozenset()) -> None:
     """Generate suggestions for entries whose `suggestion` is None in a background task; returns at once and never raises.
     Entries are copied, so the digest already handed to the caller is not touched. Call after attach_cached."""
     try:
-        missing = [(sec, dict(e)) for sec, e in _entries(digest) if e.get("suggestion") is None]
+        missing = [(sec, dict(e)) for sec, e in _entries(digest) if e.get("suggestion") is None and e["item_key"] not in skip]
         if not missing:
             return
         task = asyncio.get_running_loop().create_task(generate_missing(missing, store, call))

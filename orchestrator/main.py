@@ -500,7 +500,7 @@ async def scrum_response_consume(response_id: int, x_secret_key: str = Header(de
 async def _suggest_call(prompt: str) -> str | None:
     """One Sonnet call through the claude agent (subscription CLI). Tests replace this."""
     from agents import claude_agent
-    r = await claude_agent.run(prompt, scrum_suggest.MODEL, timeout=int(scrum_suggest.CALL_TIMEOUT_SECS))
+    r = await claude_agent.run(prompt, scrum_suggest.MODEL, timeout=int(scrum_suggest.CALL_TIMEOUT_SECS), tools_off=True)
     return r.get("response") if r.get("ok", True) else None
 
 
@@ -550,8 +550,9 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
     digest = scrum_digest.build(projects, opus=opus)
     if os.getenv("SCRUM_SUGGESTIONS", "1") != "0":
         try:                                                           # advice only: never delays or fails the board
-            await scrum_suggest.attach_cached(digest, db)
-            scrum_suggest.refresh_async(digest, db, _suggest_call)    # missing ones are generated in the background
+            unresolved: set[str] = set()                          # lookups that did not finish in time are not "missing"
+            await scrum_suggest.attach_cached(digest, db, unresolved=unresolved)
+            scrum_suggest.refresh_async(digest, db, _suggest_call, skip=unresolved)    # missing ones: background
         except Exception as exc:
             log.warning("scrum suggestions skipped: %s", exc)
     return {
