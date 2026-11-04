@@ -828,3 +828,28 @@ def test_proposal_shows_stories_concerns_capacity_and_revision_history_without_a
     (d / "stories.json").unlink()
     with pytest.raises(SystemExit, match="no proposal"):
         da.cmd_proposal(argparse.Namespace(project="demo", sprint="1"))
+
+
+def test_validate_uses_the_branch_the_plan_carries_not_the_qualified_default(tmp_path, monkeypatch):
+    import argparse
+    import json
+    base = _plans(tmp_path, monkeypatch)
+    f = base / "S-roles" / "S-1.plan.json"
+    plan = json.loads(f.read_text())
+    plan["branch"] = "dis/S-1"                              # work already pushed under the old name
+    f.write_text(json.dumps(plan))
+    monkeypatch.setattr(da, "projects_cfg", lambda: {"machines": {}, "projects": {"demo": {"repo": "git@github.com:o/demo.git", "dir": "demo"}}})
+    queued = []
+    verdict = '{"validation":{"suite":"1 passed, 0 failed","criteria":[{"n":1,"status":"pass","evidence":"t"},{"n":2,"status":"pass","evidence":"t"}]}}'
+
+    class C:
+        def queue(self, payload, notes):
+            queued.append(payload)
+            return {"id": "tt1"}
+
+        def wait(self, ids, **k):
+            return {"tt1": {"status": "done", "agent": "agy", "result": {"response": verdict}}}
+    monkeypatch.setattr(sc, "client", lambda: C())
+    da.cmd_validate(argparse.Namespace(project="demo", sprint="S-roles", story="DM-002", approved=False, branch=None))
+    prompt = queued[0]["prompt"]
+    assert "`dis/S-1`" in prompt and "dis/demo-S-roles-S-1" not in prompt
