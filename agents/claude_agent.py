@@ -90,8 +90,9 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     # --output-format json: same answer, plus the exact token usage and the CLI's cost estimate.
     if tools_off:
         # for prompts that carry untrusted text (backlog evidence): no tools at all and no permission bypass, so nothing
-        # in the text can make the CLI run a command or touch a file
-        args = [cli, "-p", prompt, "--tools", "", "--output-format", "json"]
+        # in the text can make the CLI run a command or touch a file. `--tools ""` removes the built-in tools only; the
+        # account's connectors (Gmail, Calendar, Drive ...) are MCP tools and stay unless --strict-mcp-config drops them.
+        args = [cli, "-p", prompt, "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--output-format", "json"]
     else:
         args = [cli, "-p", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
     # Multi-turn: --session-id pins a caller-supplied id on the first turn;

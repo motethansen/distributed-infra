@@ -44,8 +44,11 @@ async def test_tools_off_removes_every_tool_and_the_permission_bypass(monkeypatc
     a = seen["args"]
     if tools_off:
         assert a[a.index("--tools") + 1] == "" and "--dangerously-skip-permissions" not in a
+        assert "--strict-mcp-config" in a                  # --tools "" alone leaves the connectors (Gmail, Calendar ...) callable
+        assert "--disable-slash-commands" in a
     else:
         assert "--tools" not in a and "--dangerously-skip-permissions" in a      # every other caller is unchanged
+        assert "--strict-mcp-config" not in a
 
 
 @pytest.mark.asyncio
