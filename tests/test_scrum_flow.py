@@ -689,3 +689,45 @@ def test_the_product_owner_is_told_the_capacity_the_stretch_field_and_its_own_ea
     rev = sf.po_prompt("p", "1", "req", previous=[{"id": "S-1"}], feedback="smaller", previous_concerns=["cut S-8 before S-11"], capacity=12)
     assert "concerns from the previous round" in rev and "cut S-8 before S-11" in rev and "keep the same scope-cut order" in rev
     assert "previous round" not in sf.po_prompt("p", "1", "req", previous=[{"id": "S-1"}], feedback="smaller")        # nothing to carry: nothing said
+
+
+# ── branch names: sprint-local ids must not collide across projects and sprints ─
+
+def test_backlog_ids_keep_their_branch_and_sprint_local_ids_carry_project_and_sprint():
+    assert sf.story_branch("budgetapp", "S6", {"id": "BA-201"}) == "dis/BA-201"
+    assert sf.story_branch("vantage", "2", {"id": "S-2"}) == "dis/vantage-2-S-2"
+    assert sf.story_branch("distributed-infra", "S-roles", {"id": "S-2"}) == "dis/distributed-infra-S-roles-S-2"
+
+
+def test_the_same_story_number_in_two_projects_or_two_sprints_gets_two_branches():
+    names = {sf.story_branch("vantage", "2", {"id": "S-2"}), sf.story_branch("distributed-infra", "S-roles", {"id": "S-2"}),
+             sf.story_branch("vantage", "1", {"id": "S-2"}), sf.story_branch("vantage", "2", {"id": "S-1"})}
+    assert len(names) == 4
+
+
+def test_a_story_can_keep_a_branch_that_was_already_pushed_but_not_an_unsafe_name():
+    assert sf.story_branch("vantage", "2", {"id": "S-2", "branch": "dis/S-2"}) == "dis/S-2"
+    for bad in ("../x", "a b", "x;rm -rf", "-d", "a..b"):
+        with pytest.raises(sf.PlanError, match="plain git branch name"):
+            sf.story_branch("vantage", "2", {"id": "S-2", "branch": bad})
+
+
+def test_odd_characters_in_project_or_sprint_cannot_break_the_branch_name():
+    assert sf.story_branch("my proj", "sprint 3/x", {"id": "S-1"}) == "dis/my-proj-sprint-3-x-S-1"
+
+
+def test_every_prompt_of_a_sprint_local_story_names_the_qualified_branch_and_never_the_bare_one():
+    q = Queue(agent_for=lambda p: "claude" if p["role"] != "reviewer" else "codex")
+    story = {"id": "S-2", "title": "T", "acceptance": ["one"]}
+    sf.dispatch(q.client(), "vantage", "2", story, sf.parse_plan(_plan(_t("ui", "dev_frontend")), ROLES),
+                go=True, sleep=lambda s: None, say=lambda m: None, project_cfg=CFG)
+    prompts = [p["prompt"] for p in q.payloads() if p["role"] in ("dev_frontend", "tester")]
+    assert prompts and all("`dis/vantage-2-S-2`" in t for t in prompts)
+    assert not any("`dis/S-2`" in t for t in prompts)
+
+
+def test_validate_prompt_uses_the_work_branch_it_is_given_for_both_the_story_and_the_validation_branch():
+    st = {"id": "S-2", "title": "T", "acceptance": ["one"]}
+    assert "Work on the story branch `dis/vantage-2-S-2`." in sf.validate_prompt(st, work_branch="dis/vantage-2-S-2")
+    assert "`dis/vantage-2-S-2-validation`" in sf.validate_prompt(st, "main", "dis/vantage-2-S-2")
+

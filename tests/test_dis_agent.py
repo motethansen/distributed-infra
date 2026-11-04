@@ -519,7 +519,7 @@ def test_validate_queues_the_tester_prints_the_verdict_and_says_when_it_is_not_a
     assert "1 pass, 0 fail, 1 unverified" in out and "needs a live system" in out and "close will refuse" in out
     q = queued[0]
     assert "git@github.com:o/demo.git" in q["prompt"]
-    assert q["role"] == "tester" and q["story"] == "S-1" and q["sprint"] == "S-roles" and "already merged" in q["prompt"] and "dis/S-1-validation" in q["prompt"]
+    assert q["role"] == "tester" and q["story"] == "S-1" and q["sprint"] == "S-roles" and "already merged" in q["prompt"] and "`dis/demo-S-roles-S-1-validation`" in q["prompt"]
     assert json.loads((base / "S-roles" / "validation-S-1.json").read_text())["counts"]["unverified"] == 1
     with pytest.raises(SystemExit, match="no plan for DM-9"):
         da.cmd_validate(argparse.Namespace(project="demo", sprint="S-roles", story="DM-9", approved=False, branch=None))

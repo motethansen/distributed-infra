@@ -121,7 +121,7 @@ def sm_prompt(project: str, sprint: str, story: dict, roles: dict[str, str],
             + "\nSet `machine_required: true` only when the task cannot run elsewhere (iOS build, Android build).\n") if machines else ""
     return f"""You are the Scrum Master for the project "{project}" (sprint {sprint}).
 Break this story into atomic tasks for the roles below. Do not plan reviews, integration or branches: all work
-for the story goes on one branch, `dis/<story id>`. After each wave an integrator automatically applies the code
+for the story goes on one branch of its own. After each wave an integrator automatically applies the code
 that dev_backend (DeepSeek) returned as text to that branch, so later tasks can assume it is already there; never
 plan an "apply the earlier results" task. File-editing tasks run one at a time. One reviewer checks the whole story
 at the end.
@@ -356,6 +356,27 @@ def _carry(results: dict[str, str], deps: list[str]) -> str:
     return "\n\nResults of the tasks this one depends on:\n" + "\n\n".join(parts)
 
 
+_SPRINT_LOCAL_ID = re.compile(r"^S-\d+$")
+
+
+def story_branch(project: str, sprint: str, story: dict) -> str:
+    """The one branch a story's work goes on.
+
+    Sprint-local ids (S-1, S-2 ...) repeat in every sprint of every project, so a bare `dis/S-2` is shared by Vantage sprint 2
+    and distributed-infra S-roles: both runs then edit, test and push the same branch and the same pull request. Those ids get
+    the project and sprint in the name (`dis/vantage-2-S-2`). Backlog ids (BA-201) are already unique, so they keep `dis/<id>`.
+    A story may carry its own `branch` to keep work that was pushed under another name."""
+    if story.get("branch"):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", str(story["branch"])) or ".." in str(story["branch"]):
+            raise PlanError(f"story branch {story['branch']!r} is not a plain git branch name")
+        return str(story["branch"])
+    sid = str(story["id"])
+    if not _SPRINT_LOCAL_ID.match(sid):
+        return f"dis/{sid}"
+    clean = lambda v: re.sub(r"[^A-Za-z0-9._-]+", "-", str(v)).strip("-")
+    return f"dis/{clean(project)}-{clean(sprint)}-{sid}"
+
+
 def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
     parts = "\n\n".join(f"--- task {t['key']}: {t['title']} ---\n{text[:12000]}" for t, text in code)
     return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text, one block per "
@@ -366,13 +387,14 @@ def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
             f"Returned code:\n{parts}")
 
 
-def validate_prompt(story: dict, branch: str | None = None) -> str:
+def validate_prompt(story: dict, branch: str | None = None, work_branch: str | None = None) -> str:
     """`branch` is for a story that is already merged: test what is on that branch (usually main) and keep the new tests on a
-    separate branch with a pull request instead of pushing to it."""
+    separate branch with a pull request instead of pushing to it. `work_branch` is the story's own branch (see story_branch)."""
+    work_branch = work_branch or f"dis/{story['id']}"
     crit = "\n".join(f"{i}. {c}" for i, c in enumerate(story.get("acceptance", []), 1))
-    where = (f"Work on the story branch `dis/{story['id']}`." if not branch else
+    where = (f"Work on the story branch `{work_branch}`." if not branch else
              f"The story is already merged: check out `{branch}` and test what is there. Do NOT push to `{branch}`: put the new tests on a new "
-             f"branch `dis/{story['id']}-validation`, push that and open a pull request for it (never merge it).")
+             f"branch `{work_branch}-validation`, push that and open a pull request for it (never merge it).")
     return (f"You are the independent tester for story {story['id']}: {story['title']}. You did not write the code and must not "
             "change it. " + where + "\n\n"
             "1. Write tests from the ACCEPTANCE CRITERIA below and the public interfaces only: decide what to assert from the "
@@ -433,14 +455,14 @@ def review_prompt(story: dict, author: str, material: str, validation: dict | No
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 
 
-def repo_preamble(project: str, cfg: dict | None, story_id: str) -> str:
+def repo_preamble(project: str, cfg: dict | None, branch: str) -> str:
     """Tell the agent where the code is: workers keep clones in different places, so find before cloning."""
     if not cfg:
         return ""
     note = f" Note: {cfg['note']}." if cfg.get("note") else ""
     return (f"Repository for project {project}: {cfg['repo']} (folder name `{cfg['dir']}`). First look for an existing clone "
             f"on this machine (`find ~/Projects -maxdepth 4 -type d -name {cfg['dir']} -exec test -d {{}}/.git \\; -print`); "
-            f"if there is none, clone it into ~/Projects/{cfg['dir']}. All work for this story goes on ONE branch, `dis/{story_id}`: "
+            f"if there is none, clone it into ~/Projects/{cfg['dir']}. All work for this story goes on ONE branch, `{branch}`: "
             f"fetch, check it out if it exists (else create it from the default branch), `git pull --ff-only`, commit and push to it. "
             f"If no pull request exists for that branch open one with `gh pr create`; otherwise just push. Never merge, never deploy, "
             f"never touch a live database."
@@ -470,10 +492,11 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
     """Run the plan wave by wave; stop at the first failed task. Returns a log of
     {key, role, task_id, status, agent}. With go=False nothing is queued.
 
-    One branch per story (dis/<story>). Tasks that only return text (DeepSeek, analyst) run in parallel;
+    One branch per story (see story_branch). Tasks that only return text (DeepSeek, analyst) run in parallel;
     after each wave ONE integrator applies all the DeepSeek code of that wave to the branch; tasks that
     edit files run one at a time so they never race on the branch. After the last wave ONE reviewer
     checks the whole story, pinned off Codex's family when Codex wrote any of it."""
+    branch = story_branch(project, sprint, story)
     layers = waves(tasks)
     if not go:
         for i, layer in enumerate(layers, 1):
@@ -526,21 +549,21 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
         code = [(t, answer(done[t["key"]])) for t in parallel if t["role"] == "dev_backend"
                 and _agent_of(done[t["key"]]) == "deepseek"]
         if code:
-            pre = repo_preamble(project, project_cfg, story["id"])
+            pre = repo_preamble(project, project_cfg, branch)
             d = run("integrator", pre + integrate_prompt(story, code), "integrate:" + "+".join(t["key"] for t, _ in code),
                     f"integrate {story['id']}")
             pr_material.append(answer(d))
             if _agent_of(d):
                 authors.add(_agent_of(d))
         for t in serial:       # file editors one at a time: same branch, no races
-            pre = repo_preamble(project, project_cfg, story["id"]) if t["role"] in DEV_ROLES else ""
+            pre = repo_preamble(project, project_cfg, branch) if t["role"] in DEV_ROLES else ""
             d = batch([{**t, "prompt": pre + t["prompt"]}])[t["key"]]
             pr_material.append(answer(d))
     validation = None
     if any(t["role"] in DEV_ROLES for t in tasks):
-        pre = repo_preamble(project, project_cfg, story["id"])
+        pre = repo_preamble(project, project_cfg, branch)
         try:
-            d = run("tester", pre + validate_prompt(story), "validate", f"validate {story['id']}")
+            d = run("tester", pre + validate_prompt(story, work_branch=branch), "validate", f"validate {story['id']}")
             validation = parse_validation(answer(d), len(story.get("acceptance", [])) or None)
         except PlanError as e:
             validation = {"passed": None, "error": f"the tester task failed: {e}", "counts": {}, "criteria": []}
