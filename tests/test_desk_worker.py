@@ -61,6 +61,9 @@ class FakeClient:
     def opus_usage(self):
         return self.opus
 
+    def heartbeat(self, state):
+        self.calls.append(("heartbeat", state))
+
 
 @pytest.fixture
 def accepted(monkeypatch):
@@ -123,7 +126,8 @@ def test_refresh_proposal_dismissed_and_blank_plan(cfg):
     (d / ".dismissed").write_text("x")
     (d / "S-1.plan.json").write_text("   ")
     r = dw.proposal_from_dir(cfg.data_dir, "p", "s1")
-    assert r["dismissed"] and r["todo"] == ["S-1", "S-2"] and r["planned"] == []
+    # a dismissed sprint publishes no unplanned stories, as dis_agent._local_proposals skips it entirely
+    assert r["dismissed"] and r["todo"] == [] and r["unplanned"] == [] and r["planned"] == []
 
 
 def test_proposal_agrees_with_dis_agent(cfg, monkeypatch):
@@ -204,15 +208,35 @@ def test_plan_failure_and_missing_file(cfg):
 
 def test_cap_reached_blocks_plan_before_running(cfg):
     seed(cfg)
-    client = FakeClient(opus={"spent": 50.0, "cap": 50.0})
+    client = FakeClient(opus={"spent": 50.0, "cap": 50.0, "day_spent": 0})
     with pytest.raises(dw.CommandError) as e:
         dw.run_command(cmd("plan"), cfg, run=lambda *a: pytest.fail("must not run"), caps_hook=lambda: dw.check_caps(client))
     assert e.value.code == "cap_reached"
 
 
-def test_caps_ok_below_cap_or_unconfigured():
-    dw.check_caps(FakeClient(opus={"spent": 49.99, "cap": 50.0}))
-    dw.check_caps(FakeClient(opus=None))
+def test_caps_ok_below_cap():
+    dw.check_caps(FakeClient(opus={"spent": 49.99, "cap": 50.0, "day_spent": 4.99}))
+
+
+def test_daily_cap_reached():
+    with pytest.raises(dw.CommandError) as e:
+        dw.check_caps(FakeClient(opus={"spent": 10, "cap": 50.0, "day_spent": 5.0}))
+    assert e.value.code == "cap_reached" and "daily" in e.value.message
+
+
+def test_monthly_cap_uses_lower_of_config_and_reported(monkeypatch):
+    monkeypatch.setattr(dw, "MONTHLY_CAP_USD", 20.0)
+    with pytest.raises(dw.CommandError) as e:
+        dw.check_caps(FakeClient(opus={"spent": 20, "cap": 50.0, "day_spent": 0}))
+    assert e.value.code == "cap_reached" and "monthly" in e.value.message
+
+
+@pytest.mark.parametrize("opus", [None, {}, {"spent": 1, "cap": 50}, {"spent": "x", "cap": 50, "day_spent": 0},
+                                  {"spent": None, "cap": 50, "day_spent": 0}])
+def test_caps_fail_closed_on_unknown_usage(opus):
+    with pytest.raises(dw.CommandError) as e:
+        dw.check_caps(FakeClient(opus=opus))
+    assert e.value.code == "cap_unknown"
 
 
 def test_caps_fail_closed_when_unverifiable():
@@ -221,12 +245,42 @@ def test_caps_fail_closed_when_unverifiable():
             raise dw.OrchestratorUnreachable("x")
     with pytest.raises(dw.CommandError) as e:
         dw.check_caps(Down())
-    assert e.value.code == "cap_reached"
+    assert e.value.code == "cap_unknown"
+
+
+@pytest.mark.parametrize("verb", ["plan", "validate"])
+def test_model_calling_verbs_check_caps_before_running(cfg, verb):
+    seed(cfg)
+    client = FakeClient(opus=None)
+    with pytest.raises(dw.CommandError) as e:
+        dw.run_command(cmd(verb), cfg, run=lambda *a: pytest.fail("must not run"), caps_hook=lambda: dw.check_caps(client))
+    assert e.value.code == "cap_unknown"
+
+
+def test_refresh_proposal_and_step_done_skip_caps(cfg):
+    seed(cfg)
+    hook = lambda: pytest.fail("no model call, no cap check")  # noqa: E731
+    dw.run_command(cmd("refresh_proposal"), cfg, caps_hook=hook)
+    dw.run_command(cmd("step_done", evidence="e"), cfg, run=lambda a, t: SimpleNamespace(returncode=0, stdout="", stderr=""), caps_hook=hook)
+
+
+@pytest.mark.parametrize("verb", ["plan", "validate"])
+def test_under_cap_runs(cfg, verb):
+    d = seed(cfg)
+    ran = []
+
+    def run(argv, timeout):
+        ran.append(argv)
+        (d / "S-1.plan.json").write_text(json.dumps({"story": {"id": "S-1"}, "tasks": [1]}))
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+    c = FakeClient(opus={"spent": 1, "cap": 50, "day_spent": 1})
+    dw.run_command(cmd(verb), cfg, run=run, caps_hook=lambda: dw.check_caps(c))
+    assert len(ran) == 1
 
 
 def test_cap_reached_fails_once_no_retry(cfg, accepted):
     seed(cfg)
-    c = FakeClient(queued=[{"id": 7, **cmd("plan")}], opus={"spent": 60, "cap": 50})
+    c = FakeClient(queued=[{"id": 7, **cmd("plan")}], opus={"spent": 60, "cap": 50, "day_spent": 0})
     dw.tick(c, cfg)
     assert [x[0] for x in c.calls] == ["claim", "failed"] and c.calls[1][2].startswith("cap_reached")
 
@@ -261,7 +315,7 @@ def test_tick_gate_and_no_claim_when_d006_unconfirmed(cfg, monkeypatch):
     monkeypatch.setattr(dw, "d006_accepted", lambda *a, **k: False)
     c = FakeClient(queued=[cmd("validate")])
     dw.tick(c, cfg)
-    assert c.calls == []
+    assert c.calls == [("heartbeat", "disabled: D-006 not confirmed")]
 
 
 def test_tick_runs_and_reports(cfg, accepted):
@@ -325,10 +379,68 @@ def test_orchestrator_unreachable_propagates(cfg, accepted):
         dw.tick(Down(), cfg, run=lambda *a: pytest.fail("nothing runs"))
 
 
-def test_on_start_fails_leftover_running_rows():
+def test_on_start_fails_leftover_running_rows(cfg):
     c = FakeClient(running=[{"id": 4}, {"id": 5}])
-    dw.on_start(c)
+    dw.on_start(c, cfg)
     assert c.calls == [("failed", 4, "worker restarted"), ("failed", 5, "worker restarted")]
+
+
+def test_on_start_refuses_and_touches_nothing_while_lock_held(cfg):
+    c = FakeClient(running=[{"id": 4}])
+    with dw.worker_lock(cfg.data_dir):
+        with pytest.raises(dw.LockBusy):
+            dw.on_start(c, cfg)
+    assert c.calls == []
+
+
+def test_on_start_pages_through_all_running_rows(cfg):
+    class Paged(FakeClient):   # like the endpoint: oldest 50 'running' rows per call; failing a row removes it
+        def list_commands(self, status):
+            return [{"id": i} for i in self.running[:50]]
+
+        def failed(self, cid, err):
+            super().failed(cid, err)
+            self.running.remove(cid)
+    c = Paged(running=list(range(1, 131)))
+    dw.on_start(c, cfg)
+    assert [x[1] for x in c.calls] == list(range(1, 131))
+
+
+def test_on_start_stops_when_rows_do_not_leave_running(cfg):
+    class Stuck(FakeClient):
+        def list_commands(self, status):
+            return [{"id": 1}]
+    c = Stuck()
+    dw.on_start(c, cfg)
+    assert c.calls == [("failed", 1, "worker restarted")]
+
+
+def test_main_refuses_to_start_when_lock_held(cfg, monkeypatch, capsys):
+    monkeypatch.setattr(dw.Config, "from_env", classmethod(lambda cls, env=None: cfg))
+    monkeypatch.setattr(dw, "OrchestratorClient", lambda *a, **k: FakeClient(running=[{"id": 4}]))
+    with dw.worker_lock(cfg.data_dir):
+        with pytest.raises(SystemExit) as e:
+            dw.main()
+    assert e.value.code not in (0, None) and "another desk worker holds the lock" in str(e.value.code)
+
+
+def test_disabled_d006_sets_heartbeat_state_and_claims_nothing(cfg, tmp_path, monkeypatch):
+    monkeypatch.setenv("VIZNEO_REPO", str(tmp_path / "viz"))
+    (tmp_path / "viz" / "vantage").mkdir(parents=True)
+    (tmp_path / "viz" / "vantage" / "decisions.md").write_text("## D-006 — Opus caps\n\n**Status**: Proposed\n")
+    c = FakeClient(queued=[cmd("validate")])
+    dw.tick(c, cfg, run=lambda *a, **k: pytest.fail("ran"))
+    assert c.calls == [("heartbeat", "disabled: D-006 not confirmed")]
+
+
+def test_client_heartbeat_posts_state():
+    seen = []
+
+    def opener(req, timeout):
+        seen.append((req.full_url, req.get_method(), json.loads(req.data)))
+        return Resp(b"")
+    dw.OrchestratorClient("http://o", "K", opener=opener).heartbeat("x")
+    assert seen == [("http://o/workers/heartbeat", "POST", {"worker_name": "desk-worker", "state": "x"})]
 
 
 def test_backoff():
@@ -391,6 +503,22 @@ def test_client_network_error_does_not_leak_url():
     with pytest.raises(dw.OrchestratorUnreachable) as e:
         dw.OrchestratorClient("http://secret.host", "KEY", opener=opener).claim(1)
     assert "secret.host" not in str(e.value) and "KEY" not in str(e.value)
+
+
+def test_summary_large_unplanned_list_stays_valid_json():
+    unplanned = [{"id": f"S-{i}", "title": "t" * 40, "points": 1} for i in range(200)]
+    r = {"project": "p", "sprint": "s1", "dismissed": False, "stories": 200, "points": 200, "todo": [u["id"] for u in unplanned],
+         "planned": ["S-X"], "unplanned": unplanned, "generated_at": "now"}
+    out = dw._summary(r)
+    d = json.loads(out)
+    assert len(out) <= 2000 and d["truncated"] is True and d["total"] == 200
+    assert 0 < len(d["unplanned"]) < 200 and d["unplanned"] == unplanned[:len(d["unplanned"])]
+    assert {"project", "sprint", "unplanned", "planned", "generated_at"} <= set(d)
+
+
+def test_summary_small_result_untouched():
+    r = {"project": "p", "unplanned": [], "planned": []}
+    assert json.loads(dw._summary(r)) == r
 
 
 def test_summary_is_capped():

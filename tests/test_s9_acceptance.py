@@ -43,7 +43,7 @@ def _cmd(verb, story="S-2", **kw):
 class FakeClient:
     def __init__(self, queued=(), running=(), opus=None):
         self.queued, self.running, self.opus = list(queued), list(running), opus
-        self.claims, self.results = [], []
+        self.claims, self.results, self.heartbeats = [], [], []
 
     def list_commands(self, status):
         return list(self.queued if status == "queued" else self.running)
@@ -54,6 +54,7 @@ class FakeClient:
     def done(self, i, r): self.results.append((i, "done", r))
     def failed(self, i, e): self.results.append((i, "failed", e))
     def opus_usage(self): return self.opus
+    def heartbeat(self, state): self.heartbeats.append(state)
 
 
 def _decisions(tmp_path, status):
@@ -161,7 +162,7 @@ def test_c4_step_done_requires_evidence(tmp_path, ev):
 
 
 # 5
-@pytest.mark.parametrize("opus", [{"spent": 50, "cap": 50}, {"spent": 80, "cap": 50}])
+@pytest.mark.parametrize("opus", [{"spent": 50, "cap": 50, "day_spent": 0}, {"spent": 80, "cap": 50, "day_spent": 0}])
 def test_c5_cap_reached_fails_no_model_call_no_retry(tmp_path, opus):
     _stories(tmp_path)
     c = FakeClient(queued=[_cmd("plan")], opus=opus)
@@ -183,7 +184,7 @@ def test_c5_cap_reached_fails_no_model_call_no_retry(tmp_path, opus):
 
 
 def test_c5_under_cap_allows():
-    dw.check_caps(FakeClient(opus={"spent": 1, "cap": 50}))
+    dw.check_caps(FakeClient(opus={"spent": 1, "cap": 50, "day_spent": 1}))
 
 
 # 6
@@ -207,7 +208,7 @@ def test_c6_command_fails_busy_when_lock_held(tmp_path):
 
 def test_c6_restart_marks_running_rows_failed(tmp_path):
     c = FakeClient(running=[{"id": 11}, {"id": 12}])
-    dw.on_start(c)
+    dw.on_start(c, _cfg(tmp_path))
     assert c.results == [(11, "failed", "worker restarted"), (12, "failed", "worker restarted")]
 
 

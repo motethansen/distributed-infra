@@ -40,6 +40,12 @@ VERBS = tuple(v for v, e in ALLOWLIST.items() if e["tier"] == "T1")   # exactly 
 BACKOFF_START, BACKOFF_MAX = 30.0, 300.0
 PLAN_TIMEOUT = 1800
 VALIDATE_TIMEOUT = 2400   # a validate is a ~30 minute run (D-006)
+HEARTBEAT_PATH = "/workers/heartbeat"
+DISABLED_STATE = "disabled: D-006 not confirmed"
+# D-006 (decided 2026-11-06): $5/day across page-triggered Product Owner calls, plus the monthly cap of
+# config/roles.yaml product_owner.monthly_cost_cap_usd ($50). Env overrides; these are the only places the numbers live.
+DAILY_CAP_USD = float(os.environ.get("DESK_DAILY_CAP_USD") or 5)
+MONTHLY_CAP_USD = float(os.environ.get("DESK_MONTHLY_CAP_USD") or 50)
 
 
 class OrchestratorUnreachable(Exception):
@@ -124,20 +130,35 @@ class OrchestratorClient:
     def failed(self, cmd_id: int, error: str) -> None:
         self._call("POST", RESULT_PATH.format(id=int(cmd_id)), {"status": "failed", "summary": error[:SUMMARY_MAX]})
 
+    def heartbeat(self, state: str) -> None:
+        self._call("POST", HEARTBEAT_PATH, {"worker_name": ACTOR, "state": state})
+
     def opus_usage(self) -> dict | None:
-        """{'spent', 'cap'} for this month's Opus spend, as the scrum board's digest reports it (None if unknown)."""
+        """{'spent', 'cap', 'day_spent'}: this month's and today's Opus spend, as the scrum board's digest reports it
+        (None if unknown)."""
         out = self._call("GET", SPRINTS_PATH)
         opus = ((out or {}).get("digest") or {}).get("opus") if isinstance(out, dict) else None
         return opus if isinstance(opus, dict) else None
 
 
 def _summary(result: dict) -> str:
-    text = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+    """Compact JSON of the result, always valid and at most SUMMARY_MAX long: it shrinks the structure, never the text."""
+    def dump(r: dict) -> str:
+        return json.dumps(r, separators=(",", ":"), ensure_ascii=False)
+    text = dump(result)
     if len(text) <= SUMMARY_MAX:
         return text
-    slim = {k: v for k, v in result.items() if k != "output"}
+    slim = {k: v for k, v in result.items() if k not in ("output", "todo")}   # todo repeats the ids in unplanned
     slim["truncated"] = True
-    return json.dumps(slim, separators=(",", ":"), ensure_ascii=False)[:SUMMARY_MAX]
+    for key in ("unplanned", "planned"):
+        items = slim.get(key)
+        if isinstance(items, list) and len(dump(slim)) > SUMMARY_MAX:
+            slim["total" if key == "unplanned" else "planned_total"] = len(items)
+            while items and len(dump({**slim, key: items})) > SUMMARY_MAX:
+                items = items[:-1]
+            slim[key] = items
+    text = dump(slim)
+    return text if len(text) <= SUMMARY_MAX else dump({"truncated": True})
 
 
 def d006_accepted(decisions_path: Path | str | None = None, repo_root: Path | None = None) -> bool:
@@ -170,19 +191,24 @@ def viz_decisions_path() -> Path:
 
 
 def check_caps(client: OrchestratorClient) -> None:
-    """Refuse a model-calling verb once this month's Opus spend has reached the Product Owner cap (D-006).
+    """Refuse a model-calling verb (plan, validate) once Opus spend has reached the D-006 daily or monthly cap.
 
-    The source is the orchestrator's own figure (config/roles.yaml cap, task-row spend) from /scrum/sprints. The daily
-    $5 cap has no recorded source in the repo; T1 verbs never reach Opus (plan runs the scrum_master role), so only the
-    monthly figure is checked here. Unknown usage fails closed: nothing falls back silently."""
+    Usage comes from the orchestrator's /scrum/sprints digest ({'spent', 'cap', 'day_spent'}). Fails closed: unknown
+    usage (lookup failed, None, or a missing/garbled figure) is `cap_unknown`, never a pass. The monthly cap is the lower
+    of MONTHLY_CAP_USD and the cap the orchestrator reports from config/roles.yaml."""
+    unknown = CommandError("cap_unknown", "cannot verify the Opus spend, so not running a model-calling command")
     try:
         opus = client.opus_usage()
     except (OrchestratorUnreachable, ApiError):
-        raise CommandError("cap_reached", "cannot verify the Opus cap, so not planning") from None
-    if opus is None:
-        return   # no Opus cap configured or digest has none: nothing to enforce
-    spent, cap = float(opus.get("spent") or 0), float(opus.get("cap") or 0)
-    if cap and spent >= cap:
+        raise unknown from None
+    try:
+        spent, day = float(opus["spent"]), float(opus["day_spent"])
+        cap = min(MONTHLY_CAP_USD, float(opus.get("cap") or MONTHLY_CAP_USD))
+    except (TypeError, ValueError, KeyError):
+        raise unknown from None
+    if day >= DAILY_CAP_USD:
+        raise CommandError("cap_reached", f"Opus spend today {day:.2f} >= daily cap {DAILY_CAP_USD:.2f}")
+    if spent >= cap:
         raise CommandError("cap_reached", f"Opus spend {spent:.2f} >= monthly cap {cap:.2f}")
 
 
@@ -231,9 +257,11 @@ def proposal_from_dir(data_dir: Path, project: str, sprint: str, now: datetime |
         sid = (plan or {}).get("story", {}).get("id") if isinstance(plan, dict) and isinstance(plan.get("story"), dict) else None
         if sid:
             planned.add(sid)
-    todo = [x for x in stories if x["id"] not in planned and not x.get("human_only")]
+    dismissed = (sdir / ".dismissed").exists()
+    # dis_agent._local_proposals skips a dismissed sprint entirely, so a dismissed one publishes no unplanned stories
+    todo = [] if dismissed else [x for x in stories if x["id"] not in planned and not x.get("human_only")]
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-    return {"project": project, "sprint": sprint, "dismissed": (sdir / ".dismissed").exists(),
+    return {"project": project, "sprint": sprint, "dismissed": dismissed,
             "stories": len(stories), "points": sum(x.get("points") or 0 for x in stories),
             "todo": [x["id"] for x in todo], "planned": sorted(planned),
             "unplanned": [{"id": x["id"], "title": x.get("title"), "points": x.get("points")} for x in todo],
@@ -294,6 +322,8 @@ def run_command(cmd: dict, cfg: Config, run: Callable[..., Any] = _run_argv,
                 raise CommandError("plan_failed", "plan file missing or unreadable after plan")
             return {"tasks": len(plan.get("tasks", [])), "planned_by": plan.get("planned_by")}
         if verb == "validate":
+            if caps_hook:
+                caps_hook()
             p = run(_dis_agent_argv(cfg, "validate", *flags), VALIDATE_TIMEOUT)
             return {"ok": p.returncode == 0, "output": _tail(p.stdout)}
         evidence = cmd.get("evidence")  # step_done
@@ -316,15 +346,26 @@ def _lock_free(data_dir: Path) -> bool:
         return False
 
 
-def on_start(client: OrchestratorClient) -> None:
-    """Mark rows left in 'running' by a previous crash as failed. Only called at startup (one worker, one lock)."""
-    for row in client.list_commands("running"):
-        client.failed(row["id"], "worker restarted")
+def on_start(client: OrchestratorClient, cfg: Config) -> None:
+    """Mark rows left in 'running' by a previous crash as failed. Only called at startup, and only while holding the
+    worker lock: if a live worker holds it, those rows are its live work, so LockBusy is raised and no row is touched."""
+    with worker_lock(cfg.data_dir):
+        seen: set[Any] = set()
+        while True:   # the list endpoint is paged (oldest 50 first) and failed rows leave 'running', so ask until none are new
+            rows = [r for r in client.list_commands("running") if r["id"] not in seen]
+            if not rows:
+                return
+            for row in rows:
+                seen.add(row["id"])
+                client.failed(row["id"], "worker restarted")
 
 
 def tick(client: OrchestratorClient, cfg: Config, run: Callable[..., dict] = run_command) -> None:
     """One poll iteration. OrchestratorUnreachable propagates (the caller backs off)."""
-    if not d006_accepted(repo_root=cfg.repo_root) or not _lock_free(cfg.data_dir):
+    if not d006_accepted(repo_root=cfg.repo_root):
+        client.heartbeat(DISABLED_STATE)
+        return
+    if not _lock_free(cfg.data_dir):
         return
     for cmd in client.list_commands("queued"):
         if check_verb_ok(cmd.get("verb")) and not _claim_and_run(client, cfg, cmd, run):
@@ -375,10 +416,12 @@ def main() -> None:
     while not stop.is_set():
         try:
             if not started:
-                on_start(client)
+                on_start(client, cfg)
                 started = True
             tick(client, cfg)
             backoff = 0.0
+        except LockBusy:
+            sys.exit("desk_worker: another desk worker holds the lock, refusing to start")
         except (OrchestratorUnreachable, ApiError) as e:
             backoff = next_backoff(backoff)
             print(f"desk_worker: orchestrator problem ({e}), retrying in {backoff:.0f}s", file=sys.stderr, flush=True)

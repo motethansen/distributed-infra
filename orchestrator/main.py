@@ -221,9 +221,9 @@ async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(de
 
 # ── Task CRUD ────────────────────────────────────────────────────────────────
 
-async def _month_opus_cost() -> float:
-    """This calendar month's Opus spend (the Claude CLI's cost estimate), from the task rows."""
-    start = datetime.utcnow().strftime("%Y-%m-01")
+async def _month_opus_cost(day_only: bool = False) -> float:
+    """This calendar month's (or, with day_only, today's) Opus spend (the Claude CLI's cost estimate), from the task rows."""
+    start = datetime.utcnow().strftime("%Y-%m-%d" if day_only else "%Y-%m-01")
     rows = await db.usage_rows(since=start)
     return sum(r.get("cost_usd") or 0.0 for r in rows if scrum_roles.is_opus(r.get("model")))
 
@@ -650,7 +650,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
     try:
         cap = (scrum_roles.load_policy().get("roles") or {}).get("product_owner", {}).get("monthly_cost_cap_usd")
         if cap:
-            opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap)}
+            opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap),
+                    "day_spent": round(await _month_opus_cost(day_only=True), 2)}
     except Exception:                                    # the digest is advice; it must never break the board
         opus = None
     digest = scrum_digest.build(projects, opus=opus)
