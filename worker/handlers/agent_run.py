@@ -71,6 +71,10 @@ async def handle_agent_run(task: Task) -> dict:
             "answered_by": None,
             "answered_model": None,
             "requested": result["requested"],
+            # tokens spent by a failed run are still spent: keep them and who ran, for the task row
+            **({"usage": result["usage"]} if result.get("usage") else {}),
+            **({"agent": result["agent"]} if result.get("agent") else {}),
+            **({"model": result["model"]} if result.get("model") else {}),
             **({"route_note": result["route_note"]} if "route_note" in result else {}),
         }
 

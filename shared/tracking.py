@@ -19,6 +19,9 @@ TRACK_COLUMNS: dict[str, str] = {
     "tokens_out": "INTEGER",
     "tokens_total": "INTEGER",
     "cost_usd": "REAL",
+    "tokens_cache_read": "INTEGER",   # prompt tokens served from the provider's cache
+    "tokens_cache_write": "INTEGER",  # prompt tokens written to the provider's cache
+    "llm": "INTEGER",         # 1 if a language model answered, 0 if not (stored 0/1, NULL = unknown)
     "started_at": "TEXT",     # first time the task went in_progress
     "finished_at": "TEXT",    # last time it reached done/failed/needs_human
     "project": "TEXT",        # from the payload, so sprints/projects can be summed in SQL
@@ -48,11 +51,16 @@ def from_result(result: Any) -> dict[str, Any]:
         if isinstance(v, str) and v:
             out[k] = v[:80]
     u = result.get("usage")
+    llm = result.get("llm", u.get("llm") if isinstance(u, dict) else None)
+    if isinstance(llm, bool):
+        out["llm"] = int(llm)
     if isinstance(u, dict):
         tin, tout, ttot = _int(u.get("tokens_in")), _int(u.get("tokens_out")), _int(u.get("tokens_total"))
         if ttot is None and tin is not None and tout is not None:
             ttot = tin + tout
-        for k, v in (("tokens_in", tin), ("tokens_out", tout), ("tokens_total", ttot)):
+        cr, cw = _int(u.get("tokens_cache_read")), _int(u.get("tokens_cache_write"))
+        for k, v in (("tokens_in", tin), ("tokens_out", tout), ("tokens_total", ttot),
+                     ("tokens_cache_read", cr), ("tokens_cache_write", cw)):
             if v is not None:
                 out[k] = v
         try:
@@ -63,11 +71,37 @@ def from_result(result: Any) -> dict[str, Any]:
     return out
 
 
+# Task types whose handlers never call a language model: stored as agent='none', llm=0.
+NON_LLM_TYPES = frozenset({
+    "android_build", "ios_build", "npm_build", "git_pull", "test_run", "lint", "run_script",
+    "assistant_run", "assistant_query", "weather", "calendar", "email_lookup", "market_brief",
+    "morning_brief", "portfolio", "human_action",
+})
+# Task types that always call a language model. Others (find, project, custom) are mixed: left unset.
+LLM_TYPES = frozenset({"agent_run", "write_article", "write_post", "code_review", "plan"})
+
+
+def for_task(task_type: Any, result: Any) -> dict[str, Any]:
+    """from_result plus the llm/agent label implied by the task type (non-LLM -> agent 'none', llm 0)."""
+    out = from_result(result)
+    name = str(getattr(task_type, "value", task_type) or "")
+    if name in NON_LLM_TYPES:
+        out.update(agent="none", llm=0)
+    elif name in LLM_TYPES and "llm" not in out:
+        out["llm"] = 1
+    return out
+
+
 def from_payload(payload: Any) -> dict[str, Any]:
     """project / sprint / story / role tags a caller put on the task payload."""
     if not isinstance(payload, dict):
         return {}
     return {k: str(payload[k])[:120] for k in ("project", "sprint", "story", "role") if payload.get(k) not in (None, "")}
+
+
+def has_usage(r: dict[str, Any]) -> bool:
+    """True when the row carries any token count; summarise() and coverage() both use this."""
+    return any(r.get(k) is not None for k in ("tokens_in", "tokens_out", "tokens_total"))
 
 
 def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]:
@@ -87,15 +121,15 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
     for r in rows:
         g = groups.setdefault(keyfn(r), {"key": keyfn(r), "tasks": 0, "done": 0, "failed": 0, "needs_human": 0,
                                           "open": 0, "tokens_in": 0, "tokens_out": 0, "tokens_total": 0,
-                                          "cost_usd": 0.0, "with_usage": 0, "agents": set(), "machines": set(),
+                                          "tokens_cache_read": 0, "tokens_cache_write": 0, "cost_usd": 0.0, "with_usage": 0, "agents": set(), "machines": set(),
                                           "stories": set(), "_secs": 0.0, "_timed": 0})
         g["tasks"] += 1
         st = r.get("status")
         g[st if st in ("done", "failed", "needs_human") else "open"] += 1
-        for k in ("tokens_in", "tokens_out", "tokens_total"):
+        for k in ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write"):
             g[k] += r.get(k) or 0
         g["cost_usd"] += r.get("cost_usd") or 0.0
-        g["with_usage"] += 1 if r.get("tokens_total") is not None or r.get("tokens_in") is not None else 0
+        g["with_usage"] += 1 if has_usage(r) else 0
         if r.get("agent"):
             g["agents"].add(r["agent"])
         if r.get("assigned_to"):
@@ -120,3 +154,36 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
         g["agent_count"], g["machine_count"] = len(g["agents"]), len(g["machines"])
         out.append(g)
     return sorted(out, key=lambda g: (-g["tasks"], g["key"]))
+
+
+USAGE_NOT_BACKFILLED_BEFORE = "2026-10-30"
+COST_NOTE = ("cost_usd is an API-equivalent estimate (tokens x list price), not an invoice. If the fleet runs "
+             "on a subscription it is a comparison unit only; nothing was billed per token.")
+
+
+def is_llm_task(r: dict[str, Any]) -> bool:
+    """llm true, or (llm unknown and an agent is recorded other than 'none'). llm false / agent 'none' is not."""
+    llm = r.get("llm")
+    if llm is not None:
+        return bool(llm)
+    return bool(r.get("agent")) and r["agent"] != "none"
+
+
+def coverage(rows: list[dict[str, Any]], since: str | None = None) -> dict[str, Any]:
+    """How many LLM tasks carry token counts. percent is null when there are no LLM tasks (not 100).
+    Rows created before USAGE_NOT_BACKFILLED_BEFORE were never backfilled, so they only count as missing
+    when the window reaches back past that date (no `since`, or `since` earlier than it); a later `since`
+    already excludes them, and the guard below keeps a row without created_at honest either way."""
+    old_counts = since is None or since[:10] < USAGE_NOT_BACKFILLED_BEFORE
+    total = with_usage = 0
+    for r in rows:
+        if not is_llm_task(r):
+            continue
+        has = has_usage(r)
+        if not has and not old_counts and (r.get("created_at") or "9") < USAGE_NOT_BACKFILLED_BEFORE:
+            continue
+        total += 1
+        with_usage += 1 if has else 0
+    return {"llm_tasks": total, "llm_tasks_with_usage": with_usage,
+            "percent": round(100 * with_usage / total, 1) if total else None,
+            "not_backfilled_before": USAGE_NOT_BACKFILLED_BEFORE}

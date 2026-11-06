@@ -136,11 +136,14 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
             "ok": False,
         }
 
+    total = parse_tokens_used(out + "\n" + err)
     if proc.returncode != 0 and not final:
-        return {"error": err or out or "codex exited non-zero", "agent": "codex", "ok": False}
+        failed = {"error": err or out or "codex exited non-zero", "agent": "codex", "ok": False}
+        if total is not None:
+            failed["usage"] = {"tokens_total": total}   # spent even though the run failed
+        return failed
 
     result = {"agent": "codex", "model": chosen_model or "codex-default", "response": final or out, "ok": True}
-    total = parse_tokens_used(out + "\n" + err)
     if total is not None:
         result["usage"] = {"tokens_total": total}   # codex reports one total, not in/out
     return result

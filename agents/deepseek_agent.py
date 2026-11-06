@@ -15,9 +15,11 @@ CLI usage:
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 import re
 import sys
+from pathlib import Path
 
 # deepseek-chat = V3 (general/coding); deepseek-reasoner = R1 (chain-of-thought).
 DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -98,9 +100,80 @@ def _failure(e: Exception) -> dict:
     return {"error": str(e), "agent": "deepseek", "ok": False}
 
 
-def _with_usage(result: dict, usage: dict, model: str) -> dict:
+PRICES_PATH = Path(os.environ.get("LLM_PRICES_FILE") or Path(__file__).resolve().parent.parent / "config" / "llm_prices.yaml")
+_USAGE_KEYS = ("prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens")
+
+
+@functools.lru_cache(maxsize=1)
+def _load_prices() -> dict:
+    """The deepseek section of config/llm_prices.yaml ({model: {input_fresh, input_cache_hit, output}}).
+    Cached; an unreadable or malformed file gives {} so cost_usd falls back to None."""
+    try:
+        import yaml
+        section = (yaml.safe_load(PRICES_PATH.read_text()) or {}).get("deepseek")
+        return section if isinstance(section, dict) else {}
+    except Exception:
+        return {}
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _sum_usage(*usages) -> dict | None:
+    """Add up raw API usage dicts. A key no call reported stays absent; no usage at all gives None."""
+    total: dict = {}
+    for u in usages:
+        if not isinstance(u, dict):
+            continue
+        for k in _USAGE_KEYS:
+            if _num(u.get(k)) is not None:
+                total[k] = total.get(k, 0) + u[k]
+    return total or None
+
+
+def _cost_usd(usage: dict, model: str) -> float | None:
+    """USD cost of one call's usage dict from the price table; None when the model is unknown, its prices are
+    not marked verified: true, or they are incomplete."""
+    p = _load_prices().get(model)
+    if not isinstance(p, dict) or p.get("verified") is not True or any(_num(p.get(k)) is None for k in ("input_fresh", "input_cache_hit", "output")):
+        return None
+    tin, tout = usage.get("prompt_tokens"), usage.get("completion_tokens")
+    if tin is None and tout is None:
+        return None
+    hit = usage.get("prompt_cache_hit_tokens")
+    miss = usage.get("prompt_cache_miss_tokens")
+    if hit is None and miss is None:
+        hit, miss = 0, tin or 0
+    else:
+        hit, miss = hit or 0, miss if miss is not None else max((tin or 0) - (hit or 0), 0)
+    return (miss * p["input_fresh"] + hit * p["input_cache_hit"] + (tout or 0) * p["output"]) / 1_000_000
+
+
+def _attempts_cost(attempts: list, model: str) -> float | None:
+    """Each attempt is priced from its own usage (own cache breakdown, or all-miss when it has none); the
+    costs are then summed. None if any attempt cannot be priced."""
+    costs = [_cost_usd(a, model) if isinstance(a, dict) else None for a in attempts]   # an attempt with no usage at all is unpriced
+    return None if not costs or any(c is None for c in costs) else sum(costs)
+
+
+def _with_usage(result: dict, usage, model: str) -> dict:
+    """Stamp agent, model and usage (tokens_in, tokens_out, cost_usd) on a result. `usage` is the raw API usage
+    dict of one call, or a list of them (first call and retry); tokens are summed, cost is summed per call.
+    Fields the API did not report are None, not 0."""
+    result["agent"] = "deepseek"
     result["model"] = model
-    result["usage"] = {"tokens_in": int(usage.get("prompt_tokens") or 0), "tokens_out": int(usage.get("completion_tokens") or 0)}
+    every_attempt = list(usage) if isinstance(usage, (list, tuple)) else [usage]   # keeps an attempt that reported no usage
+    attempts = [a for a in every_attempt if isinstance(a, dict)]
+    u = _sum_usage(*attempts) or {}
+    if any(_num(u.get(k)) is not None for k in _USAGE_KEYS):
+        result["usage"] = {"tokens_in": _num(u.get("prompt_tokens")), "tokens_out": _num(u.get("completion_tokens")),
+                           "cost_usd": _attempts_cost(every_attempt, model)}
+        if result["usage"]["cost_usd"] is None:
+            result["usage"]["cost_basis"] = "unpriced"
+        if _num(u.get("prompt_cache_hit_tokens")) is not None:
+            result["usage"]["tokens_cache_read"] = _num(u.get("prompt_cache_hit_tokens"))
+        result["llm"] = True
     return result
 
 
@@ -139,29 +212,23 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         async with httpx.AsyncClient(timeout=effective_timeout) as client:
             data = await _ask(client, prompt)
             first = data["choices"][0]["message"]["content"]
+            usage = [data.get("usage")]
             if looks_like_tool_call(first):
-                # One retry with the reminder; the usage of both calls is counted.
-                u1 = data.get("usage") or {}
+                # One retry with the reminder; the usage of both calls is summed.
                 try:
                     retry = await _ask(client, prompt + RETRY_REMINDER)
                 except Exception as e:
-                    return _with_usage(_failure(e), u1, effective_model)   # the first call was paid for
-                u2 = retry.get("usage") or {}
+                    return _with_usage(_failure(e), usage, effective_model)   # the first call was paid for
+                usage.append(retry.get("usage"))
                 data = retry
-                if u1 or u2:
-                    data["usage"] = {k: int(u1.get(k) or 0) + int(u2.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
     except Exception as e:
         return _failure(e)
 
     text = data["choices"][0]["message"]["content"]
     if _is_text_only_failure(text):
         return _with_usage({"error": TEXT_ONLY_ERROR, "agent": "deepseek", "ok": False,
-                            "failure_kind": FAILURE_KIND_TEXT_ONLY}, data.get("usage") or {}, effective_model)
-    result = {"agent": "deepseek", "model": effective_model, "response": text, "ok": True}
-    u = data.get("usage") if isinstance(data.get("usage"), dict) else None
-    if u:
-        result["usage"] = {"tokens_in": int(u.get("prompt_tokens") or 0), "tokens_out": int(u.get("completion_tokens") or 0)}
-    return result
+                            "failure_kind": FAILURE_KIND_TEXT_ONLY}, usage, effective_model)
+    return _with_usage({"response": text, "ok": True}, usage, effective_model)
 
 
 if __name__ == "__main__":
