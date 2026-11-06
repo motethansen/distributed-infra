@@ -20,7 +20,7 @@
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
-  dis-agent responses [--no-consume]              pending owner responses under their board item; shown ones are then marked consumed (--no-consume peeks)
+  dis-agent responses [--no-consume|--consume ID]              pending owner responses under their board item; shown ones are then marked consumed (--no-consume peeks)
   dis-agent review                                the review queue: each waiting story with its sprint, PRs and the exact command to confirm it
   dis-agent accept -p PROJ --story ID --pr URL    confirm a story the fleet did not build (GitHub must show the PR merged), or --evidence "..."
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
@@ -685,6 +685,16 @@ def _print_responses(board: dict | None = None, consume: bool = True) -> None:
 
 
 def cmd_responses(a) -> None:
+    if getattr(a, "consume", None) is not None:
+        from shared import scrum_responses
+        try:
+            ok = scrum_responses.consume_one(sc.client(), a.consume, os.environ.get("USER", "human"))
+        except (Exception, SystemExit):
+            print("responses unavailable: nothing consumed")
+            ok = False
+        if not ok:
+            sys.exit(1)
+        return
     _print_responses(None, not getattr(a, "no_consume", False))
 
 
@@ -943,6 +953,7 @@ def main() -> None:
     sm.add_argument("--as", dest="as_agent")
     rs = sub.add_parser("responses"); rs.set_defaults(fn=cmd_responses)
     rs.add_argument("--no-consume", action="store_true", help="peek: show the pending responses without marking them consumed")
+    rs.add_argument("--consume", type=int, metavar="ID", help="show the pending response with this id, then mark it consumed (409 if already consumed)")
     sm.add_argument("--no-consume", action="store_true", help="show the pending responses without marking them consumed")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
     rv.add_argument("-p", "--project"); rv.add_argument("-s", "--sprint")

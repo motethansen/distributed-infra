@@ -66,14 +66,20 @@ def valid_row(r: Any) -> bool:
     return True
 
 
+def _fetch_raw(client: Any) -> list | None:
+    """The pending rows exactly as the endpoint returned them, or None when they can't be fetched."""
+    body = client._call("GET", "/scrum/responses", params={"status": "pending"})
+    if isinstance(body, dict):
+        body = body.get("responses") or body.get("items")
+    return body if isinstance(body, list) else None
+
+
 def fetch_pending(client: Any) -> tuple[list[dict], int, str | None]:
     """(valid response rows oldest first, malformed count, error). Never raises: the desk must render without the endpoint.
     ALL pending rows are fetched (no latest=1): an earlier comment must not vanish behind a later confirm."""
     try:
-        body = client._call("GET", "/scrum/responses", params={"status": "pending"})
-        if isinstance(body, dict):
-            body = body.get("responses") or body.get("items")
-        if not isinstance(body, list):
+        body = _fetch_raw(client)
+        if body is None:
             return [], 0, UNAVAILABLE
         # The S-1 rows carry no `kind`: they are all responses. Once rows have a kind, only kind=response is a response.
         cand = [r for r in body if not (isinstance(r, dict) and r.get("kind", "response") != "response")]
@@ -180,3 +186,28 @@ def show_and_consume(client: Any, digest: dict, user: str, consume_after: bool =
             consume_shown(client, got["ids"], user, emit)
     except Exception:
         emit(f"\n{UNAVAILABLE}")
+
+
+def consume_one(client: Any, response_id: int, user: str, emit=None) -> bool:
+    """The explicit owner action: print the pending response, flush, and only then consume it. True when consumed.
+    An id that is not pending is sent to the endpoint without showing anything (it answers 409 already consumed, or 404);
+    an id that IS pending but cannot be rendered (malformed, or not a response) is refused and left unconsumed."""
+    emit = emit or print
+    try:
+        raw = _fetch_raw(client)
+    except Exception:
+        raw = None
+    if raw is None:
+        emit(UNAVAILABLE + ": nothing consumed")
+        return False
+    present = [r for r in raw if isinstance(r, dict) and r.get("id") == response_id]
+    if present:
+        rows = [r for r in present if r.get("kind", "response") == "response" and valid_row(r)]
+        if not rows:
+            emit(f"response {response_id} cannot be shown, so it was not consumed")
+            return False
+        emit(format_line(rows[0]))
+        sys.stdout.flush()
+    ok, msg = consume(client, response_id, user)
+    emit(msg if ok or msg == "already consumed" else f"(could not consume response {response_id}: {msg})")
+    return ok

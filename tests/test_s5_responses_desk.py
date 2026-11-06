@@ -273,3 +273,48 @@ def test_consume_errors_never_print_the_key_or_header_shaped_text():
     c = Leaky()
     ok, msg = sr.consume(c, 1, "michael")
     assert not ok and c.key not in msg and "Bearer abc" not in msg and "abc.def" not in msg and len(msg) <= 200
+
+
+def _consume_cmd(monkeypatch, c, rid):
+    monkeypatch.setattr(sc, "client", lambda: c)
+    monkeypatch.setenv("USER", "tester")
+    monkeypatch.setattr(sys, "argv", ["dis-agent", "responses", "--consume", str(rid)])
+    da.main()
+
+
+def test_explicit_consume_prints_the_response_before_it_consumes(monkeypatch, capsys):
+    events: list = []
+    c = FakeClient(events=events)
+    real_emit = print
+    monkeypatch.setattr("builtins.print", lambda *a, **k: (events.append(("print", " ".join(map(str, a)))), real_emit(*a, **k))[1])
+    _consume_cmd(monkeypatch, c, 2)
+    kinds = [e[0] for e in events]
+    assert kinds.index("print") < kinds.index("consume")
+    shown = next(e[1] for e in events if e[0] == "print")
+    assert "michael" in shown and "2026-11-06T02:00:00Z" in shown and "comment" in shown and "my words" in shown and "old" not in shown
+
+
+def test_explicit_consume_uses_the_dis_agent_actor(monkeypatch, capsys):
+    c = FakeClient()
+    _consume_cmd(monkeypatch, c, 1)
+    post = [x for x in c.calls if x[0] == "POST"]
+    assert [(p[1], p[2]) for p in post] == [("/scrum/responses/1/consume", {"X-Actor": "dis-agent:tester"})]
+
+
+def test_a_second_explicit_consume_prints_nothing_but_already_consumed_and_exits_nonzero(monkeypatch, capsys):
+    c = FakeClient()
+    _consume_cmd(monkeypatch, c, 2)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as e:
+        _consume_cmd(monkeypatch, c, 2)
+    assert e.value.code not in (0, None)
+    out = capsys.readouterr().out
+    assert out.strip() == "already consumed" and "my words" not in out
+
+
+def test_an_unrenderable_pending_row_is_not_consumed_by_id(monkeypatch, capsys):
+    c = FakeClient(rows=[{"id": 9, "item_key": "x", "action": "bogus"}, {"id": 4, "kind": "command", "item_key": "x", "action": "comment", "comment": "run"}])
+    for rid in (9, 4):
+        with pytest.raises(SystemExit):
+            _consume_cmd(monkeypatch, c, rid)
+    assert not [x for x in c.calls if x[0] == "POST"]
