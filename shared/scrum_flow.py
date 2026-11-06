@@ -245,12 +245,12 @@ class FleetClient:
                  client: str = "scrum-cli"):
         self.urls, self.key, self.transport, self.client = [u.rstrip("/") for u in urls], key, transport, client
 
-    def _call(self, method: str, path: str, **kw) -> Any:
+    def _call(self, method: str, path: str, headers: dict | None = None, **kw) -> Any:
         errs = []
         for base in self.urls:
             try:
                 with httpx.Client(timeout=20, transport=self.transport) as c:
-                    r = c.request(method, base + path, headers={"x-secret-key": self.key, "x-client": self.client}, **kw)
+                    r = c.request(method, base + path, headers={"x-secret-key": self.key, "x-client": self.client, **(headers or {})}, **kw)
             except httpx.HTTPError as e:
                 errs.append(f"{base}: {type(e).__name__}")
                 continue
