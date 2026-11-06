@@ -409,3 +409,22 @@ async def test_no_second_lookup_for_a_key_already_outstanding(monkeypatch):
     assert len(started) == first                          # the stragglers are still running: nothing new started
     assert unresolved == {e["item_key"] for e in all_entries(d2)}
     await drain()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_requests_keep_one_registry_entry_per_task(monkeypatch):
+    """Two board loads at once both time out: neither may overwrite the other's straggler entry (the cap counts tasks)."""
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.1)
+    d1, d2 = digest(), digest()
+    store = Stubborn(rows_for(d1), False)
+    store.hang = True
+    started = []
+    orig = store.get_scrum_suggestion
+
+    async def counting(k, h):
+        started.append((k, h))
+        return await orig(k, h)
+    store.get_scrum_suggestion = counting
+    await asyncio.gather(ss.attach_cached(d1, store), ss.attach_cached(d2, store))
+    assert len(started) > 0 and len(ss._STRAGGLERS) == len(started)   # one entry per still-running task, none overwritten
+    await drain()

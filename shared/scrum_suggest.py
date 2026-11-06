@@ -91,7 +91,7 @@ def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
 
 
 _KNOWN: "OrderedDict[tuple[str, str], dict]" = OrderedDict()    # {"row", "verified_at"} per (item_key, evidence_hash), LRU
-_STRAGGLERS: dict[tuple, asyncio.Task] = {}                     # lookup key -> task past the deadline: cancelled, never awaited, never published
+_STRAGGLERS: dict[tuple, asyncio.Task] = {}                     # (lookup key, task id) -> task past the deadline: cancelled, never awaited, never published
 
 
 def _now_iso() -> str:
@@ -169,7 +169,7 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
                 for i in sorted(pending)]
     skipped = 0
     for key, i, make in todo:
-        if key in _STRAGGLERS or len(_STRAGGLERS) + len(jobs) >= MAX_OUTSTANDING:
+        if any(k[0] == key for k in _STRAGGLERS) or len(_STRAGGLERS) + len(jobs) >= MAX_OUTSTANDING:
             skipped += 1                                  # one already outstanding, or at the cap: treated as a timeout
             continue
         t = asyncio.ensure_future(timed(make()))
@@ -185,7 +185,7 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
                 _reap(t)
             else:                                         # unfinished: cancel, do not wait, never read the result
                 late.add(t)
-                _STRAGGLERS[keys[t]] = t
+                _STRAGGLERS[(keys[t], id(t))] = t     # one entry per task: overlapping requests never overwrite each other
                 t.add_done_callback(_reap)
                 t.cancel()
     if late:
