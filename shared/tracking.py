@@ -71,6 +71,27 @@ def from_result(result: Any) -> dict[str, Any]:
     return out
 
 
+# Task types whose handlers never call a language model: stored as agent='none', llm=0.
+NON_LLM_TYPES = frozenset({
+    "android_build", "ios_build", "npm_build", "git_pull", "test_run", "lint", "run_script",
+    "assistant_run", "assistant_query", "weather", "calendar", "email_lookup", "market_brief",
+    "morning_brief", "portfolio", "human_action",
+})
+# Task types that always call a language model. Others (find, project, custom) are mixed: left unset.
+LLM_TYPES = frozenset({"agent_run", "write_article", "write_post", "code_review", "plan"})
+
+
+def for_task(task_type: Any, result: Any) -> dict[str, Any]:
+    """from_result plus the llm/agent label implied by the task type (non-LLM -> agent 'none', llm 0)."""
+    out = from_result(result)
+    name = str(getattr(task_type, "value", task_type) or "")
+    if name in NON_LLM_TYPES:
+        out.update(agent="none", llm=0)
+    elif name in LLM_TYPES and "llm" not in out:
+        out["llm"] = 1
+    return out
+
+
 def from_payload(payload: Any) -> dict[str, Any]:
     """project / sprint / story / role tags a caller put on the task payload."""
     if not isinstance(payload, dict):

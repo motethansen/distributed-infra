@@ -300,7 +300,8 @@ async def update_task(task_id: str, fields: dict[str, Any]) -> Task | None:
     now = datetime.utcnow().isoformat()
     fields["updated_at"] = now
     if isinstance(fields.get("result"), dict):
-        fields.update(tracking.from_result(fields["result"]))      # who answered, tokens, cost
+        prior = await get_task(task_id)                            # the type decides the llm/agent label
+        fields.update(tracking.for_task(prior.type if prior else None, fields["result"]))  # who answered, tokens, cost
     status = str(getattr(fields.get("status"), "value", fields.get("status")) or "")
     if status in tracking.TERMINAL:
         fields["finished_at"] = now

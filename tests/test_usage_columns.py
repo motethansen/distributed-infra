@@ -97,7 +97,7 @@ async def test_round_trip_every_usage_field(backend):
     mod = backend[0]
     _legacy(backend)
     await _touch(mod)
-    t = await mod.insert_task(Task(type=TaskType.run_script, created_by="m"))
+    t = await mod.insert_task(Task(type=TaskType.agent_run, created_by="m"))
     got = await mod.update_task(t.id, {"status": "done", "result": RESULT})
     for task in (got, await mod.get_task(t.id)):
         assert (task.agent, task.model) == ("deepseek", "deepseek-chat")
