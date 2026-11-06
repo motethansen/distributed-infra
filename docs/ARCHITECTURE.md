@@ -170,7 +170,7 @@ deepseek, content, social** — the CLIs use their own login sessions, DeepSeek 
 - **DeepSeek is text-only.** It has no shell or file access, so a developer task for it returns code as text and a
   Claude integrator applies it. If it answers an agentic prompt with a tool call written out as text, the agent retries
   once, then fails the run (`printed a tool call as text`) and the task moves to Claude Sonnet, which can edit files;
-  codex (read-only) is never used for that. No cooldown is set, so DeepSeek keeps answering plain questions.
+  Claude is tried first; if Claude is unavailable or already tried, the rest of the normal chain follows (which may include codex). No cooldown is set, so DeepSeek keeps answering plain questions.
 - **Harness access (`clients/fleet-mcp`):** a stdio MCP server registered in Claude Code (so
   T3 Code's Claude threads), Codex, OpenCode and Antigravity gives them `fleet_ask` /
   `fleet_result` / `fleet_tasks` / `fleet_machines`. It submits `agent_run` tasks, so the

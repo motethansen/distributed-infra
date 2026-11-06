@@ -53,10 +53,13 @@ _UNAVAILABLE_RE = re.compile(
 _TEXT_ONLY_RE = re.compile(r"printed a tool call as text", re.IGNORECASE)
 
 
-def classify(error: str | None) -> str | None:
-    """Return 'limit', 'unavailable', 'text_only', or None (= do not fail over)."""
+def classify(error: str | None, agent: str | None = None, failure_kind: str | None = None) -> str | None:
+    """Return 'limit', 'unavailable', 'text_only', or None (= do not fail over).
+
+    'text_only' applies to DeepSeek only: its structured `failure_kind`, or (fallback) its error wording.
+    """
     text = error or ""
-    if _TEXT_ONLY_RE.search(text):
+    if agent == "deepseek" and (failure_kind == "text_only" or _TEXT_ONLY_RE.search(text)):
         return "text_only"
     if _LIMIT_RE.search(text):
         return "limit"

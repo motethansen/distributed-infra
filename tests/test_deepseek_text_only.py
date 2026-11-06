@@ -34,6 +34,8 @@ def test_tool_call_markup_is_detected(text):
 
 @pytest.mark.parametrize("text", [
     "FILE: app.py\n```python\nprint('hello')\n```",
+    "DSML is DeepSeek's markup for tool calls; the invoke tag is described in their docs.",
+    "Call the <invoke> helper, or write `<tool_call>` in your prompt.",
     "A tool call is when a model asks the host to run a function.",
     "Use the invoke() helper, then call functions in order.",
     "",
@@ -101,7 +103,10 @@ def test_a_printed_tool_call_twice_is_a_failure_not_a_success(monkeypatch):
     assert out["ok"] is False
     assert out["error"] == ds.TEXT_ONLY_ERROR
     assert "response" not in out
-    assert fo.classify(out["error"]) == "text_only"
+    assert out["failure_kind"] == "text_only"
+    assert fo.classify(out["error"], "deepseek", out["failure_kind"]) == "text_only"
+    assert fo.classify("anything", "deepseek", "text_only") == "text_only"      # structured, not the wording
+    assert fo.classify(out["error"], "claude") is None                          # only DeepSeek can be text-only
 
 
 def test_markup_next_to_real_code_is_kept(monkeypatch):
@@ -113,10 +118,13 @@ def test_markup_next_to_real_code_is_kept(monkeypatch):
 # ── failover: the work moves to an agent that can do it ───────────────────────
 def _fake_agents(monkeypatch, behaviour):
     calls = []
+    models = _MODELS
+    models.clear()
 
     def make(name):
         async def run(**kw):
             calls.append(name)
+            models.append(kw.get("model", ""))
             return dict(behaviour[name])
         return run
 
@@ -125,6 +133,7 @@ def _fake_agents(monkeypatch, behaviour):
     return calls
 
 
+_MODELS: list = []
 FAIL = {"ok": False, "agent": "deepseek", "error": ds.TEXT_ONLY_ERROR}
 OK = lambda n: {"ok": True, "agent": n, "response": f"done by {n}"}  # noqa: E731
 
@@ -134,6 +143,7 @@ def test_text_only_failure_goes_to_claude_first_not_a_read_only_agent(monkeypatc
     out = asyncio.run(runner.run_agent(agent="deepseek", prompt="edit the repo", cwd="/tmp"))
     assert out["ok"] and out["agent"] == "claude"
     assert calls == ["deepseek", "claude"]                              # codex (read-only) was never tried
+    assert _MODELS[1] == "sonnet"
     assert out["failover"][0]["agent"] == "deepseek" and out["failover"][0]["reason"] == "text_only"
     assert out["answered_by"] == "claude"
 
@@ -144,6 +154,7 @@ def test_claude_sonnet_is_put_first_even_when_the_class_chain_starts_elsewhere(m
     out = asyncio.run(runner.run_agent(agent="deepseek", prompt="edit the repo", task_kind="research"))
     assert out["ok"] and out["agent"] == "claude"
     assert calls == ["deepseek", "claude"]
+    assert _MODELS[1] == "sonnet"
 
 
 def test_text_only_failure_sets_no_cooldown(monkeypatch):
@@ -158,3 +169,88 @@ def test_if_claude_also_fails_the_task_stops_with_a_clear_error(monkeypatch):
     out = asyncio.run(runner.run_agent(agent="deepseek", prompt="x"))
     assert out["ok"] is False                                           # a real failure is not retried elsewhere
     assert "3 tests failed" in out["error"]
+
+
+# ── review follow-ups ──────────────────────────────────────────────────────────
+FAKE_FENCE = '```xml\n<tool_call>{"name":"bash"}</tool_call>\n```'
+
+
+def test_a_fence_holding_only_the_fake_call_is_a_failure(monkeypatch):
+    _patch_http(monkeypatch, [FAKE_FENCE, FAKE_FENCE])
+    out = asyncio.run(ds.run("run the tests"))
+    assert out["ok"] is False and out["failure_kind"] == "text_only"
+
+
+def test_a_fake_call_fence_plus_an_empty_fence_still_fails(monkeypatch):
+    # the old check exempted the reply as soon as any fence existed; an empty one is not code either
+    reply = "Sure:\n" + FAKE_FENCE + "\n```\n   \n```"
+    _patch_http(monkeypatch, [reply, reply])
+    assert asyncio.run(ds.run("x"))["ok"] is False
+
+
+def test_fake_call_fence_is_detected_and_real_fence_beside_it_is_kept():
+    assert ds.looks_like_tool_call(FAKE_FENCE)
+    assert ds._is_text_only_failure(FAKE_FENCE)
+    both = FAKE_FENCE + "\nFILE: a.py\n```python\nx = 1\n```"
+    assert ds.looks_like_tool_call(both) and not ds._is_text_only_failure(both)
+
+
+def test_dsml_in_prose_does_not_trigger_a_retry(monkeypatch):
+    sent = _patch_http(monkeypatch, ["DSML is a markup DeepSeek uses; the <invoke> tag is one part.\nFILE: a.py\n```python\nx = 1\n```"])
+    out = asyncio.run(ds.run("explain DSML"))
+    assert out["ok"] and len(sent) == 1
+
+
+def test_retry_error_still_carries_the_first_calls_usage(monkeypatch):
+    import httpx
+    sent = []
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            sent.append(json)
+            if len(sent) == 1:
+                return _Resp(DSML, usage=(30, 7))
+            raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    out = asyncio.run(ds.run("x"))
+    assert out["ok"] is False and len(sent) == 2
+    assert out["usage"] == {"tokens_in": 30, "tokens_out": 7}
+    assert "failure_kind" not in out                                    # a timeout is not a text-only failure
+
+
+def test_text_only_failure_keeps_its_usage_across_both_calls(monkeypatch):
+    _patch_http(monkeypatch, [DSML, DSML])
+    out = asyncio.run(ds.run("x"))
+    assert out["usage"] == {"tokens_in": 20, "tokens_out": 10}
+
+
+def test_claude_already_attempted_is_not_retried(monkeypatch):
+    calls = _fake_agents(monkeypatch, {"deepseek": FAIL, "claude": {"ok": False, "agent": "claude", "error": "usage limit reached"},
+                                       "codex": OK("codex"), "agy": OK("agy")})
+    out = asyncio.run(runner.run_agent(agent="deepseek", prompt="x"))
+    assert calls.count("claude") == 1                                   # promoted once, never re-queued
+    assert out["ok"]
+
+
+def test_queue_exhaustion_calls_each_agent_once(monkeypatch):
+    bad = lambda n: {"ok": False, "agent": n, "error": "usage limit reached"}  # noqa: E731
+    calls = _fake_agents(monkeypatch, {"deepseek": FAIL, "claude": bad("claude"), "codex": bad("codex"), "agy": bad("agy")})
+    out = asyncio.run(runner.run_agent(agent="deepseek", prompt="x"))
+    assert out["ok"] is False
+    assert len(calls) == len(set(calls))                                # no agent called twice
+
+
+def test_claude_is_not_injected_when_the_caller_excluded_it(monkeypatch):
+    calls = _fake_agents(monkeypatch, {"deepseek": FAIL, "claude": OK("claude"), "codex": OK("codex"), "agy": OK("agy")})
+    asyncio.run(runner.run_agent(agent="deepseek", prompt="x", exclude={"claude"}))
+    assert "claude" not in calls

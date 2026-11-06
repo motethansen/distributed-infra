@@ -39,28 +39,63 @@ RETRY_REMINDER = (
     "Answer with the code or text itself."
 )
 
-# Tool-call imitations seen from DeepSeek: its own DSML wrapper (with full-width or ASCII bars), the generic
-# <function_calls>/<invoke> and <tool_call> shapes, and the older tool-call special tokens.
-_TOOL_CALL_RE = re.compile(
-    r"DSML|<\s*/?\s*(?:function_calls|invoke|tool_calls?|tool_use)\b|<[｜|]\s*tool[▁_ ]call|"
-    r"<[｜|]\s*tool[▁_ ]calls[▁_ ]begin",
+# Real tool-call wrapper syntax only (not the word "DSML" or "invoke" in prose): DeepSeek's DSML tags (full-width
+# or ASCII bars), <function_calls>/<tool_call(s)>/<tool_use> tags, <invoke name=...>, and the old special tokens.
+_WRAPPER_RE = re.compile(
+    r"<\s*/?\s*[｜|]+\s*DSML\s*[｜|]+"
+    r"|<\s*/?\s*(?:function_calls|tool_calls?|tool_use)\b[^<>]*>"
+    r"|<\s*invoke\s+name\s*="
+    r"|<[｜|]\s*tool[▁_ ]calls?[▁_ ](?:begin|sep)",
     re.IGNORECASE,
 )
+_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 
-
-# failover.classify() matches this wording to hand the task to an agent that can run commands.
+# Structured marker the runner/failover read; the wording below is only the human message.
+FAILURE_KIND_TEXT_ONLY = "text_only"
 TEXT_ONLY_ERROR = ("deepseek printed a tool call as text: it is text-only and cannot run commands or edit files, "
                    "so no work was done")
 
 
+def _split(text: str) -> tuple[bool, bool]:
+    """(imitation, real_code): does the reply contain a printed tool call, and does real code remain once
+    fenced blocks whose body is itself tool-call markup are discarded?"""
+    text = text or ""
+    imitation = real_code = False
+    for body in _FENCE_RE.findall(text):
+        if not body.strip():
+            continue
+        if _WRAPPER_RE.match(body.lstrip()):
+            imitation = True        # a fence holding only the fake call is not code
+        else:
+            real_code = True
+    outside = _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
+    if _WRAPPER_RE.search(outside):
+        imitation = True            # a wrapper outside any fence always counts
+    return imitation, real_code
+
+
 def looks_like_tool_call(text: str) -> bool:
     """True when the reply contains tool-call markup that DeepSeek wrote as text (so nothing was run)."""
-    return bool(_TOOL_CALL_RE.search(text or ""))
+    return _split(text)[0]
 
 
-def _has_code(text: str) -> bool:
-    """A fenced block with something in it: the reply carries usable code besides any stray markup."""
-    return bool(re.search(r"```[^\n]*\n(?:.|\n)*?\S(?:.|\n)*?```", text or ""))
+def _is_text_only_failure(text: str) -> bool:
+    imitation, real_code = _split(text)
+    return imitation and not real_code
+
+
+def _failure(e: Exception) -> dict:
+    import httpx
+    if isinstance(e, httpx.HTTPStatusError):
+        return {"error": f"DeepSeek API error {e.response.status_code}: {e.response.text[:300]}", "agent": "deepseek", "ok": False}
+    return {"error": str(e), "agent": "deepseek", "ok": False}
+
+
+def _with_usage(result: dict, usage: dict, model: str) -> dict:
+    result["model"] = model
+    result["usage"] = {"tokens_in": int(usage.get("prompt_tokens") or 0), "tokens_out": int(usage.get("completion_tokens") or 0)}
+    return result
 
 
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None) -> dict:
@@ -100,21 +135,22 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
             first = data["choices"][0]["message"]["content"]
             if looks_like_tool_call(first):
                 # One retry with the reminder; the usage of both calls is counted.
-                retry = await _ask(client, prompt + RETRY_REMINDER)
-                u1, u2 = data.get("usage") or {}, retry.get("usage") or {}
+                u1 = data.get("usage") or {}
+                try:
+                    retry = await _ask(client, prompt + RETRY_REMINDER)
+                except Exception as e:
+                    return _with_usage(_failure(e), u1, effective_model)   # the first call was paid for
+                u2 = retry.get("usage") or {}
                 data = retry
                 if u1 or u2:
                     data["usage"] = {k: int(u1.get(k) or 0) + int(u2.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
-    except httpx.HTTPStatusError as e:
-        return {"error": f"DeepSeek API error {e.response.status_code}: {e.response.text[:300]}", "agent": "deepseek", "ok": False}
     except Exception as e:
-        return {"error": str(e), "agent": "deepseek", "ok": False}
+        return _failure(e)
 
     text = data["choices"][0]["message"]["content"]
-    if looks_like_tool_call(text) and not _has_code(text):
-        return {"error": TEXT_ONLY_ERROR, "agent": "deepseek", "ok": False, "model": effective_model,
-                "usage": {"tokens_in": int((data.get("usage") or {}).get("prompt_tokens") or 0),
-                          "tokens_out": int((data.get("usage") or {}).get("completion_tokens") or 0)}}
+    if _is_text_only_failure(text):
+        return _with_usage({"error": TEXT_ONLY_ERROR, "agent": "deepseek", "ok": False,
+                            "failure_kind": FAILURE_KIND_TEXT_ONLY}, data.get("usage") or {}, effective_model)
     result = {"agent": "deepseek", "model": effective_model, "response": text, "ok": True}
     u = data.get("usage") if isinstance(data.get("usage"), dict) else None
     if u:
