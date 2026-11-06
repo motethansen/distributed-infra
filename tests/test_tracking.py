@@ -186,3 +186,12 @@ async def test_scrum_usage_endpoint(db, monkeypatch):
         await main.scrum_usage(group_by="nonsense", since=None, until=None, project=None, sprint=None, x_secret_key="k")
     with pytest.raises(Exception):
         await main.scrum_usage(group_by="agent", since=None, until=None, project=None, sprint=None, x_secret_key="bad")
+
+
+def test_coverage_counts_codex_rows_with_only_tokens_total():
+    rows = [{"agent": "codex", "llm": 1, "tokens_total": 50, "created_at": "2026-11-01"},
+            {"agent": "codex", "llm": 1, "tokens_out": 3, "created_at": "2026-11-01"},
+            {"agent": "codex", "llm": 1, "created_at": "2026-11-01"}]
+    c = tracking.coverage(rows, since="2026-11-01")
+    assert c["llm_tasks"] == 3 and c["llm_tasks_with_usage"] == 2
+    assert tracking.summarise(rows, "all")[0]["with_usage"] == 2

@@ -4,10 +4,17 @@ import asyncio
 from agents import runner
 
 
-def test_add_usage_sums_and_keeps_none():
+def test_add_usage_unknown_cost_stays_null_and_exposes_known_part():
     r = {"ok": True, "usage": {"tokens_in": 5, "cost_usd": None, "agent": "codex"}}
     runner.add_usage(r, [{"tokens_in": 7, "tokens_out": 2, "cost_usd": 0.5}])
-    assert r["usage"] == {"tokens_in": 12, "tokens_out": 2, "cost_usd": 0.5, "agent": "codex"}
+    assert r["usage"] == {"tokens_in": 12, "tokens_out": 2, "cost_usd": None, "cost_complete": False,
+                          "cost_usd_known_part": 0.5, "agent": "codex"}
+
+
+def test_add_usage_sums_cost_when_every_attempt_is_known():
+    r = {"ok": True, "usage": {"tokens_in": 5, "cost_usd": 0.25}}
+    runner.add_usage(r, [{"tokens_in": 7, "cost_usd": 0.5}])
+    assert r["usage"]["cost_usd"] == 0.75 and "cost_complete" not in r["usage"]
 
 
 def test_add_usage_noop_without_spent():

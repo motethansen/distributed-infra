@@ -133,9 +133,10 @@ def _sum_usage(*usages) -> dict | None:
 
 
 def _cost_usd(usage: dict, model: str) -> float | None:
-    """USD cost of a (summed) usage dict from the price table; None when the model or its prices are unknown."""
+    """USD cost of one call's usage dict from the price table; None when the model is unknown, its prices are
+    not marked verified: true, or they are incomplete."""
     p = _load_prices().get(model)
-    if not isinstance(p, dict) or any(_num(p.get(k)) is None for k in ("input_fresh", "input_cache_hit", "output")):
+    if not isinstance(p, dict) or p.get("verified") is not True or any(_num(p.get(k)) is None for k in ("input_fresh", "input_cache_hit", "output")):
         return None
     tin, tout = usage.get("prompt_tokens"), usage.get("completion_tokens")
     if tin is None and tout is None:
@@ -149,15 +150,26 @@ def _cost_usd(usage: dict, model: str) -> float | None:
     return (miss * p["input_fresh"] + hit * p["input_cache_hit"] + (tout or 0) * p["output"]) / 1_000_000
 
 
+def _attempts_cost(attempts: list, model: str) -> float | None:
+    """Each attempt is priced from its own usage (own cache breakdown, or all-miss when it has none); the
+    costs are then summed. None if any attempt cannot be priced."""
+    costs = [_cost_usd(a, model) for a in attempts]
+    return None if not costs or any(c is None for c in costs) else sum(costs)
+
+
 def _with_usage(result: dict, usage, model: str) -> dict:
     """Stamp agent, model and usage (tokens_in, tokens_out, cost_usd) on a result. `usage` is the raw API usage
-    dict, already summed across the first call and any retry. Fields the API did not report are None, not 0."""
+    dict of one call, or a list of them (first call and retry); tokens are summed, cost is summed per call.
+    Fields the API did not report are None, not 0."""
     result["agent"] = "deepseek"
     result["model"] = model
-    u = usage if isinstance(usage, dict) else {}
+    attempts = [a for a in (usage if isinstance(usage, (list, tuple)) else [usage]) if isinstance(a, dict)]
+    u = _sum_usage(*attempts) or {}
     if any(_num(u.get(k)) is not None for k in _USAGE_KEYS):
         result["usage"] = {"tokens_in": _num(u.get("prompt_tokens")), "tokens_out": _num(u.get("completion_tokens")),
-                           "cost_usd": _cost_usd(u, model)}
+                           "cost_usd": _attempts_cost(attempts, model)}
+        if result["usage"]["cost_usd"] is None:
+            result["usage"]["cost_basis"] = "unpriced"
         if _num(u.get("prompt_cache_hit_tokens")) is not None:
             result["usage"]["tokens_cache_read"] = _num(u.get("prompt_cache_hit_tokens"))
         result["llm"] = True
@@ -199,14 +211,14 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
         async with httpx.AsyncClient(timeout=effective_timeout) as client:
             data = await _ask(client, prompt)
             first = data["choices"][0]["message"]["content"]
-            usage = _sum_usage(data.get("usage"))
+            usage = [data.get("usage")]
             if looks_like_tool_call(first):
                 # One retry with the reminder; the usage of both calls is summed.
                 try:
                     retry = await _ask(client, prompt + RETRY_REMINDER)
                 except Exception as e:
                     return _with_usage(_failure(e), usage, effective_model)   # the first call was paid for
-                usage = _sum_usage(usage, retry.get("usage"))
+                usage.append(retry.get("usage"))
                 data = retry
     except Exception as e:
         return _failure(e)

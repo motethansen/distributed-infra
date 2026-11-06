@@ -6,7 +6,8 @@ import pytest
 from agents import deepseek_agent as ds
 
 PRICES = """deepseek:
-  deepseek-chat: {input_fresh: 1.0, input_cache_hit: 0.1, output: 2.0}
+  deepseek-chat: {input_fresh: 1.0, input_cache_hit: 0.1, output: 2.0, verified: true}
+  deepseek-unverified: {input_fresh: 1.0, input_cache_hit: 0.1, output: 2.0, verified: false}
 """
 DSML = "<function_calls><invoke name=\"bash\"></invoke></function_calls>"
 
@@ -100,7 +101,7 @@ def test_partial_usage_keeps_missing_fields_none(monkeypatch):
 def test_unknown_model_gives_cost_none_but_keeps_tokens(monkeypatch):
     _fake_client(monkeypatch, [_Resp("hello", {"prompt_tokens": 10, "completion_tokens": 5})])
     out = asyncio.run(ds.run("hi", model="deepseek-mystery"))
-    assert out["usage"] == {"tokens_in": 10, "tokens_out": 5, "cost_usd": None}
+    assert out["usage"] == {"tokens_in": 10, "tokens_out": 5, "cost_usd": None, "cost_basis": "unpriced"}
 
 
 def test_missing_price_file_gives_cost_none(monkeypatch, tmp_path):
@@ -116,3 +117,34 @@ def test_shipped_price_file_covers_the_repo_models():
     import yaml
     table = yaml.safe_load(monkeypatch_path.read_text())["deepseek"]
     assert {"deepseek-chat", "deepseek-reasoner"} <= set(table)
+
+
+def test_unverified_price_gives_cost_none_marked_unpriced(monkeypatch):
+    _fake_client(monkeypatch, [_Resp("hello", {"prompt_tokens": 10, "completion_tokens": 5})])
+    u = asyncio.run(ds.run("hi", model="deepseek-unverified"))["usage"]
+    assert u["cost_usd"] is None and u["cost_basis"] == "unpriced"
+
+
+def test_verified_price_gives_a_number(monkeypatch):
+    _fake_client(monkeypatch, [_Resp("hello", {"prompt_tokens": 10, "completion_tokens": 5})])
+    u = asyncio.run(ds.run("hi"))["usage"]
+    assert isinstance(u["cost_usd"], float) and "cost_basis" not in u
+
+
+def test_shipped_prices_are_unverified_so_nothing_is_guessed():
+    ds._load_prices.cache_clear()
+    path = ds.Path(ds.__file__).resolve().parent.parent / "config" / "llm_prices.yaml"
+    import yaml
+    table = yaml.safe_load(path.read_text())["deepseek"]
+    assert all(v["verified"] is False for v in table.values())
+
+
+def test_cache_breakdown_on_one_attempt_does_not_underprice_the_other(monkeypatch):
+    _fake_client(monkeypatch, [
+        _Resp(DSML, {"prompt_tokens": 100, "completion_tokens": 0}),
+        _Resp("ok", {"prompt_tokens": 100, "completion_tokens": 0,
+                     "prompt_cache_hit_tokens": 60, "prompt_cache_miss_tokens": 40})])
+    u = asyncio.run(ds.run("hi"))["usage"]
+    assert u["tokens_in"] == 200
+    # attempt 1: 100 miss * 1.0; attempt 2: 40 miss * 1.0 + 60 hit * 0.1  (per million)
+    assert u["cost_usd"] == pytest.approx((100 * 1.0 + 40 * 1.0 + 60 * 0.1) / 1_000_000)

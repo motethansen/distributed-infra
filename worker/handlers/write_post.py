@@ -27,5 +27,6 @@ async def handle_write_post(task: Task) -> dict:
             "notes": f"social_agent failed: {result.get('error')}",
             **({"usage": result["usage"]} if result.get("usage") else {}),
             **({"agent": result["agent"]} if result.get("agent") else {}),
+            **({"model": result["model"]} if result.get("model") else {}),
         }
     return result

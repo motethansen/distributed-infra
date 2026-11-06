@@ -99,6 +99,11 @@ def from_payload(payload: Any) -> dict[str, Any]:
     return {k: str(payload[k])[:120] for k in ("project", "sprint", "story", "role") if payload.get(k) not in (None, "")}
 
 
+def has_usage(r: dict[str, Any]) -> bool:
+    """True when the row carries any token count; summarise() and coverage() both use this."""
+    return any(r.get(k) is not None for k in ("tokens_in", "tokens_out", "tokens_total"))
+
+
 def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]:
     """Group task rows and total them. group_by: agent | machine | project | sprint | role | day | type."""
     keyfn = {
@@ -124,7 +129,7 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
         for k in ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write"):
             g[k] += r.get(k) or 0
         g["cost_usd"] += r.get("cost_usd") or 0.0
-        g["with_usage"] += 1 if r.get("tokens_total") is not None or r.get("tokens_in") is not None else 0
+        g["with_usage"] += 1 if has_usage(r) else 0
         if r.get("agent"):
             g["agents"].add(r["agent"])
         if r.get("assigned_to"):
@@ -174,7 +179,7 @@ def coverage(rows: list[dict[str, Any]], since: str | None = None) -> dict[str, 
     for r in rows:
         if not is_llm_task(r):
             continue
-        has = r.get("tokens_in") is not None
+        has = has_usage(r)
         if not has and not old_counts and (r.get("created_at") or "9") < USAGE_NOT_BACKFILLED_BEFORE:
             continue
         total += 1

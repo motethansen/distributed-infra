@@ -52,15 +52,21 @@ RESUMABLE = {"claude"}
 WRAPPERS = {"content", "social"}
 
 
-_USAGE_SUMS = ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write", "cost_usd")
+_USAGE_SUMS = ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write")
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def add_usage(result: dict, spent: list[dict]) -> dict:
     """Fold the usage of earlier failed attempts into result["usage"].
 
     A limit/unavailable failure can still have printed tokens (they were spent), and the task row
-    only sees the final result. Numbers are summed field by field and stay None when no attempt
-    reported them; agent/model of the final result are kept.
+    only sees the final result. Token numbers are summed field by field and stay None when no attempt
+    reported them; agent/model of the final result are kept. cost_usd is summed only when every
+    attempt's cost is known; otherwise it stays None, cost_complete is False and the known attempts'
+    total is kept in cost_usd_known_part (both live in the usage dict, no column).
     """
     own = result.get("usage") if isinstance(result.get("usage"), dict) else None
     parts = [u for u in spent if u is not own]     # the final attempt may already be in `spent`
@@ -73,6 +79,15 @@ def add_usage(result: dict, spent: list[dict]) -> dict:
         vals = [u[k] for u in parts if isinstance(u.get(k), (int, float)) and not isinstance(u.get(k), bool)]
         if vals:
             merged[k] = sum(vals)
+    costs = [u.get("cost_usd") for u in parts]
+    known = [c for c in costs if _is_num(c)]
+    if len(known) == len(costs):
+        merged["cost_usd"] = sum(known)
+    else:
+        merged["cost_usd"] = None
+        merged["cost_complete"] = False
+        if known:
+            merged["cost_usd_known_part"] = sum(known)
     result["usage"] = merged
     return result
 

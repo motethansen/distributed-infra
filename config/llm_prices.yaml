@@ -1,6 +1,9 @@
 # Per-model LLM prices, USD per million tokens. Read by agents/deepseek_agent.py to fill cost_usd.
-# PLACEHOLDERS: edit these to match the provider's current price list. A model that is not listed here
-# gets cost_usd=None (unknown), never a guessed number.
+# A model is priced only when its entry has `verified: true`. A model that is not listed, or is listed with
+# `verified: false` (or no verified key), gets cost_usd=NULL and usage.cost_basis='unpriced': never 0, never a guess.
+# To fill in real rates: copy the numbers from the provider's current price page into input_fresh,
+# input_cache_hit and output, then set `verified: true` for that model. The rates below are unverified
+# placeholders, so nothing is priced until the owner does this.
 #   input_fresh:     prompt tokens that missed the provider's context cache
 #   input_cache_hit: prompt tokens served from the cache
 #   output:          completion tokens
@@ -9,7 +12,9 @@ deepseek:
     input_fresh: 0.28       # placeholder - EDIT ME
     input_cache_hit: 0.028  # placeholder - EDIT ME
     output: 0.42            # placeholder - EDIT ME
+    verified: false
   deepseek-reasoner:
     input_fresh: 0.28       # placeholder - EDIT ME
     input_cache_hit: 0.028  # placeholder - EDIT ME
     output: 0.42            # placeholder - EDIT ME
+    verified: false
