@@ -29,7 +29,7 @@ import tarfile
 import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -330,6 +330,10 @@ class Fixture:
     test_file: "str | None" = None  # file in the fixture dir, copied into the repo root as test_dest
     test_dest: str = DEFAULT_TEST_DEST
     fixture_dir: "Path | None" = None
+    # Trusted bytes, read ONCE (freeze_fixture) before any agent runs and never re-read from disk during a run.
+    test_bytes: "bytes | None" = None
+    test_sha256: "str | None" = None
+    trusted: dict = field(default_factory=dict)   # commit as given -> Trusted
 
 
 def _test_dest(data):
@@ -376,20 +380,30 @@ def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
 
 
-def install_acceptance_test(fixture, root):
-    """Copy the fixture's trusted acceptance test into `root` as fixture.test_dest (the pinned commit predates it).
-    Whatever is at that path (file, symlink, directory) is removed first."""
-    if not fixture.test_file:
+def freeze_test(fixture):
+    """Read the fixture's acceptance test into memory once (bytes + sha256). Later calls reuse those bytes."""
+    if not fixture.test_file or fixture.test_bytes is not None:
         return
     src = Path(fixture.fixture_dir) / fixture.test_file
     if not src.is_file():
         raise FixtureError(f"fixture {fixture.name}: test_file {fixture.test_file} not found in {fixture.fixture_dir}")
+    fixture.test_bytes = src.read_bytes()
+    fixture.test_sha256 = hashlib.sha256(fixture.test_bytes).hexdigest()
+
+
+def install_acceptance_test(fixture, root):
+    """Write the fixture's trusted acceptance test (the in-memory bytes) into `root` as fixture.test_dest (the pinned
+    commit predates it). Whatever is at that path (file, symlink, directory) is removed first."""
+    if not fixture.test_file:
+        return
+    freeze_test(fixture)
     dest = Path(root) / fixture.test_dest
     if dest.is_symlink() or dest.is_file():
         dest.unlink()
     elif dest.is_dir():
         shutil.rmtree(dest)
-    shutil.copyfile(src, dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(fixture.test_bytes)
 
 
 # Files that change what pytest collects/configures or what Python imports at start-up. Restored from the pinned snapshot.
@@ -398,10 +412,21 @@ GUARDED_NAMES = frozenset({"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", 
 
 
 @dataclass
+class Trusted:
+    """Everything the harness trusts about a snapshot, held in memory: no directory on disk the agent can reach."""
+    repo: Path        # where the pinned commit is exported from (git archive), only at diff time
+    commit: str       # full sha of the pinned commit
+    test_dest: str
+    test_bytes: "bytes | None"
+    files: dict       # relative path -> bytes: the guarded files of the snapshot, plus the acceptance test
+    sha256: dict      # relative path -> sha256 of the above
+
+
+@dataclass
 class Sandbox:
     path: Path        # the agent's working tree: an independent repo
-    pristine: Path    # trusted copy of the snapshot (+ acceptance test), outside the agent's tree
     base: str         # sha of the repo's single commit: the immutable base for the diff
+    trusted: Trusted
 
 
 def _git_env():
@@ -438,28 +463,56 @@ def _init_commit(path):
     return _git_safe(path, "rev-parse", "HEAD").strip()
 
 
+def freeze_trusted(fixture, repo, commit):
+    """Read the guarded files of `commit` (and the acceptance test) into memory once per fixture and commit."""
+    t = fixture.trusted.get(commit) if fixture is not None else None
+    if t is not None:
+        return t
+    repo = Path(os.path.abspath(os.path.expanduser(str(repo))))
+    sha = _git(repo, "rev-parse", "--verify", commit + "^{commit}").stdout.strip()
+    if not sha:
+        raise RuntimeError(f"cannot resolve {commit} in {repo}")
+    files = {}
+    with tempfile.TemporaryDirectory(prefix="llmexp-freeze-") as tmp:
+        export_snapshot(repo, sha, tmp)
+        for rel in sorted(_tree_files(tmp, GUARDED_NAMES)):
+            p = Path(tmp) / rel
+            if p.is_dir() and not p.is_symlink():
+                raise FixtureError(f"the pinned snapshot contains a directory named {rel}, which the harness guards")
+            if p.is_file() and not p.is_symlink():
+                files[rel] = p.read_bytes()
+    test_bytes = None
+    if fixture is not None and fixture.test_file:
+        freeze_test(fixture)
+        test_bytes = fixture.test_bytes
+        files[fixture.test_dest] = test_bytes
+    t = Trusted(repo, sha, fixture.test_dest if fixture is not None else DEFAULT_TEST_DEST, test_bytes, files,
+                {k: hashlib.sha256(v).hexdigest() for k, v in files.items()})
+    if fixture is not None:
+        fixture.trusted[commit] = t
+    return t
+
+
 def make_snapshot_repo(repo, commit, base_dir, fixture=None):
     """Independent repository from ONLY the pinned snapshot (git archive, git init, one commit): no remotes, no other
     branches, no history, no .git link to the source repo. Paths are absolute (DI-020: expanduser, then abspath)."""
     root = Path(os.path.abspath(os.path.expanduser(str(base_dir))))
     tag = uuid.uuid4().hex[:8]
-    path, pristine = root / ("repo-" + tag), root / ("pristine-" + tag)
+    path = root / ("repo-" + tag)
     root.mkdir(parents=True, exist_ok=True)
     try:
-        for d in (path, pristine):
-            export_snapshot(repo, commit, d)
-            if fixture is not None:
-                install_acceptance_test(fixture, d)
-        return Sandbox(path, pristine, _init_commit(path))
+        trusted = replace(freeze_trusted(fixture, repo, commit), repo=Path(os.path.abspath(os.path.expanduser(str(repo)))))
+        export_snapshot(repo, commit, path)
+        if fixture is not None:
+            install_acceptance_test(fixture, path)
+        return Sandbox(path, _init_commit(path), trusted)
     except Exception:
         shutil.rmtree(path, ignore_errors=True)
-        shutil.rmtree(pristine, ignore_errors=True)
         raise
 
 
 def remove_sandbox(sb):
     shutil.rmtree(sb.path, ignore_errors=True)
-    shutil.rmtree(sb.pristine, ignore_errors=True)
 
 
 def _tree_files(root, names):
@@ -473,35 +526,33 @@ def _tree_files(root, names):
     return out
 
 
-def _same(a, b):
-    a, b = Path(a), Path(b)
-    if a.is_symlink() or b.is_symlink() or not a.is_file() or not b.is_file():
+def _same(path, trusted_bytes):
+    p = Path(path)
+    if p.is_symlink() or not p.is_file():
         return False
-    return a.read_bytes() == b.read_bytes()
+    return p.read_bytes() == trusted_bytes
 
 
 def restore_trusted(sb, fixture):
-    """Put the acceptance test and every pytest/start-up config file back to the trusted snapshot versions, drop stale
-    bytecode, and return the sorted relative paths the agent had changed, added or removed (tampering)."""
+    """Put the acceptance test and every pytest/start-up config file back to the trusted bytes held in memory, drop
+    stale bytecode, and return the sorted relative paths the agent had changed, added or removed (tampering)."""
     names = set(GUARDED_NAMES)
-    if fixture.test_file:
-        names.add(fixture.test_dest)
+    files = sb.trusted.files
     changed = []
-    for rel in sorted(_tree_files(sb.pristine, names) | _tree_files(sb.path, names)):
-        trusted, mine = sb.pristine / rel, sb.path / rel
-        if mine.name == fixture.test_dest and rel != fixture.test_dest and not trusted.exists():
+    for rel in sorted(set(files) | _tree_files(sb.path, names)):
+        mine = sb.path / rel
+        if rel not in files and mine.name == fixture.test_dest:
             continue   # a same-named file elsewhere is just a file
-        in_trusted = trusted.is_file()
-        if in_trusted and _same(trusted, mine):
+        if rel in files and _same(mine, files[rel]):
             continue
         changed.append(rel)
         if mine.is_symlink() or mine.is_file():
             mine.unlink()
         elif mine.is_dir():
             shutil.rmtree(mine)
-        if in_trusted:
+        if rel in files:
             mine.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(trusted, mine)
+            mine.write_bytes(files[rel])
     for dp, dns, fns in os.walk(sb.path, followlinks=False):
         dns[:] = [d for d in dns if d != ".git"]
         if "__pycache__" in dns:
@@ -523,7 +574,13 @@ def compute_diff(sb, scratch_dir):
     tmp = Path(tempfile.mkdtemp(prefix="llmexp-diff-", dir=scratch_dir))
     try:
         r = tmp / "r"
-        shutil.copytree(sb.pristine, r, symlinks=True)
+        # The baseline is rebuilt now, from the pinned commit's git objects and the in-memory acceptance test, in a
+        # new temp dir: no long-lived copy exists that the agent could have rewritten.
+        export_snapshot(sb.trusted.repo, sb.trusted.commit, r)
+        if sb.trusted.test_bytes is not None:
+            dest = r / sb.trusted.test_dest
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(sb.trusted.test_bytes)
         base = _init_commit(r)
         for child in r.iterdir():
             if child.name != ".git":
@@ -690,7 +747,8 @@ def _preflight_run(fixture, runner, repo, commit, base):
 
 def check_fixture_fails_before(fixture, runner, workdir=None):
     """Preflight, before any money is spent, with the interpreter and allowlisted env the runs will use: the acceptance
-    test must FAIL WITH AN ASSERTION (pytest exit 1) on the pinned snapshot, and PASS (exit 0) on known_good_commit."""
+    test must FAIL WITH AN ASSERTION (pytest exit 1) on the pinned snapshot, and PASS (exit 0) on known_good_commit.
+    This is also where the trusted bytes (acceptance test, guarded configs) are frozen into memory, before any agent runs."""
     own = workdir is None
     base = tempfile.mkdtemp(prefix="llmexp-gate-") if own else workdir
     try:
