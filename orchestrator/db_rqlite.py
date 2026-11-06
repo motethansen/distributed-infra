@@ -490,6 +490,11 @@ async def list_commands(kind: str = "command", limit: int = 200) -> list[dict]:
     return _rows(res[0]) if res else []
 
 
+async def list_worker_commands(status: str, limit: int = 50) -> list[dict]:
+    res = await _query([[ds.LIST_WORKER_COMMANDS, status, limit]], level="strong")
+    return _rows(res[0]) if res else []
+
+
 # ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──
 
 async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None:

@@ -62,3 +62,15 @@ def test_pause_claim_and_result(client):
     assert client.post(f"/scrum/responses/{cid}/result", json={"status": "failed", "summary": "ok"}, headers=KEY).status_code == 409
     rows = client.get("/scrum/responses?kind=command", headers=KEY).json()
     assert {r["id"]: r["status"] for r in rows}[cid] == "done"
+
+
+def test_worker_command_list_has_typed_fields_and_status_filter(client):
+    cid = post(client, cmd("step_done", story_id="S-3", evidence="did it")).json()["id"]
+    r = client.get("/scrum/desk/commands?status=queued", headers=KEY)
+    assert r.status_code == 200 and [(x["id"], x["verb"], x["project"], x["sprint"], x["story_id"], x["evidence"]) for x in r.json()] == \
+        [(cid, "step_done", "p", "s1", "S-3", "did it")]
+    assert client.get("/scrum/desk/commands?status=running", headers=KEY).json() == []
+    assert client.post(f"/scrum/responses/{cid}/consume", headers=KEY).status_code == 200
+    assert [x["id"] for x in client.get("/scrum/desk/commands?status=running", headers=KEY).json()] == [cid]
+    assert client.get("/scrum/desk/commands?status=done", headers=KEY).status_code == 422
+    assert client.get("/scrum/desk/commands").status_code in (401, 403)

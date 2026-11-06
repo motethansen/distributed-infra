@@ -567,6 +567,15 @@ async def scrum_response_result(response_id: int, raw: dict = Body(...), x_secre
     return {"id": response_id, "status": body.status}
 
 
+@app.get("/scrum/desk/commands", dependencies=[Depends(_require_secret_key)])
+async def scrum_desk_commands(status: str = "queued", x_secret_key: str = Header(default="")):
+    """The typed fields of command rows in one status (oldest first), for the desk worker. Claim with
+    POST /scrum/responses/{id}/consume, report with POST /scrum/responses/{id}/result."""
+    if status not in ("queued", "running"):
+        raise HTTPException(status_code=422, detail="status must be queued or running")
+    return await db.list_worker_commands(status)
+
+
 @app.get("/scrum/desk/pause", dependencies=[Depends(_require_secret_key)])
 async def scrum_desk_pause_get(x_secret_key: str = Header(default="")):
     return await db.get_pause()
