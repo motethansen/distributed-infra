@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import signal
@@ -44,8 +45,17 @@ HEARTBEAT_PATH = "/workers/heartbeat"
 DISABLED_STATE = "disabled: D-006 not confirmed"
 # D-006 (decided 2026-11-06): $5/day across page-triggered Product Owner calls, plus the monthly cap of
 # config/roles.yaml product_owner.monthly_cost_cap_usd ($50). Env overrides; these are the only places the numbers live.
-DAILY_CAP_USD = float(os.environ.get("DESK_DAILY_CAP_USD") or 5)
-MONTHLY_CAP_USD = float(os.environ.get("DESK_MONTHLY_CAP_USD") or 50)
+def _cap_from_env(name: str, default: float) -> float:
+    """A cap from the environment; anything that is not a finite number above zero falls back to the D-006 default."""
+    try:
+        v = float(os.environ.get(name) or default)
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v > 0 else default
+
+
+DAILY_CAP_USD = _cap_from_env("DESK_DAILY_CAP_USD", 5.0)
+MONTHLY_CAP_USD = _cap_from_env("DESK_MONTHLY_CAP_USD", 50.0)
 
 
 class OrchestratorUnreachable(Exception):
@@ -195,15 +205,26 @@ def check_caps(client: OrchestratorClient) -> None:
 
     Usage comes from the orchestrator's /scrum/sprints digest ({'spent', 'cap', 'day_spent'}). Fails closed: unknown
     usage (lookup failed, None, or a missing/garbled figure) is `cap_unknown`, never a pass. The monthly cap is the lower
-    of MONTHLY_CAP_USD and the cap the orchestrator reports from config/roles.yaml."""
+    of MONTHLY_CAP_USD and the cap the orchestrator reports from config/roles.yaml. Spend and cap figures must be finite,
+    non-negative numbers; NaN, a missing or null cap and the like are cap_unknown. A cap of 0 means no spend allowed.
+    The worker is a SINGLE instance (launchd KeepAlive); the startup lock refuses a second one but is not held while a
+    command runs, so never start two by hand."""
     unknown = CommandError("cap_unknown", "cannot verify the Opus spend, so not running a model-calling command")
     try:
         opus = client.opus_usage()
     except (OrchestratorUnreachable, ApiError):
         raise unknown from None
+    def figure(v) -> float:
+        """A spend or cap figure must be a real, finite, non-negative number; NaN, inf, a bool or text is unknown."""
+        if isinstance(v, bool):
+            raise ValueError("bool is not a figure")
+        x = float(v)
+        if not math.isfinite(x) or x < 0:
+            raise ValueError("not a finite non-negative number")
+        return x
     try:
-        spent, day = float(opus["spent"]), float(opus["day_spent"])
-        cap = min(MONTHLY_CAP_USD, float(opus.get("cap") or MONTHLY_CAP_USD))
+        spent, day = figure(opus["spent"]), figure(opus["day_spent"])
+        cap = min(MONTHLY_CAP_USD, figure(opus["cap"]))        # the orchestrator must state its cap; a missing one is unknown, not the default
     except (TypeError, ValueError, KeyError):
         raise unknown from None
     if day >= DAILY_CAP_USD:

@@ -528,3 +528,34 @@ def test_summary_is_capped():
 def test_new_worker_endpoint_lists_typed_fields():
     from shared import desk_store as ds
     assert "project" in ds.WORKER_COMMAND_COLS and "evidence" in ds.WORKER_COMMAND_COLS
+
+
+@pytest.mark.parametrize("opus", [
+    {"spent": float("nan"), "cap": 50.0, "day_spent": 0},
+    {"spent": 1, "cap": 50.0, "day_spent": float("nan")},
+    {"spent": 1, "cap": float("nan"), "day_spent": 0},
+    {"spent": float("inf"), "cap": 50.0, "day_spent": 0},
+    {"spent": -1, "cap": 50.0, "day_spent": 0},
+    {"spent": 1, "cap": None, "day_spent": 0},            # a missing or null cap must not fall back to the default
+    {"spent": 1, "day_spent": 0},
+    {"spent": True, "cap": 50.0, "day_spent": 0},
+    {"spent": "ten", "cap": 50.0, "day_spent": 0},
+])
+def test_non_finite_missing_or_garbled_figures_are_cap_unknown(opus):
+    with pytest.raises(dw.CommandError) as ei:
+        dw.check_caps(FakeClient(opus=opus))
+    assert ei.value.code == "cap_unknown"
+
+
+def test_a_cap_of_zero_means_nothing_may_be_spent():
+    with pytest.raises(dw.CommandError) as ei:
+        dw.check_caps(FakeClient(opus={"spent": 0, "cap": 0, "day_spent": 0}))
+    assert ei.value.code == "cap_reached"
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-3", "abc", "0"])
+def test_bad_cap_environment_values_fall_back_to_the_d006_defaults(monkeypatch, bad):
+    monkeypatch.setenv("DESK_DAILY_CAP_USD", bad)
+    monkeypatch.setenv("DESK_MONTHLY_CAP_USD", bad)
+    assert dw._cap_from_env("DESK_DAILY_CAP_USD", 5.0) == 5.0
+    assert dw._cap_from_env("DESK_MONTHLY_CAP_USD", 50.0) == 50.0
