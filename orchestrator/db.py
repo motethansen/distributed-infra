@@ -170,6 +170,8 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
                              f"AND json_valid(payload) AND json_extract(payload,'$.{col}') IS NOT NULL")
         await db.execute("UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL "
                          "AND status IN ('done','failed','needs_human')")
+        for stmt in ds.DESK_INDEX_DDL:
+            await db.execute(stmt)
         _MIGRATED.add(path)
     await db.commit()
 
@@ -451,6 +453,11 @@ async def insert_command(fields: dict, idempotency_key: str | None = None, rate_
         await db.execute(ds.AUDIT_CREATE_IF_INSERTED, ("queued", fields["actor"], created_at))
         await db.commit()
         if inserted < 1:
+            if idempotency_key is not None:   # lost the race on the unique key: replay the winner, even at the limit
+                cur = await db.execute(ds.COMMAND_IDEM_LOOKUP, (idempotency_key,))
+                row = await cur.fetchone()
+                if row:
+                    return ds.command_replay_or_conflict(dict(row), fields)
             raise DeskRateLimited("rate limited")
         return {"id": row_id, "created_at": created_at, "status": "queued"}
 

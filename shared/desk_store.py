@@ -58,6 +58,13 @@ DESK_DDL = [
     """,
 ]
 
+# One command per Idempotency-Key, enforced by the database so simultaneous retries cannot both insert. Additive and
+# partial (command rows only), so it applies to an existing table; it needs the `kind` column, so it runs after the ALTERs.
+DESK_INDEX_DDL = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_scrum_responses_command_idem ON scrum_responses (idempotency_key) "
+    "WHERE kind = 'command' AND idempotency_key IS NOT NULL",
+]
+
 KIND = "COALESCE(kind, 'response')"
 COMMAND_PUBLIC = "id, status, tier, actor, created_at, verb, result_summary"
 
@@ -71,11 +78,16 @@ INSERT_COMMAND_LIMITED = ("INSERT INTO scrum_responses (item_key, project, secti
                           "idempotency_key, kind, verb, sprint, story_id, plan_digest, evidence, tier) "
                           "SELECT ?, ?, 'desk', 'command', ?, ?, 'queued', ?, 'command', ?, ?, ?, ?, ?, ? "
                           "WHERE (SELECT COUNT(*) FROM scrum_responses WHERE COALESCE(kind, 'response')='command' "
-                          "AND actor=? AND created_at>=?) < ?")
+                          "AND actor=? AND created_at>=?) < ? "
+                          "ON CONFLICT DO NOTHING")
 NO_RATE_LIMIT = 1 << 62
 COMMAND_IDEM_FIELDS = ("project", "actor", "verb", "sprint", "story_id", "plan_digest", "evidence", "tier")
 COMMAND_IDEM_SELECT = ("SELECT id, created_at, status, kind, " + ", ".join(COMMAND_IDEM_FIELDS) +
                        " FROM scrum_responses WHERE idempotency_key = ? AND created_at >= ? ORDER BY id ASC LIMIT 1")
+# After an insert that added nothing: the row that already holds the key (outside the replay window too, since the
+# unique index still holds it). No row means the insert was refused by the rate limit instead.
+COMMAND_IDEM_LOOKUP = ("SELECT id, created_at, status, kind, " + ", ".join(COMMAND_IDEM_FIELDS) +
+                       " FROM scrum_responses WHERE idempotency_key = ? AND kind = 'command' ORDER BY id ASC LIMIT 1")
 
 # Each audit row is written in the same transaction as the change it records.
 AUDIT_CREATE = ("INSERT INTO scrum_audit (response_id, from_status, to_status, actor, at) "

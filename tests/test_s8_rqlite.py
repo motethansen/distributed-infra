@@ -89,6 +89,44 @@ async def test_rate_limit_is_atomic_under_concurrency(rq):
 
 
 @pytest.mark.asyncio
+async def test_same_key_concurrent_inserts_make_one_command(rq, monkeypatch):
+    real_one = r._one
+
+    async def slow_one(*a, **kw):   # widens a lookup-then-insert window; unused by the atomic path
+        out = await real_one(*a, **kw)
+        await asyncio.sleep(0.05)
+        return out
+    monkeypatch.setattr(r, "_one", slow_one)
+    results = await asyncio.gather(*[r.insert_command(_fields(actor="dup"), "one", 10) for _ in range(8)])
+    assert len({x["id"] for x in results}) == 1 and sum(not x.get("replayed") for x in results) == 1
+    assert rq.execute("SELECT COUNT(*) FROM scrum_responses WHERE kind='command'").fetchone()[0] == 1
+    assert len(_audit(rq)) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_key_retry_at_limit_replays_but_new_key_is_429(rq):
+    first = await r.insert_command(_fields(actor="lim"), "k0", 10)
+    for n in range(9):
+        await r.insert_command(_fields(actor="lim"), f"f{n}", 10)
+    again = await r.insert_command(_fields(actor="lim"), "k0", 10)
+    assert again["id"] == first["id"] and again.get("replayed")
+    with pytest.raises(DeskRateLimited):
+        await r.insert_command(_fields(actor="lim"), "brand-new", 10)
+    with pytest.raises(ValueError):   # same key, different arguments still conflicts at the limit
+        await r.insert_command(_fields(actor="lim", verb="validate"), "k0", 10)
+    assert len(_audit(rq)) == 10
+
+
+@pytest.mark.asyncio
+async def test_unique_index_applies_to_an_existing_database(tmp_path, monkeypatch):
+    conn = _install(tmp_path / "old.db", monkeypatch)
+    await r.ensure_schema()
+    conn.execute("DROP INDEX idx_scrum_responses_command_idem")
+    await r.ensure_schema()   # re-ensure adds it back, additively
+    assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_scrum_responses_command_idem'").fetchone()
+
+
+@pytest.mark.asyncio
 async def test_pause_set_get_blocks_claim_and_persists(rq, tmp_path, monkeypatch):
     assert (await r.get_pause())["paused"] is False
     p = await r.set_pause(True, "michael", "maintenance")

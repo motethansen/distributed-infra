@@ -205,7 +205,7 @@ async def ensure_schema() -> None:
             except RqliteError as e:
                 if "duplicate column" not in str(e).lower():
                     raise
-    await _execute([[stmt] for stmt in ds.DESK_DDL])
+    await _execute([[stmt] for stmt in ds.DESK_DDL + ds.DESK_INDEX_DDL])
     res = await _query([["SELECT name FROM pragma_table_info('tasks')"]], level="weak")
     have = {r["name"] for r in _rows(res[0])} if res else set()
     for col, typ in tracking.TRACK_COLUMNS.items():
@@ -444,6 +444,10 @@ async def insert_command(fields: dict, idempotency_key: str | None = None, rate_
                            *ds.limited_command_params(fields, created_at, idempotency_key, cutoff, rate_limit)],
                           [ds.AUDIT_CREATE_IF_INSERTED, "queued", fields["actor"], created_at]])
     if not res or res[0].get("rows_affected", 0) < 1:
+        if idempotency_key is not None:   # lost the race on the unique key: replay the winner, even at the limit
+            row = await _one(ds.COMMAND_IDEM_LOOKUP, idempotency_key)
+            if row:
+                return ds.command_replay_or_conflict(row, fields)
         raise DeskRateLimited("rate limited")
     return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "queued"}
 

@@ -285,6 +285,45 @@ async def test_c5_replay_at_the_limit_returns_original_not_429(api):
     assert extra.status_code == 429
 
 
+@pytest.mark.asyncio
+async def test_c5_same_key_concurrent_requests_make_one_command(api, monkeypatch):
+    """8 simultaneous requests with ONE Idempotency-Key: one row, one audit row, one id for all."""
+    import asyncio
+    import aiosqlite
+    real = aiosqlite.Connection.execute
+
+    def slow_execute(self, sql, *a, **kw):   # widens a lookup-then-insert window; unused by the atomic path
+        coro = real(self, sql, *a, **kw)
+        if not str(sql).startswith("SELECT id, created_at, status, kind"):
+            return coro
+
+        async def delayed():
+            out = await coro
+            await asyncio.sleep(0.05)
+            return out
+        return delayed()
+    monkeypatch.setattr(aiosqlite.Connection, "execute", slow_execute)
+    async with _client(api) as c:
+        rs = await asyncio.gather(*[_post(c, _intent("plan", actor="dup"), key="one") for _ in range(8)])
+    assert {r.status_code for r in rs} <= {200, 201}
+    assert len({r.json()["id"] for r in rs}) == 1
+    con = sqlite3.connect(api.db._db_path())
+    assert con.execute("SELECT COUNT(*) FROM scrum_responses WHERE kind='command' AND actor='dup'").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM scrum_audit WHERE actor='dup'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_c5_same_key_retry_at_limit_replays_but_new_key_is_429(api):
+    async with _client(api) as c:
+        first = await _post(c, _intent("plan", actor="lim"), key="k0")
+        for n in range(9):
+            await _post(c, _intent("plan", actor="lim"), key=f"f{n}")
+        again = await _post(c, _intent("plan", actor="lim"), key="k0")
+        fresh = await _post(c, _intent("plan", actor="lim"), key="brand-new")
+    assert again.json()["id"] == first.json()["id"] and again.status_code in (200, 201)
+    assert fresh.status_code == 429
+
+
 # 6
 @pytest.mark.asyncio
 async def test_c6_pause_get_post_shape(api):
