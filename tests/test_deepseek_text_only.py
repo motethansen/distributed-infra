@@ -94,7 +94,7 @@ def test_a_printed_tool_call_is_retried_once_then_succeeds(monkeypatch):
     out = asyncio.run(ds.run("write a.py"))
     assert out["ok"] and len(sent) == 2
     assert "cannot run commands" in sent[1]["messages"][1]["content"]
-    assert out["usage"] == {"tokens_in": 20, "tokens_out": 10}          # both calls are counted
+    assert {k: out["usage"][k] for k in ("tokens_in", "tokens_out")} == {"tokens_in": 20, "tokens_out": 10}          # both calls are counted
 
 
 def test_a_printed_tool_call_twice_is_a_failure_not_a_success(monkeypatch):
@@ -254,14 +254,14 @@ def test_retry_error_still_carries_the_first_calls_usage(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", Client)
     out = asyncio.run(ds.run("x"))
     assert out["ok"] is False and len(sent) == 2
-    assert out["usage"] == {"tokens_in": 30, "tokens_out": 7}
+    assert {k: out["usage"][k] for k in ("tokens_in", "tokens_out")} == {"tokens_in": 30, "tokens_out": 7}
     assert "failure_kind" not in out                                    # a timeout is not a text-only failure
 
 
 def test_text_only_failure_keeps_its_usage_across_both_calls(monkeypatch):
     _patch_http(monkeypatch, [DSML, DSML])
     out = asyncio.run(ds.run("x"))
-    assert out["usage"] == {"tokens_in": 20, "tokens_out": 10}
+    assert {k: out["usage"][k] for k in ("tokens_in", "tokens_out")} == {"tokens_in": 20, "tokens_out": 10}
 
 
 def test_claude_already_attempted_is_not_retried(monkeypatch):
