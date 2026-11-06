@@ -132,11 +132,42 @@ def _sum_usage(*usages) -> dict | None:
     return total or None
 
 
+def _now():
+    """Current UTC time; a function so tests can pin it."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _is_peak(now) -> bool:
+    """DeepSeek peak hours: 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday. Chinese public holidays are not known
+    here, so those days count as peak (an over-estimate, never an under-estimate)."""
+    return now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
+
+
+def _rates(model: str, now=None) -> dict | None:
+    """The input_fresh / input_cache_hit / output rates that apply to `model` now, or None when it cannot be priced
+    (unknown model, not `verified: true`, incomplete numbers, a broken alias)."""
+    table = _load_prices()
+    p = table.get(model)
+    if isinstance(p, dict) and isinstance(p.get("alias_of"), str):
+        target = table.get(p["alias_of"])
+        p = target if isinstance(target, dict) and p.get("verified") is True else None
+    if not isinstance(p, dict) or p.get("verified") is not True:
+        return None
+    if isinstance(p.get("peak"), dict) or isinstance(p.get("offpeak"), dict):
+        r = p.get("peak") if _is_peak(now or _now()) else p.get("offpeak")
+    else:
+        r = p
+    if not isinstance(r, dict) or any(_num(r.get(k)) is None for k in ("input_fresh", "input_cache_hit", "output")):
+        return None
+    return r
+
+
 def _cost_usd(usage: dict, model: str) -> float | None:
-    """USD cost of one call's usage dict from the price table; None when the model is unknown, its prices are
-    not marked verified: true, or they are incomplete."""
-    p = _load_prices().get(model)
-    if not isinstance(p, dict) or p.get("verified") is not True or any(_num(p.get(k)) is None for k in ("input_fresh", "input_cache_hit", "output")):
+    """USD cost of one call's usage dict from the price table, at the rate for the current time; None when the model
+    is unknown, its prices are not marked verified: true, or they are incomplete."""
+    p = _rates(model)
+    if p is None:
         return None
     tin, tout = usage.get("prompt_tokens"), usage.get("completion_tokens")
     if tin is None and tout is None:

@@ -1,20 +1,33 @@
 # Per-model LLM prices, USD per million tokens. Read by agents/deepseek_agent.py to fill cost_usd.
 # A model is priced only when its entry has `verified: true`. A model that is not listed, or is listed with
 # `verified: false` (or no verified key), gets cost_usd=NULL and usage.cost_basis='unpriced': never 0, never a guess.
-# To fill in real rates: copy the numbers from the provider's current price page into input_fresh,
-# input_cache_hit and output, then set `verified: true` for that model. The rates below are unverified
-# placeholders, so nothing is priced until the owner does this.
-#   input_fresh:     prompt tokens that missed the provider's context cache
-#   input_cache_hit: prompt tokens served from the cache
-#   output:          completion tokens
+#
+# Source: DeepSeek's own price page, https://api-docs.deepseek.com/quick_start/pricing (read 2026-11-06; the page
+# is client-rendered, its Markdown form is https://api-docs.deepseek.com/quick_start/pricing.md). Re-check it
+# regularly: the page says prices may change. Third-party price sites disagree with each other, use the official page.
+#
+# DeepSeek prices depend on the time of the request: OFF-PEAK is half of PEAK. Peak hours are 01:00-04:00 and
+# 06:00-10:00 UTC, Monday to Friday, excluding Chinese public holidays; every other hour is off-peak. This table gives
+# both rates per model; agents/deepseek_agent.py picks one from the UTC time. It does not know the Chinese public
+# holidays, so on those days it prices at the peak rate, which over-estimates and never under-estimates.
+#
+# Entry formats:
+#   flat:   input_fresh / input_cache_hit / output, one rate at all times (also what older entries and the tests use)
+#   timed:  `peak:` and `offpeak:` blocks, each with input_fresh / input_cache_hit / output
+#   alias:  `alias_of: <model>`, for a legacy name that the API serves as another model (priced as that model)
+#     input_fresh:     prompt tokens that missed the provider's context cache
+#     input_cache_hit: prompt tokens served from the cache
+#     output:          completion tokens
 deepseek:
-  deepseek-chat:
-    input_fresh: 0.28       # placeholder - EDIT ME
-    input_cache_hit: 0.028  # placeholder - EDIT ME
-    output: 0.42            # placeholder - EDIT ME
-    verified: false
-  deepseek-reasoner:
-    input_fresh: 0.28       # placeholder - EDIT ME
-    input_cache_hit: 0.028  # placeholder - EDIT ME
-    output: 0.42            # placeholder - EDIT ME
-    verified: false
+  deepseek-flash:                    # served as DeepSeek-V4.1-Flash-1017
+    verified: true
+    offpeak: {input_fresh: 0.15, input_cache_hit: 0.003, output: 0.60}
+    peak:    {input_fresh: 0.30, input_cache_hit: 0.006, output: 1.20}
+  deepseek-v4-pro:                   # DeepSeek-V4-Pro-0813
+    verified: true
+    offpeak: {input_fresh: 0.66, input_cache_hit: 0.022, output: 1.98}
+    peak:    {input_fresh: 1.32, input_cache_hit: 0.044, output: 3.96}
+  deepseek-chat:                     # legacy name; checked 2026-11-06: the API answers it with model deepseek-flash
+    alias_of: deepseek-flash
+    verified: true
+  # deepseek-reasoner is not listed on the current price page, so it is deliberately unpriced (cost NULL).
