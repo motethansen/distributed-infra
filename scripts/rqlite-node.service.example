@@ -1,0 +1,31 @@
+# systemd user unit: one rqlite voter node on a Linux machine of the tailnet.
+# Copy to ~/.config/systemd/user/rqlite-node.service and replace the placeholders:
+#   <THIS_TAILSCALE_IP>   this machine's `tailscale ip -4`
+#   <PEER_TAILSCALE_IP>   a Tailscale IP of a node that is already in the cluster
+# The first node of a brand-new cluster starts WITHOUT -join (and with -bootstrap-expect 1);
+# every later node joins an existing one. See docs/rqlite-failover.md.
+#
+# Addresses are Tailscale IPs because LAN addresses drift. rqlite has NO authentication here:
+# both the HTTP (4001) and Raft (4002) listeners are bound to THIS machine's Tailscale address
+# (<THIS_TAILSCALE_IP>, a 100.64.0.0/10 address such as 100.64.0.X), never to 0.0.0.0, so they are
+# unreachable from the LAN and the internet. Start the unit after tailscaled is up (After=tailscaled.service).
+# The local orchestrator then reaches its node at http://<THIS_TAILSCALE_IP>:4001, not localhost:
+# set RQLITE_URL to that in the orchestrator unit/plist.
+
+[Unit]
+Description=rqlite cluster node (voter)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/rqlite/rqlited -node-id %H \
+  -http-addr <THIS_TAILSCALE_IP>:4001 -http-adv-addr <THIS_TAILSCALE_IP>:4001 \
+  -raft-addr <THIS_TAILSCALE_IP>:4002 -raft-adv-addr <THIS_TAILSCALE_IP>:4002 \
+  -raft-election-timeout 5s -raft-heartbeat-timeout 5s -raft-apply-timeout 30s \
+  -join <PEER_TAILSCALE_IP>:4002 %h/rqlite-data
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

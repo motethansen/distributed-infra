@@ -37,9 +37,14 @@ logs/
 # macOS
 .DS_Store
 
-# launchd plists contain secrets (paths, keys) — use the .plist.example as template
+# Installed launchd plists carry local paths (and, in older installs, secrets). Track only the .plist.example templates.
 scripts/*.plist
 !scripts/*.plist.example
+services/whatsapp-bridge/*.plist
+!services/whatsapp-bridge/*.plist.example
+
+# Per-machine systemd units are generated from the *.service.example / *.service templates
+*.service.local
 
 # Editor
 .vscode/
@@ -61,3 +66,20 @@ config/family.json
 # local scratch & config backups
 config/*.bak*
 scratch/
+
+# Claude Code / agent local settings: allowlists in here can capture secrets verbatim
+.claude/settings.local.json
+.claude/*.local.*
+
+# Keys and certificates, whatever their name
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Backup files made by in-place edits
+*.bak
+*.bak.*
+*.orig

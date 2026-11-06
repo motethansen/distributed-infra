@@ -4,7 +4,7 @@ Give every component a standard way to share status / availability / errors with
 the Vantage monitor. Two modes, one payload (see docs/component-health.md):
 
     from vantage import Reporter
-    rep = Reporter("budgetapp-api", url="http://100.76.214.54:8055",
+    rep = Reporter("budgetapp-api", url=os.environ.get("VANTAGE_URL", "http://localhost:8055"),
                    key=os.environ.get("VANTAGE_INGEST_KEY"))
 
     # Mode A — push (component can reach Vantage): call periodically

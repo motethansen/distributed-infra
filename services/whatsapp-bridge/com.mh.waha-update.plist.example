@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Weekly WAHA image update on the mac-mini. Install to
-     ~/Library/LaunchAgents/com.mh.waha-update.plist and edit WAHA_API_KEY to
-     match the bridge's own key (same value as in com.techstartups.whatsapp-bridge).
+     ~/Library/LaunchAgents/com.mh.waha-update.plist. WAHA_API_KEY is NOT stored here:
+     scripts/run-with-env.sh loads it from services/whatsapp-bridge/.env (chmod 600, gitignored).
 
      Sunday 04:00 rather than daily: a pull that finds nothing is free, but one
      that finds a new image recreates the container and restarts the WhatsApp
@@ -15,6 +15,10 @@
 
     <key>ProgramArguments</key>
     <array>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+        <string>--env-file</string>
+        <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/.env</string>
+        <string>--</string>
         <string>/bin/bash</string>
         <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/update-waha.sh</string>
     </array>
@@ -25,8 +29,6 @@
         <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge</string>
         <key>WAHA_URL</key>
         <string>http://localhost:3000</string>
-        <key>WAHA_API_KEY</key>
-        <string>__WAHA_API_KEY__</string>
     </dict>
 
     <key>StartCalendarInterval</key>
