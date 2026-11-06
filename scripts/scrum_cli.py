@@ -39,7 +39,7 @@ def _env() -> dict:
 
 def client() -> sf.FleetClient:
     e = _env()
-    urls = [u.strip() for u in e.get("ORCHESTRATOR_URLS", "http://100.76.214.54:8000,http://100.112.241.6:8000").split(",") if u.strip()]
+    urls = [u.strip() for u in e.get("ORCHESTRATOR_URLS", "http://localhost:8000").split(",") if u.strip()]
     if not e.get("SECRET_KEY"):
         sys.exit("SECRET_KEY not set (env or .env)")
     return sf.FleetClient(urls, e["SECRET_KEY"], client="scrum-cli@" + os.uname().nodename.split(".")[0])

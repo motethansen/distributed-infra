@@ -1,19 +1,28 @@
-# systemd user-level unit for ThinkPad (Ubuntu) worker — no sudo needed.
-# Install: cp scripts/worker.service ~/.config/systemd/user/infra-worker.service
-#          systemctl --user daemon-reload
-#          systemctl --user enable --now infra-worker
-#          loginctl enable-linger $USER   # survive logout
+# systemd user-level unit for a Linux worker (no sudo needed).
+#
+# This file holds NO secrets. SECRET_KEY, ORCHESTRATOR_URLS, DEEPSEEK_API and the rest live in
+# <checkout>/.env (chmod 600, gitignored) and are loaded by EnvironmentFile=.
+# %h is the home directory of the user running the unit; edit the checkout path if yours differs.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user && cp scripts/worker.service ~/.config/systemd/user/infra-worker.service
+#   chmod 600 .env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now infra-worker
+#   loginctl enable-linger "$USER"        # keep running after logout / across reboots
+# Restart after a code change:  systemctl --user restart infra-worker
 
 [Unit]
 Description=Distributed Infra Worker
 After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/michaelhansen/Projects/distributed-infra
-EnvironmentFile=/home/michaelhansen/Projects/distributed-infra/.env
-Environment=LD_LIBRARY_PATH=/home/michaelhansen/lib
-ExecStart=/home/michaelhansen/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
+WorkingDirectory=%h/Projects/distributed-infra
+EnvironmentFile=%h/Projects/distributed-infra/.env
+Environment=MACHINE_ROLE=worker
+ExecStart=%h/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
 Restart=on-failure
 RestartSec=10
 

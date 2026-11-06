@@ -1,0 +1,26 @@
+# systemd user-level unit for an orchestrator on Linux, backed by the local rqlite node.
+# No secrets here: SECRET_KEY etc. come from .env (chmod 600, gitignored).
+#
+# Install:
+#   cp scripts/orchestrator.service ~/.config/systemd/user/orchestrator.service
+#   systemctl --user daemon-reload && systemctl --user enable --now orchestrator
+#   loginctl enable-linger "$USER"
+
+[Unit]
+Description=distributed-infra orchestrator (active-active, rqlite backend)
+After=network-online.target rqlite-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/distributed-infra
+EnvironmentFile=%h/Projects/distributed-infra/.env
+Environment=QUEUE_BACKEND=rqlite
+Environment=RQLITE_URL=http://localhost:4001
+Environment=MACHINE_ROLE=orchestrator
+ExecStart=%h/Projects/distributed-infra/.venv/bin/uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

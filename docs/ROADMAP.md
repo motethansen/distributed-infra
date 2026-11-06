@@ -10,7 +10,7 @@ Sprints **0–7 + the #18 capstone + the #20 HA infra work are shipped, deployed
 
 **Infra (2026-06-30):** orchestrator + queue relocated off the laptop to the always-on mac-mini, so the fleet no longer stalls when the MacBook sleeps. **#19 shipped** — `calendar`/`email`/`assist` now run on mac-mini too (assistant API + sync moved there; soft-pref with laptop overflow). Only `project` (#18) remains laptop-pinned.
 
-**Infra HA — #20 shipped (2026-07-12):** the orchestrator SPOF is gone. The queue lives in a **3-node rqlite (Raft) cluster** (mac-mini + Synology + thinkpad, tolerates any 1 node), the **orchestrator API is active-active** (mac-mini + thinkpad), and **workers + `da` do multi-endpoint failover**. Proven by a live full-fleet drill (primary taken fully down → fleet kept processing → rejoined on restore). The Phase-1 Litestream stopgap was decommissioned. See `docs/ARCHITECTURE.md` + [[rqlite-failover]].
+**Infra HA — #20 shipped (2026-07-12):** the orchestrator SPOF is gone. The queue lives in a **3-node rqlite (Raft) cluster** (mac-mini + thinkpad + a cloud Docker host, tolerates any 1 node; the original third voter, a Synology NAS, was replaced on 2026-11-01), the **orchestrator API is active-active** (mac-mini + thinkpad), and **workers + `da` do multi-endpoint failover**. Proven by a live full-fleet drill (primary taken fully down → fleet kept processing → rejoined on restore). The Phase-1 Litestream stopgap was decommissioned. See [ARCHITECTURE.md](ARCHITECTURE.md) and [rqlite-failover.md](rqlite-failover.md).
 
 **Shipped & live** (WhatsApp commands from self-chat):
 - **#12 Weather** `weather [in <place>]`, `set-location` · **#6 DeepSeek** (`--agent deepseek`)
@@ -22,7 +22,7 @@ Sprints **0–7 + the #18 capstone + the #20 HA infra work are shipped, deployed
 - **#17 Family access** `family add|remove|list` (role-gated; inert until you enrol someone)
 
 **Deferred — waiting on your credential/account setup (not code):**
-- **#10/#11 Commerce** (consumer web automation on your logged-in account — Playwright `web_shop`; you chose *not* seller APIs). See [[reference_commerce_apis]].
+- **#10/#11 Commerce** (consumer web automation on your logged-in account — Playwright `web_shop`; you chose *not* seller APIs). See `reference_commerce_apis`.
 - **#13 Portfolio** (IBKR Client Portal Gateway / TWS, or Saxo OAuth — a running authenticated broker session).
 
 **Polish / v2 (no blocker, pick up anytime):** #18 live per-step progress to chat + true multi-turn clarify; #2 cron at market open/close; per-user family state (#17); validator = real test-run not LLM judge (#8).
@@ -302,7 +302,7 @@ The front door for freeform requests ("find me X", "what's the weather", "any de
 
 ## 10 — Commerce search (Amazon.sg / Lazada / Redmart)  ·  `deferred → later sprint` (2026-06-27)
 
-**Decision (clarified 2026-06-27): consumer web automation, NOT seller APIs.** The user wants to *browse/search as a shopper and order on their own account* — not manage a store. The seller/supplier APIs (Amazon **SP-API**, **Lazada Open Platform**, **RedMart** RSS category) are therefore **out of scope** — they manage listings/inventory/supply-chain, not consumer shopping, and there is **no official consumer-facing browse/order API**. (Those API details are kept for reference only: [[reference_commerce_apis]].)
+**Decision (clarified 2026-06-27): consumer web automation, NOT seller APIs.** The user wants to *browse/search as a shopper and order on their own account* — not manage a store. The seller/supplier APIs (Amazon **SP-API**, **Lazada Open Platform**, **RedMart** RSS category) are therefore **out of scope** — they manage listings/inventory/supply-chain, not consumer shopping, and there is **no official consumer-facing browse/order API**. (Those API details are kept for reference only: `reference_commerce_apis`.)
 
 **Approach:** consumer **browse + search via authenticated web automation (Playwright)** on the user's own logged-in account — same mechanism and machine as ordering (#11), so **#10 search and #11 cart/order merge into one consumer-web track**. Trade-offs: fragile (DOM changes, captcha/OTP), account-risk if flagged as a bot, low-frequency only. `shop_search` returns a normalized list (title, price SGD, url, rating, availability) scraped from the logged-in session.
 
@@ -525,12 +525,12 @@ Compositions of the agents above — high value-per-effort once the parts exist.
 
 Remove the last hard SPOF: the orchestrator + SQLite queue live only on mac-mini, so the whole fleet stalls if it's down/asleep/wedged. Move the queue from a single-node SQLite file to a **3-node rqlite (Raft-backed SQLite) cluster** so it survives any one machine, while keeping the pull-based claim model and SQL placement rules unchanged. Because the shared state becomes single + linearizable behind Raft, the orchestrator API can then run **active-active** on every node — the safe version of the "orchestrator on every machine" idea.
 
-**Full design:** [[rqlite-failover]] (`docs/rqlite-failover.md`) — problem, rqlite-vs-alternatives, quorum topology (mac-mini + thinkpad + a small always-on **witness**; macbook as a non-voting read replica), the `claim_next_task` → atomic `UPDATE … RETURNING` refactor, failure matrix, and a staged migration (Phase 0 reconcile checkouts → Phase 1 Litestream stopgap → Phase 2 rqlite → Phase 3 client cutover).
+**Full design:** [rqlite-failover.md](rqlite-failover.md) — problem, rqlite-vs-alternatives, quorum topology (mac-mini + thinkpad + a small always-on **witness**; macbook as a non-voting read replica), the `claim_next_task` → atomic `UPDATE … RETURNING` refactor, failure matrix, and a staged migration (Phase 0 reconcile checkouts → Phase 1 Litestream stopgap → Phase 2 rqlite → Phase 3 client cutover).
 
 **✅ SHIPPED — all phases done (2026-07-12).** The whole HA build landed and is proven; see `docs/ARCHITECTURE.md` for the running state.
 - **Phase 1 (Litestream stopgap)** — shipped, then **DECOMMISSIONED** once the cluster went live (replicator + files removed; SQLite snapshot kept for cold rollback).
-- **Phase 2 (rqlite cluster)** — 3 voters (mac-mini + Synology + thinkpad), orchestrator cut over to it, chaos-validated.
-- **Phase 3 (active-active + failover)** — 2nd orchestrator on thinkpad; workers + `da` do multi-endpoint failover. Witness resolved = the **Synology NAS**.
+- **Phase 2 (rqlite cluster)** — 3 voters (mac-mini + thinkpad + a third host: first a Synology NAS, since 2026-11-01 a cloud Docker host), orchestrator cut over to it, chaos-validated.
+- **Phase 3 (active-active + failover)** — 2nd orchestrator on thinkpad; workers + `da` do multi-endpoint failover. Witness resolved = a small always-on host on the tailnet (a Synology NAS at first, a cloud Docker host since 2026-11-01).
 - Proven by a full-fleet drill: the primary (mac-mini) taken fully down → fleet kept processing → rejoined on restore.
 
 ---

@@ -1,8 +1,13 @@
 # distributed-infra — Architecture
 
-**As of 2026-07-12.** The current, running architecture of the fleet — after the
-#20 high-availability work. This is the "how it actually works now" reference;
-design rationale lives in [[rqlite-failover]] and the track history in [[ROADMAP]].
+**As of 2026-11-06.** The current, running architecture of the fleet. This is the "how it
+actually works now" reference; design rationale lives in [rqlite-failover.md](rqlite-failover.md),
+the track history in [ROADMAP.md](ROADMAP.md), who may use which agent in
+[AGENT_ROSTER_AND_ACCESS.md](AGENT_ROSTER_AND_ACCESS.md), and how to run it yourself in
+[SETUP.md](SETUP.md). Secrets handling is in [SECURITY.md](SECURITY.md).
+
+Addresses in this document are placeholders (`<mac-mini-ip>` and so on). Yours come from
+`tailscale ip -4` on each machine and live in your gitignored `.env` and `config/machines.yaml`.
 
 ---
 
@@ -14,9 +19,10 @@ producers create tasks, workers pull the ones they can run, CLI agents do the
 reasoning, results write back to the same task row. Control flows one direction —
 **human → queue → worker → agent** — with no agent-to-agent hierarchy.
 
-As of the #20 work the queue is **highly available**: its state lives in a 3-node
-Raft cluster and the orchestrator API runs active-active, so **the fleet survives
-any single machine failing — including the primary** (demonstrated live).
+The queue is **highly available**: its state lives in a 3-node Raft cluster (two home
+machines and one cloud Docker host, all on the tailnet) and the orchestrator API runs
+active-active, so **the fleet survives any single node failing, including the home internet
+connection going down** (demonstrated live).
 
 Stack: FastAPI · httpx · Pydantic · **rqlite** (Raft-backed SQLite) · subscription-CLI agents.
 
@@ -31,44 +37,50 @@ from Tailscale itself (`tailscale status`), with worker-poll recency as a separa
 
 | Machine | Tailscale IP | Role in the system | Supervision |
 |---|---|---|---|
-| **mac-mini** | <mac-mini-ip> | orchestrator + worker + **rqlite voter** + WhatsApp bridge + WAHA | launchd |
-| **thinkpad-x1** | <thinkpad-ip> | orchestrator + worker + **rqlite voter** | systemd `--user` (lingering) |
-| **daffy** (Synology NAS) | <nas-ip> | **rqlite voter** only | Docker `--restart` + DSM boot task |
-| **macbook-pro** | <orchestrator-ip> | worker only (sleeps); canonical dev checkout | launchd |
+| **mac-mini** | `<mac-mini-ip>` | orchestrator + worker + **rqlite voter** + WhatsApp bridge + WAHA + Vantage monitor | launchd |
+| **thinkpad-x1** | `<thinkpad-ip>` | orchestrator + worker + **rqlite voter** | systemd `--user` (lingering) |
+| **cloud Docker host** (a small droplet, `vizneo-docker`) | `<droplet-ip>` | **rqlite voter** only, in Docker | Docker `--restart unless-stopped` |
+| **macbook-pro** | `<macbook-ip>` | owner's own machine: dev checkout, `dis-agent` / `da` CLIs. **Never a worker.** | none |
 
-- **mac-mini** is the always-on primary (orchestrator + bridge + a voter).
-- **thinkpad-x1** is the always-on secondary (2nd orchestrator + a voter).
-- **daffy** is a voter-only NAS — the 3rd Raft vote for real quorum, no compute role.
-- **macbook-pro** is a worker that may sleep; it is *not* a rqlite node.
+- **mac-mini** is the always-on primary (orchestrator, WhatsApp bridge, Vantage, one voter).
+- **thinkpad-x1** is the always-on secondary (second orchestrator, one voter).
+- The **cloud Docker host** is the third Raft vote. It has no compute role, and rqlite listens
+  **only on its Tailscale address**, never on a public interface. It keeps the queue writable
+  when the home internet or router is down, because mac-mini and thinkpad are still 2 of 3.
+- **macbook-pro** submits work and reviews it. It is not an rqlite node and runs no worker, so a
+  sleeping laptop never stalls the fleet.
 
-Two git checkouts: dev is `~/Projects/github/techstartups/distributed-infra` (macbook);
-mac-mini + thinkpad run from `~/Projects/distributed-infra` (same repo, deploy via
-`git pull`). See [[infra-deployment-topology]].
+The earlier design used a Synology NAS (`daffy`) as the third voter. The NAS was decommissioned
+on 2026-11-01 and replaced by the cloud Docker host; nothing in the running system refers to it.
+
+Two kinds of checkout: development happens on the owner's laptop; mac-mini and thinkpad run the
+live services from `~/Projects/distributed-infra` and deploy with `git pull --ff-only` followed by
+a service restart. Story work for the Scrum desk is built in a **separate** clone
+(`~/Projects/distributed-infra-stories`), so an unreviewed branch is never loaded by a restart.
 
 ---
 
 ## 3 — The HA queue (rqlite cluster)
 
-The queue is a **3-node rqlite v10.2.7 Raft cluster** replacing the old single SQLite
-file. Each node serves HTTP on **:4001** and runs Raft on **:4002**, advertising its
-tailnet IP. Writes route to the elected leader (any node forwards); a write is durable
-on a **quorum (2 of 3)** before it acks. Tolerates any one node down.
+The queue is a **3-node rqlite Raft cluster** (v10.2.7). Each node serves HTTP on **:4001** and runs
+Raft on **:4002**, advertising its tailnet address. Writes route to the elected leader (any node
+forwards); a write is durable on a **quorum (2 of 3)** before it acks. Any one node can be down.
 
 | Node | How it runs | Data |
 |---|---|---|
-| synology | Docker `rqlite/rqlite`, `--network host`, `--entrypoint rqlited`, `-bootstrap-expect 1` | named volume |
-| mac-mini | Docker `rqlite/rqlite`, `-p 4001:4001 -p 4002:4002` (macOS host-net is VM-scoped) | named volume |
-| thinkpad | native linux binary `~/rqlite/rqlited`, systemd unit `rqlite-node.service` | `~/rqlite-data` |
+| mac-mini | Docker `rqlite/rqlite`, `-p 4001:4001 -p 4002:4002`, restart `unless-stopped` | named volume |
+| thinkpad | native Linux binary `~/rqlite/rqlited`, systemd user unit `rqlite-node.service` ([template](../scripts/rqlite-node.service.example)) | `~/rqlite-data` |
+| cloud Docker host | Docker `rqlite/rqlite`, ports published **only on its Tailscale address** | named volume |
 
-Nodes join over the **Raft** port (`-join <ip>:4002`; rqlite v10 rejects the HTTP port
-and the `http://` scheme). The schema is one `tasks` table; the orchestrator creates it
-at startup (`ensure_schema`). Details + the reboot-persistence story (incl. the Synology
-Tailscale userspace→TUN fix) are in [[rqlite-cluster]].
+Nodes join over the **Raft** port (`-join <peer-ip>:4002`; rqlite v10 rejects the HTTP port and
+the `http://` scheme). The schema is one `tasks` table plus the Scrum tables; the orchestrator creates
+them at startup (`ensure_schema`). Design notes and the history of this choice: [rqlite-failover.md](rqlite-failover.md).
 
-**Validated:** cross-node replication; a chaos drill (250 tasks, 8 concurrent claimers,
-leader hard-killed 3× under load → 0 double-claims, 0 losses, always recovered to 3/3).
+**Validated:** cross-node replication; a chaos drill (250 tasks, 8 concurrent claimers, leader hard-killed
+3 times under load: 0 double-claims, 0 losses, always back to 3/3); leader election in about 4 s.
 
----
+**Check it:** `curl -s "http://<mac-mini-ip>:4001/nodes?nonvoters&timeout=3s"` should list 3 voters, all
+reachable. The `timeout=3s` matters: without it `/nodes` waits on any unreachable member.
 
 ## 4 — Orchestrator (active-active)
 
@@ -172,10 +184,10 @@ deepseek, content, social** — the CLIs use their own login sessions, DeepSeek 
   `fleet_result` / `fleet_tasks` / `fleet_machines`. It submits `agent_run` tasks, so the
   failover above applies; named conversations are kept locally and can be continued from a
   different harness.
-- **Opus is blocked** fleet-wide; all machines default to **Sonnet** (`~/.claude/settings.json`).
+- **Opus is reserved for the Product Owner role** and is capped per day; every other role defaults to **Sonnet** (`config/roles.yaml`).
 
 Headless `claude` needs the workspace trusted + an active login on each worker; a lapsed
-login is a recurring failure mode ([[mac-mini-claude-oauth-keychain]]).
+login is a recurring failure mode (on macOS the CLI keeps its login in the Keychain, which a launchd job can fail to unlock).
 
 ---
 
@@ -184,7 +196,7 @@ login is a recurring failure mode ([[mac-mini-claude-oauth-keychain]]).
 - **WhatsApp bridge** — `services/whatsapp-bridge/bridge.py` on mac-mini (:3001) + WAHA
   Docker (:3000, NOWEB). Self-chat commands → tasks; polls results → replies. Family
   roster (#17), morning-brief scheduler. A `FAILED` WAHA session needs `/restart`, not
-  `/start` ([[whatsapp-waha-failed-needs-restart]]).
+  `/start` (see Troubleshooting in the README).
 - **`da` CLI** (`orchestrator/da.py`) — terminal control (queue, status, review, resolve).
 - **Direct HTTP API** — any client with the secret key.
 
@@ -194,9 +206,10 @@ login is a recurring failure mode ([[mac-mini-claude-oauth-keychain]]).
 
 | Event | Queue writable? | Fleet impact |
 |---|---|---|
-| **mac-mini down** | ✅ yes (thinkpad + synology = quorum) | thinkpad orchestrator + thinkpad/macbook workers keep running (failover); WhatsApp down (bridge is on mac-mini); mac-mini-pinned tasks wait |
-| **thinkpad down** | ✅ yes (mac-mini + synology) | mac-mini orchestrator + workers keep running; Android-pinned tasks wait |
-| **synology down** | ✅ yes (mac-mini + thinkpad) | none — it's voter-only |
+| **mac-mini down** | ✅ yes (thinkpad + cloud host = quorum) | thinkpad orchestrator + thinkpad/macbook workers keep running (failover); WhatsApp down (bridge is on mac-mini); mac-mini-pinned tasks wait |
+| **thinkpad down** | ✅ yes (mac-mini + cloud host) | mac-mini orchestrator + workers keep running; Android-pinned tasks wait |
+| **cloud host down** | ✅ yes (mac-mini + thinkpad) | none: it is voter-only. Losing it AND the home internet together is the case to watch |
+| **home internet down** | ✅ yes (mac-mini + thinkpad are still 2 of 3) | cloud-hosted services keep running; agents that need their provider's API stall |
 | **macbook sleeps** | ✅ yes | it just stops polling |
 | **any 2 voters down** | ❌ no quorum → read-only | fleet stalls (3-node tolerates 1, not 2) |
 | **network partition** | majority side writable; minority read-only | Raft prevents split-brain |
@@ -211,7 +224,7 @@ login is a recurring failure mode ([[mac-mini-claude-oauth-keychain]]).
 | Worker | `worker/main.py` · `worker/poller.py` · handlers `worker/handlers/<type>.py` |
 | Agents | `agents/runner.py` + `agents/*_agent.py` · routing `config/routing.yaml` |
 | Machine roster | `config/machines.yaml` (gitignored, per-host) |
-| rqlite runbook / topology | [[rqlite-cluster]] · design [[rqlite-failover]] |
+| rqlite runbook / design | [rqlite-failover.md](rqlite-failover.md) · unit template `scripts/rqlite-node.service.example` |
 
 **Rollback:** the pre-cutover SQLite snapshot (`~/Projects/distributed-infra/data/queue.db`)
 is untouched. Reverting = remove `QUEUE_BACKEND` from the orchestrator plist + bootout/bootstrap.
@@ -234,30 +247,45 @@ mac-mini orchestrator; both fail together) and the `da` CLI are single-endpoint.
 MagicDNS name for the orchestrator would be a convenience but isn't required — client-side
 failover already covers it.
 
-### Queue cluster layout (verified 2026-10-30)
+### Queue cluster operations
 
-Three Raft voters, all addressed by **Tailscale IP** (LAN addresses drift; see `/machines` for each
-machine's current LAN IPs and whether Tailscale reaches it direct or via a relay):
+All three voters are addressed by **Tailscale IP** (LAN addresses drift; `/machines` shows each machine's
+current LAN IPs and whether Tailscale reaches it directly or through a relay).
 
-| node | where | address | run as |
-|---|---|---|---|
-| `mac-mini` | home | `100.76.214.54:4001/4002` | docker `rqlite` (launchd-managed host) |
-| `thinkpad` | home | `100.112.241.6:4001/4002` | systemd user unit `rqlite-node.service` |
-| `vizneo-docker` | DigitalOcean droplet | `100.100.42.31:4001/4002` | docker `rqlite-voter`, published **only** on the Tailscale IP |
-
-Quorum is 2 of 3, so any one node can be down and the queue keeps working, including when the home
-internet or router is down (mac-mini + thinkpad are still 2 of 3). A leader election after losing
-the leader took 4 s in the live test. The Synology voter is gone (decommissioned).
-
-- **Check:** `curl -s "http://100.76.214.54:4001/nodes?nonvoters&timeout=3s"` — expect 3 voters, all
-  reachable. (`timeout=3s` matters: without it `/nodes` waits on any unreachable member.)
-- **Version:** all nodes run rqlite v10.2.7. v10.2.7 has **no promote/demote command**: to change a
-  node between voter and non-voter, `DELETE /remove` it, then restart it with/without
-  `-raft-non-voter` and `-join <other-node>:4002` (it re-syncs from a snapshot in about a second).
-- **Changing a node's advertised address:** restart it with the new `-raft-adv-addr` and `-join`
-  while a quorum is running (this is how mac-mini's stale `192.168.0.105` entry was fixed).
+- **Version:** all nodes run the same rqlite version. v10.2.7 has **no promote/demote command**: to change a
+  node between voter and non-voter, `DELETE /remove` it, then restart it with/without `-raft-non-voter` and
+  `-join <other-node>:4002` (it re-syncs from a snapshot in about a second).
+- **Changing a node's advertised address:** restart it with the new `-raft-adv-addr` and `-join` while a
+  quorum is running.
 - **Before any membership change:** `curl localhost:4001/db/backup -o ~/Backups/rqlite-queue-<date>.sqlite`.
-- **Do not** publish 4001/4002 on a public interface: rqlite here has no authentication.
-- Leadership currently sits wherever the last election put it (it may be the droplet); it does not
-  matter for correctness. `.stepdown <node>` in the rqlite CLI asks for a move, but it did not take
-  effect on 2026-10-30 (the leader stayed), so do not rely on it.
+- **Never** publish 4001/4002 on a public interface: rqlite here has no authentication. Reach it over Tailscale only.
+- Leadership sits wherever the last election put it (it may be the cloud host); it does not matter for
+  correctness. `.stepdown <node>` in the rqlite CLI asks for a move but did not take effect in testing, so do
+  not rely on it.
+
+---
+
+## 13 — The Scrum desk (planning and delivery on top of the queue)
+
+On top of the task queue sits a Scrum layer driven by the `dis-agent` CLI
+(`scripts/dis-agent`, `scripts/dis_agent.py`). It turns a request into reviewed, merged work:
+
+| Step | Command | Who |
+|---|---|---|
+| Propose stories | `dis-agent po` | Product Owner (Claude Opus, capped per day) |
+| Plan a story: tasks, roles, machines, order | `dis-agent plan` | Scrum Master (Claude Sonnet) |
+| Approve exactly that plan | `dis-agent approve` | the owner |
+| Run it | `dis-agent go` | developers on mac-mini / thinkpad |
+| Independent acceptance tests | `dis-agent validate` | tester (agy) |
+| Code review | `dis-agent ask --role reviewer` | reviewer (Codex, read-only) |
+| Close | `dis-agent close` | **only the owner**, after seeing validation and review |
+
+Rules the desk enforces: plans are bound to a digest, so editing the story or tasks voids the approval;
+stories build in a separate clone and branch (`dis/<project>-<sprint>-S-<n>`); a story closes only on the
+owner's confirmation; DeepSeek never sees private data (the privacy guard in `config/routing.yaml`).
+Roles and who may use which agent: [AGENT_ROSTER_AND_ACCESS.md](AGENT_ROSTER_AND_ACCESS.md).
+Plans and run logs are local files under `data/scrum/` (gitignored); the backlog and sprint notes live in the
+owner's notes repository.
+
+The **Vantage** monitor (a separate service) shows the board and each component's health. Every component
+reports status, availability and errors to Vantage with the drop-in reporter in `clients/fleet-mcp/vantage_reporter.py`.

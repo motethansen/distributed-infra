@@ -6,7 +6,7 @@ from shared import netinfo
 IP_ADDR = """\
 1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever
 2: wlp1s0    inet 192.168.0.206/24 brd 192.168.0.255 scope global dynamic wlp1s0\\       valid_lft 7000sec
-3: tailscale0    inet 100.112.241.6/32 scope global tailscale0\\       valid_lft forever
+3: tailscale0    inet 100.64.0.12/32 scope global tailscale0\\       valid_lft forever
 4: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever
 5: br-99471eacf4b6    inet 172.20.0.1/16 brd 172.20.255.255 scope global br-99471eacf4b6\\       valid_lft forever
 6: enp3s0    inet 169.254.7.7/16 scope link enp3s0\\       valid_lft forever
@@ -23,7 +23,7 @@ en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 \tinet 192.168.0.204 netmask 0xffffff00 broadcast 192.168.0.255
 \tstatus: active
 utun4: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280
-\tinet 100.76.214.54 --> 100.76.214.54 netmask 0xffffffff
+\tinet 100.64.0.11 --> 100.64.0.11 netmask 0xffffffff
 bridge100: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 \tinet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
 \tstatus: active
@@ -59,10 +59,10 @@ def api(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_heartbeat_records_lan_ips_and_machines_shows_them(api, monkeypatch, tmp_path):
     cfg = tmp_path / "machines.yaml"
-    cfg.write_text("machines:\n  thinkpad-x1:\n    role: worker\n    tailscale_ip: 100.112.241.6\n"
+    cfg.write_text("machines:\n  thinkpad-x1:\n    role: worker\n    tailscale_ip: 100.64.0.12\n"
                    "    aliases: [thinkpad]\n    capabilities: [run_script]\n    agents: [claude]\n")
     monkeypatch.setattr(api, "_MACHINES_CONFIG", cfg)
-    monkeypatch.setattr(api, "_tailscale_liveness", lambda: {"100.112.241.6": {
+    monkeypatch.setattr(api, "_tailscale_liveness", lambda: {"100.64.0.12": {
         "online": True, "last_seen": None, "path": "direct", "cur_addr": "192.168.0.206:41641"}})
     api._lan_ips.clear()
     await api.worker_heartbeat({"worker_name": "thinkpad", "lan_ips": {"wlp1s0": "192.168.0.206"}}, x_secret_key="k")
@@ -80,7 +80,7 @@ async def test_hostile_lan_ips_payload_is_bounded(api):
 
 
 def test_tailscale_address_is_excluded_even_on_an_unexpected_interface_name():
-    text = "2: wlan0    inet 192.168.0.9/24 scope global wlan0\\\n3: ts9    inet 100.101.102.103/32 scope global ts9\\\n"
+    text = "2: wlan0    inet 192.168.0.9/24 scope global wlan0\\\n3: ts9    inet 100.64.0.9/32 scope global ts9\\\n"
     assert netinfo.parse_ip_addr(text) == {"wlan0": "192.168.0.9"}
 
 
@@ -103,9 +103,9 @@ def test_finds_ifconfig_when_the_service_path_has_no_sbin(monkeypatch):
 def test_own_tailscale_entry_has_no_path(monkeypatch):
     import json, subprocess
     from orchestrator import main as m
-    status = {"Self": {"TailscaleIPs": ["100.76.214.54"], "Online": True, "Relay": "sin"},
-              "Peer": {"k": {"TailscaleIPs": ["100.112.241.6"], "Online": True, "CurAddr": "192.168.0.206:41641"},
-                       "r": {"TailscaleIPs": ["100.97.176.37"], "Online": True, "CurAddr": "", "Relay": "sin"}}}
+    status = {"Self": {"TailscaleIPs": ["100.64.0.11"], "Online": True, "Relay": "sin"},
+              "Peer": {"k": {"TailscaleIPs": ["100.64.0.12"], "Online": True, "CurAddr": "192.168.0.206:41641"},
+                       "r": {"TailscaleIPs": ["100.64.0.13"], "Online": True, "CurAddr": "", "Relay": "sin"}}}
 
     class R:
         returncode = 0
@@ -115,6 +115,6 @@ def test_own_tailscale_entry_has_no_path(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
     m._TS_CACHE["ts"] = 0
     out = m._tailscale_liveness()
-    assert out["100.76.214.54"]["path"] is None
-    assert out["100.112.241.6"]["path"] == "direct"
-    assert out["100.97.176.37"]["path"] == "relay:sin"
+    assert out["100.64.0.11"]["path"] is None
+    assert out["100.64.0.12"]["path"] == "direct"
+    assert out["100.64.0.13"]["path"] == "relay:sin"

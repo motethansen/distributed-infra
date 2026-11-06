@@ -1,0 +1,27 @@
+# systemd user unit: one rqlite voter node on a Linux machine of the tailnet.
+# Copy to ~/.config/systemd/user/rqlite-node.service and replace the placeholders:
+#   <THIS_TAILSCALE_IP>   this machine's `tailscale ip -4`
+#   <PEER_TAILSCALE_IP>   a Tailscale IP of a node that is already in the cluster
+# The first node of a brand-new cluster starts WITHOUT -join (and with -bootstrap-expect 1);
+# every later node joins an existing one. See docs/rqlite-failover.md.
+#
+# Addresses are Tailscale IPs because LAN addresses drift. rqlite has NO authentication here:
+# never publish 4001/4002 on a public interface; keep them on the tailnet.
+
+[Unit]
+Description=rqlite cluster node (voter)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/rqlite/rqlited -node-id %H \
+  -http-addr 0.0.0.0:4001 -http-adv-addr <THIS_TAILSCALE_IP>:4001 \
+  -raft-addr 0.0.0.0:4002 -raft-adv-addr <THIS_TAILSCALE_IP>:4002 \
+  -raft-election-timeout 5s -raft-heartbeat-timeout 5s -raft-apply-timeout 30s \
+  -join <PEER_TAILSCALE_IP>:4002 %h/rqlite-data
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

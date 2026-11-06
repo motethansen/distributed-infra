@@ -1,6 +1,12 @@
-# distributed-infra — Orchestrator HA via rqlite  ·  `planned`
+# distributed-infra — Orchestrator HA via rqlite  ·  `shipped`
 
-**Date:** 2026-07-12 · **Owner:** Michael · **Status:** design, not started
+**Date:** 2026-07-12 · **Status:** implemented. This is the original design record. The running
+topology is in [ARCHITECTURE.md](ARCHITECTURE.md) (§3 and §12).
+
+> **What changed since this was written.** The witness described below was a Synology NAS. That NAS
+> was decommissioned on 2026-11-01 and the third voter is now a small cloud Docker host on the tailnet,
+> with rqlite published only on its Tailscale address. Voters today: **mac-mini + thinkpad + cloud host**.
+> The macbook is not an rqlite node and not a worker. Read "Synology" below as "the third voter".
 
 One-line: make the task queue survive any single machine by moving it from a
 single-node SQLite file on mac-mini to a **3-node rqlite (Raft-backed SQLite)
@@ -13,7 +19,7 @@ that already work well.
 ## 1 — Problem
 
 Today the orchestrator + queue are a **single point of failure** on mac-mini
-(see [[orchestrator-spof-on-laptop]], [[infra-deployment-topology]]):
+(this was the state before the cluster):
 
 - `orchestrator/db.py` writes one SQLite file (`data/queue.db`) on mac-mini.
 - `orchestrator/main.py` (FastAPI, `:8000`) is the only process that reads/writes it.
@@ -63,8 +69,7 @@ linearizable behind Raft.
 - Not multi-region / internet-facing — everything stays on the Tailscale tailnet.
 - Not changing the worker/handler model, the agent runner, or model routing.
 - Not solving agent-login expiry or WAHA session recovery — those are separate
-  operational SPOFs (see [[mac-mini-claude-oauth-keychain]],
-  [[whatsapp-waha-failed-needs-restart]]).
+  operational SPOFs (for example the Claude CLI login and the WhatsApp session, see the README troubleshooting).
 
 ---
 
@@ -215,7 +220,7 @@ nodes rejoin automatically.
 
 **Phase 0 — Reconcile the two checkouts (prerequisite).** The live orchestrator runs
 from `~/Projects/distributed-infra`, not the git checkout at
-`~/Projects/github/techstartups/distributed-infra` (see [[infra-deployment-topology]]).
+`~/Projects/github/techstartups/distributed-infra` (see ARCHITECTURE.md).
 Pick one canonical deployment path before adding HA, or we'll cluster the wrong copy.
 
 **Phase 1 — Litestream stopgap (days, ~no code).** Continuously replicate the current
@@ -302,18 +307,15 @@ rqlite v10.2.7 node.
   must run as a **Docker container** (OrbStack is already there for WAHA). **thinkpad**
   runs the native Linux binary. This does not affect the orchestrator process (it's an
   HTTP client of rqlite).
-- **Witness = the Synology NAS** (already on the tailnet, always-on) as the 3rd voter,
-  running rqlite via Container Manager (Docker). Voters: **mac-mini + thinkpad +
-  Synology**; **macbook-pro** joins as a **non-voting read replica** so it can sleep.
-  This resolves the open witness decision at zero new hardware cost.
+- **Witness (original plan) = the Synology NAS** as the 3rd voter. *Superseded 2026-11-01:* the NAS is
+  gone; the witness is a cloud Docker host on the tailnet (see ARCHITECTURE.md).
 - **Supervise rqlite with the platform's init**, not hand-backgrounding: `systemd`
   on thinkpad (a `systemd-run --user` transient unit worked cleanly in the PoC),
-  Docker restart-policy on mac-mini + Synology.
+  Docker restart-policy on mac-mini and the cloud host.
 
 ### Remaining for the cluster (next)
 
-1. Stand up the 3-node cluster (mac-mini Docker + thinkpad native + Synology Docker),
-   macbook as non-voter.
+1. Stand up the 3-node cluster (mac-mini Docker + thinkpad native + a third Docker host).
 2. Wire `QUEUE_BACKEND=rqlite` + `RQLITE_URL` into the orchestrator (one selector).
 3. Import existing tasks; run the orchestrator API active-active on the two reliable
    voters behind a Tailscale MagicDNS name (Phase 3 discovery).
