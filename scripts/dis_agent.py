@@ -689,7 +689,7 @@ def cmd_responses(a) -> None:
     if cid is not None and cid is not True:
         from shared import scrum_responses
         try:
-            ok = scrum_responses.consume_one(sc.client(), cid, os.environ.get("USER", "human"))
+            ok = scrum_responses.consume_one(sc.client(), cid, os.environ.get("USER", "human"), board=_board)
         except (Exception, SystemExit):
             print("responses unavailable: nothing consumed")
             ok = False

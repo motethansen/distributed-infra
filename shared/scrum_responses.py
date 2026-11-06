@@ -11,8 +11,8 @@ applies or acknowledges a response; it only stops showing it again.
 A confirm is STALE when its suggestion_id differs from the item's current suggestion id on the board digest (entry `suggestion.id`;
 an entry with no suggestion is unknown, not stale). A stale confirm is shown and labeled ("confirmed an older suggestion: ask
 again"), is never the effective answer, and is still consumed after display (it was shown). A comment is never stale.
-Comments are shown in full (cleaned of control characters) up to MAX_COMMENT=4000, the server's own maximum. A comment longer
-than that is shown cut and LEFT PENDING (never consumed by the display step, with a note naming the id): the explicit
+Comments and confirmed suggestion texts are shown in full (whitespace/control runs collapsed to one space) up to MAX_COMMENT=4000, the server's own maximum. A comment or
+confirmed suggestion text longer than that is shown cut and LEFT PENDING (never consumed by the display step, with a note naming the id): the explicit
 `responses --consume <id>` is the owner's override once the rest has been read elsewhere.
 """
 from __future__ import annotations
@@ -27,9 +27,13 @@ STALE_NOTE = "confirmed an older suggestion: ask again"
 ACTIONS = ("confirm", "comment")
 UNAVAILABLE = "responses unavailable"
 NOT_TTY = "output is not a terminal: nothing was consumed"
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ]")
+# every run of whitespace or control characters (LF, CR, TAB, ESC, C1, NEL, U+2028/2029, NBSP ...) is one space, so untrusted text can never
+# start a line of its own
+_CTRL = re.compile(r"[\s\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
 def clean(text: Any, limit: int = MAX_TEXT) -> str:
-    """Untrusted text made safe to print or embed: control characters become spaces, newlines collapse, cut to `limit`."""
+    """Untrusted text made safe to print or embed: every run of whitespace/control characters becomes one space, cut to `limit`."""
     s = _CTRL.sub(" ", str(text if text is not None else "")).strip()
     return s if len(s) <= limit else s[:limit] + "…"
 
@@ -106,14 +110,19 @@ def is_stale(row: dict, current: dict | None) -> bool:
     return row.get("action") == "confirm" and cur is not None and row.get("suggestion_id") != cur
 
 
+def _source(row: dict) -> str:
+    """The raw text that counts: the comment if there is one, otherwise the confirmed suggestion's text."""
+    return row.get("comment") or row.get("suggestion_text") or ""
+
+
 def is_cut(row: dict) -> bool:
-    """The comment is longer than the display cap, so what is shown is not all of it."""
-    return row.get("action") == "comment" and len(clean(row.get("comment") or "", 10**9)) > MAX_COMMENT
+    """The text that counts (comment or confirmed suggestion text) is longer than the display cap, so what is shown is not all of it."""
+    return len(clean(_source(row), 10**9)) > MAX_COMMENT
 
 
 def response_text(row: dict) -> str:
-    """The text that counts: the comment (in full up to MAX_COMMENT) if there is one, otherwise the confirmed suggestion's text."""
-    return clean(row.get("comment") or "", MAX_COMMENT) or clean(row.get("suggestion_text") or "")
+    """The text that counts, in full up to MAX_COMMENT."""
+    return clean(_source(row), MAX_COMMENT)
 
 
 def effective(rows: Iterable[dict], current: dict | None = None) -> dict:
@@ -133,7 +142,7 @@ def format_line(row: dict, mark: bool = False, stale: bool = False) -> str:
     return (f"[{row.get('id')}] {clean(row.get('actor') or '?', 80)} @ {clean(row.get('created_at') or '?', 40)} "
             f"({row.get('action')}): {response_text(row)}" + ("  <- effective answer" if mark and not stale else "")
             + (f"  [STALE: {STALE_NOTE}]" if stale else "")
-            + (f"  (comment longer than {MAX_COMMENT} characters: shown cut, left pending; use --consume {row.get('id')} after reading it elsewhere)"
+            + (f"  (text longer than {MAX_COMMENT} characters: shown cut, left pending; use --consume {row.get('id')} after reading it elsewhere)"
                if is_cut(row) else ""))
 
 
@@ -238,10 +247,12 @@ def show_and_consume(client: Any, digest: dict, user: str, consume_after: bool =
         emit(f"\n{UNAVAILABLE}")
 
 
-def consume_one(client: Any, response_id: int, user: str, emit=None) -> bool:
+def consume_one(client: Any, response_id: int, user: str, emit=None, board: Any = None) -> bool:
     """The explicit owner action: print the pending response, flush, and only then consume it. True when consumed.
     An id that is not pending is sent to the endpoint without showing anything (it answers 409 already consumed, or 404);
-    an id that IS pending but cannot be rendered (malformed, or not a response) is refused and left unconsumed."""
+    an id that IS pending but cannot be rendered (malformed, or not a response) is refused and left unconsumed.
+    `board` is the board digest's source (a dict with "digest", or a callable returning one) used to label an obsolete confirm [STALE ...]
+    before it is consumed; if it is unavailable that is said and the consume proceeds (the explicit opt-in is the owner's override)."""
     emit = emit or print
     try:
         raw = _fetch_raw(client)
@@ -256,7 +267,14 @@ def consume_one(client: Any, response_id: int, user: str, emit=None) -> bool:
         if not rows:
             emit(f"response {response_id} cannot be shown, so it was not consumed")
             return False
-        emit(format_line(rows[0]))
+        stale = False
+        if rows[0]["action"] == "confirm":
+            try:
+                b = board() if callable(board) else board
+                stale = is_stale(rows[0], current_suggestions(b["digest"]))
+            except (Exception, SystemExit):
+                emit("(could not check whether this confirm is stale)")
+        emit(format_line(rows[0], stale=stale))
         sys.stdout.flush()
     ok, msg = consume(client, response_id, user)
     emit(msg if ok or msg == "already consumed" else f"(could not consume response {response_id}: {msg})")

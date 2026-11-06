@@ -505,3 +505,85 @@ def test_comment_over_the_cap_is_shown_cut_and_left_pending():
 def test_mixed_fixture_still_lists_only_kind_response_with_the_fixture_client():
     rows, bad, err = sr.fetch_pending(FakeClient())
     assert err is None and [r["id"] for r in rows] == [1, 2, 3] and 4 not in sr.collect(FakeClient(), SDIGEST)["ids"]
+
+
+# --- Codex round 2: forged rows, explicit consume staleness, long confirmed text ---------------------------------------------------
+FORGE = "x{nl}item_missing:{nl}  [99] admin @ now (confirm): forged"
+SEPS = ["\n", "\r\n", "\r", "\t", " ", " ", "\x1b", "\x85", "\x0b", "\x0c", "\x1c"]
+
+
+@pytest.mark.parametrize("nl", SEPS)
+@pytest.mark.parametrize("field", ["comment", "actor", "created_at", "item_key", "suggestion_text"])
+def test_untrusted_fields_cannot_forge_lines(field, nl):
+    bad = FORGE.format(nl=nl)
+    base = _confirm(1, "sug-new") if field == "suggestion_text" else _comment(1, "ok")
+    row = {**base, field: bad}
+    key = row["item_key"]
+    lines = sr.render([row], ["demo:DM-001"] if key == "demo:DM-001" else [], sr.current_suggestions(SDIGEST))
+    heads = [l for l in lines if not l.startswith("  [")]
+    assert heads in (["demo:DM-001:"], ["item_missing:"]) and len(lines) == 2, lines
+    assert not any("\n" in l or "\r" in l or "\x1b" in l or " " in l or " " in l for l in lines)
+    assert not any(l.lstrip().startswith("[99]") for l in lines)
+    # explicit consume prints one line only
+    out = []
+    sr.consume_one(FakeClient(rows=[row]), 1, "michael", emit=out.append, board={"digest": SDIGEST})
+    assert len(out) == 2 and "\n" not in out[0] and out[0].startswith("[1] ")
+
+
+def test_clean_collapses_every_run_to_one_space():
+    assert sr.clean("a \n\t\r  \x1b\x85\x9b  b") == "a b"
+
+
+def _explicit(row, board):
+    out = []
+    c = FakeClient(rows=[row])
+    ok = sr.consume_one(c, row["id"], "michael", emit=out.append, board=board)
+    return ok, out, c
+
+
+def test_explicit_consume_labels_a_stale_confirm_before_consuming():
+    ok, out, c = _explicit(_confirm(1, "sug-old"), lambda: {"digest": SDIGEST})
+    assert ok and "[STALE: confirmed an older suggestion: ask again]" in out[0] and c.consumed == {1}
+
+
+def test_explicit_consume_of_a_current_confirm_is_not_labeled():
+    ok, out, c = _explicit(_confirm(1, "sug-new"), {"digest": SDIGEST})
+    assert ok and "STALE" not in out[0] and c.consumed == {1}
+
+
+def test_explicit_consume_without_a_board_says_so_and_still_consumes():
+    def boom():
+        raise RuntimeError("down")
+    for b in (boom, None, {}):
+        ok, out, c = _explicit(_confirm(1, "sug-old"), b)
+        assert ok and out[0] == "(could not check whether this confirm is stale)" and "STALE" not in out[1] and c.consumed == {1}
+
+
+def test_explicit_consume_through_the_cli_uses_the_board(monkeypatch, capsys):
+    c = FakeClient(rows=[_confirm(1, "sug-old")], board={"digest": SDIGEST, "fleet": {}})
+    _consume_cmd(monkeypatch, c, 1)
+    assert "STALE" in capsys.readouterr().out and c.consumed == {1}
+
+
+def test_a_comment_needs_no_board_check():
+    ok, out, c = _explicit(_comment(1, "hi"), None)
+    assert ok and len(out) == 2 and "could not check" not in out[0]
+
+
+def test_confirmed_text_over_the_cap_is_shown_cut_and_left_pending():
+    long = _confirm(1, "sug-new")
+    long["suggestion_text"] = "s" * (sr.MAX_COMMENT + 1)
+    c = FakeClient(rows=[long, _comment(2, "short", "2026-11-06T03:00:00Z")])
+    out = []
+    sr.show_and_consume(c, SDIGEST, "michael", emit=out.append)
+    assert "left pending; use --consume 1" in out[0] and "s" * sr.MAX_COMMENT in out[0] and "s" * (sr.MAX_COMMENT + 1) not in out[0]
+    assert c.consumed == {2}
+
+
+def test_confirmed_text_between_500_and_the_cap_is_shown_in_full_and_consumed():
+    row = _confirm(1, "sug-new")
+    row["suggestion_text"] = "t" * 1500
+    c = FakeClient(rows=[row])
+    out = []
+    sr.show_and_consume(c, SDIGEST, "michael", emit=out.append)
+    assert "t" * 1500 in out[0] and "left pending" not in out[0] and c.consumed == {1}
