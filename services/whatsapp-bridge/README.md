@@ -3,10 +3,39 @@
 FastAPI service (port `3001`, launchd `com.techstartups.whatsapp-bridge`) that turns
 your WhatsApp **self-chat** into a remote control for the distributed agent fleet.
 It receives messages via the Waha webhook, queues tasks on the orchestrator
-(MacBook Pro), and replies in the chat when each task finishes.
+(the always-on Mac), and replies in the chat when each task finishes.
 
 > Send commands to **yourself** ("Message yourself" in WhatsApp). The bridge only
 > acts on messages in your own self-chat (`fromMe=true`); everything else is ignored.
+
+
+## Setup
+
+The bridge needs a WAHA container (the WhatsApp gateway) and this service. No secret is stored in any committed file.
+
+```bash
+cd services/whatsapp-bridge
+cp .env.example .env && chmod 600 .env     # fill in INFRA_SECRET_KEY (= the fleet SECRET_KEY), WAHA_API_KEY, the dashboard login
+docker compose up -d                        # WAHA; docker-compose.yml reads its credentials from .env
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+../../scripts/run-with-env.sh --env-file .env -- .venv/bin/python bridge.py     # try it in the foreground
+```
+
+To keep it running on macOS, copy the launchd templates, replace `/Users/YOUR_USERNAME/Projects/distributed-infra` with
+your checkout, and bootstrap them. They load `.env` through `scripts/run-with-env.sh`, so the plists hold no keys:
+
+| Template | Job |
+|---|---|
+| `com.techstartups.whatsapp-bridge.plist.example` | the bridge itself (port 3001) |
+| `com.mh.waha-update.plist.example` | weekly WAHA image update (`update-waha.sh`) |
+
+```bash
+cp com.techstartups.whatsapp-bridge.plist.example ~/Library/LaunchAgents/com.techstartups.whatsapp-bridge.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.whatsapp-bridge.plist
+```
+
+`WAHA_API_KEY` and the dashboard login guard a live WhatsApp session: whoever holds them can read and send messages as you. Generate
+the key with `openssl rand -hex 16`, keep the originals in your password manager, and rotate them if they ever appear in a chat, a log or a commit.
 
 ## Commands
 

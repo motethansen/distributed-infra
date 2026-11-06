@@ -1,8 +1,8 @@
 # distributed-infra
 
-A distributed AI agent stack — task queue, worker fleet, and interactive CLI for running Claude, Codex, Antigravity, and DeepSeek — with automatic failover when one hits its usage limit — across multiple machines over a private Tailscale network.
+A distributed AI agent stack: highly available task queue, worker fleet, Scrum desk, and interactive CLI for running Claude, Codex, Antigravity, and DeepSeek — with automatic failover when one hits its usage limit — across multiple machines over a private Tailscale network.
 
-**Three machines. Four AI agents. Two ways to work.**
+**A few machines. Four AI agents. Two ways to work.**
 
 - **Local** — run an agent directly on your MacBook, get an instant answer, stay in flow
 - **Queued** — describe a task, pick a machine and agent, it runs in the background while you keep working
@@ -12,19 +12,25 @@ A distributed AI agent stack — task queue, worker fleet, and interactive CLI f
 ## Architecture
 
 ```
-MacBook Pro (Orchestrator)
-  ├── FastAPI queue server  (port 8000, SQLite-backed)
-  ├── da CLI               — the control plane
-  └── Tailscale IP         — reachable by all workers
-
-Worker machines (Mac Mini, ThinkPad, …)
-  └── FastAPI worker server  (port 8001)
-        ├── Poller: claims tasks every 10 s
-        ├── Dispatches to the right handler (agent_run / build / script / …)
-        └── Reports: done / failed / needs_human
+          you ── da / dis-agent CLIs, WhatsApp, MCP (Claude Code, Codex, ...)
+                          │  HTTP + x-secret-key, over Tailscale
+          ┌───────────────┴────────────────┐
+   orchestrator (mac-mini)        orchestrator (thinkpad)      active-active, stateless
+          └───────────────┬────────────────┘
+                 rqlite queue: 3 Raft voters (mac-mini, thinkpad, cloud Docker host)
+                          │  workers pull the tasks they can run
+          ┌───────────────┴────────────────┐
+   worker (mac-mini)               worker (thinkpad)           poller → handler → agent CLI
 ```
 
-All machines connect over [Tailscale](https://tailscale.com) mesh VPN — no port-forwarding, no firewall rules.
+- **Queue:** a Raft-backed SQLite cluster, so any one node can fail. A single SQLite file works too, for one machine.
+- **Orchestrator:** FastAPI on :8000, run on two always-on machines; workers and clients fail over between them.
+- **Workers:** FastAPI on :8001. Each claims only the task types in its `MACHINE_CAPABILITIES`, runs a handler, and reports `done`, `failed` or `needs_human`.
+- **Agents:** Claude, Codex, Antigravity and DeepSeek run through their CLIs/APIs, with automatic failover when one hits a usage limit.
+- **Network:** every machine joins one [Tailscale](https://tailscale.com) tailnet. No port-forwarding, no public ports.
+- **Scrum desk:** `dis-agent` plans, approves, runs, tests and reviews stories on the workers.
+
+Full description: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Run it yourself: [docs/SETUP.md](docs/SETUP.md). Secrets and the public-repo rules: [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
@@ -32,9 +38,10 @@ All machines connect over [Tailscale](https://tailscale.com) mesh VPN — no por
 
 | Machine | Role | Highlights |
 |---|---|---|
-| MacBook Pro | Orchestrator | Queue server, `da` CLI |
-| Mac Mini (Intel, macOS) | Worker | iOS/Xcode, Flutter, Swift, Cloudflare deploys |
-| ThinkPad (Ubuntu) | Worker | Android, Gradle, Python/Node backend, Docker |
+| Mac Mini (macOS) | Orchestrator, worker, rqlite voter | Always on. iOS/Xcode, Flutter, WhatsApp bridge, Docker |
+| ThinkPad (Ubuntu) | Orchestrator, worker, rqlite voter | Always on. Android, Python/Node backends, Docker |
+| Small cloud Docker host | rqlite voter only | The third vote; reachable only on the tailnet |
+| Your laptop | Control (no worker) | `da` and `dis-agent`, development checkout |
 
 Declare your own fleet in `config/machines.yaml` (see [Configuration](#configuration)).
 
@@ -42,59 +49,28 @@ Declare your own fleet in `config/machines.yaml` (see [Configuration](#configura
 
 ## Quick Start
 
-### 1. Clone on every machine
+Full guide with the multi-machine, HA-queue and agent steps: **[docs/SETUP.md](docs/SETUP.md)**.
 
 ```bash
-git clone https://github.com/your-username/distributed-infra.git
-cd distributed-infra
+git clone https://github.com/motethansen/distributed-infra.git && cd distributed-infra
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+scripts/smoke-test.sh            # orchestrator + worker + one task on localhost, ends with PASS
+.venv/bin/pip install pytest pytest-asyncio && .venv/bin/python -m pytest -q     # the test suite
 ```
 
-### 2. Create `.env` on each machine
+Then, to run it for real:
 
 ```bash
-cp .env.example .env
-# Edit: set MACHINE_NAME, MACHINE_ROLE, SECRET_KEY (same value on all machines)
-openssl rand -hex 32   # generate a SECRET_KEY
-```
-
-### 3. Install dependencies
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 4. Set up Tailscale IPs
-
-```bash
-cp config/machines.yaml.example config/machines.yaml
-# Fill in each machine's Tailscale IP: tailscale ip -4
-```
-
-### 5. Start services
-
-```bash
-# MacBook — orchestrator
-uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000
-
-# Mac Mini / ThinkPad — worker
-uvicorn worker.main:app --host 0.0.0.0 --port 8001
-```
-
-### 6. Launch the CLI
-
-```bash
-./da          # from the repo root
-# or if symlinked:
-ln -sf "$(pwd)/da" /usr/local/bin/da
-da
+cp .env.example .env && chmod 600 .env       # fill in SECRET_KEY (openssl rand -hex 32), MACHINE_NAME, ORCHESTRATOR_URLS
+scripts/run-with-env.sh -- .venv/bin/uvicorn orchestrator.main:app --host 127.0.0.1 --port 8000     # terminal 1
+MACHINE_ROLE=worker scripts/run-with-env.sh -- .venv/bin/uvicorn worker.main:app --host 127.0.0.1 --port 8001   # terminal 2
+./da                                         # terminal 3: the interactive CLI
 ```
 
 ```
 ╭──────────────────────────────────────────────────────────────────╮
 │  Distributed Agents                                              │
-│  macbook-pro  ·  mac-mini  ·  thinkpad-x1                       │
+│  mac-mini  ·  thinkpad-x1                                        │
 │  2/2 workers online                                              │
 ╰──────────────────────────────────────────────────────────────────╯
 
@@ -102,34 +78,26 @@ da
 da ›
 ```
 
-### 7. Auto-start at boot
+### Start at boot
 
-**macOS (launchd)**
+The service templates hold **no secrets**; they load your `.env` (see [docs/SECURITY.md](docs/SECURITY.md)).
+
+| OS | Orchestrator | Worker |
+|---|---|---|
+| macOS (launchd) | `scripts/com.techstartups.orchestrator.plist.example` | `scripts/com.techstartups.worker.plist.example` |
+| Linux (systemd `--user`) | `scripts/orchestrator.service` | `scripts/worker.service` |
+
 ```bash
-cp scripts/com.techstartups.orchestrator.plist.example \
-   ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
-# Edit: fill in YOUR_USERNAME and YOUR_SECRET_KEY
-launchctl load ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
+# macOS: copy, replace /Users/YOUR_USERNAME/... with your checkout, then
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.worker.plist
+# Linux
+cp scripts/worker.service ~/.config/systemd/user/infra-worker.service
+systemctl --user daemon-reload && systemctl --user enable --now infra-worker && loginctl enable-linger "$USER"
 ```
 
-**Ubuntu (systemd)**
-```bash
-# Worker service is declared in scripts/worker.service
-# Copy it, fill in paths, enable:
-sudo cp scripts/worker.service /etc/systemd/system/infra-worker.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now infra-worker
-```
-
-**WhatsApp session (WAHA — Mac Mini)**
-WAHA Core does not auto-start its saved session when the container restarts. Install the helper agent so the session starts on boot:
-```bash
-cp scripts/com.techstartups.waha-session.plist.example \
-   ~/Library/LaunchAgents/com.techstartups.waha-session.plist
-# Edit YOUR_USERNAME to point at your checkout, then:
-launchctl load ~/Library/LaunchAgents/com.techstartups.waha-session.plist
-```
-See **Troubleshooting → "WhatsApp (WAHA) session is STOPPED after a restart"** for details.
+**WhatsApp session (WAHA, macOS):** WAHA Core does not restart its saved session after a container restart. Install
+`scripts/com.techstartups.waha-session.plist.example` as a launchd agent (edit the paths), or run `scripts/start-waha-session.sh`.
+The bridge and its image updater have their own templates in [services/whatsapp-bridge](services/whatsapp-bridge/README.md).
 
 ---
 
@@ -424,43 +392,23 @@ The handler is auto-discovered by the worker — no changes to `__init__.py` nee
 
 ```yaml
 machines:
-  macbook-pro:
-    tailscale_ip: "YOUR_MACBOOK_TAILSCALE_IP"
-    role: orchestrator
-    os: macos
-    queue_port: 8000
-
   mac-mini:
-    tailscale_ip: "YOUR_MACMINI_TAILSCALE_IP"
-    role: worker
+    tailscale_ip: "<mac-mini-ip>"          # from `tailscale ip -4` on that machine
+    role: orchestrator                     # orchestrator | worker (this machine runs both)
     os: macos
-    capabilities:
-      - ios_build
-      - xcode
-      - swift
-      - agent_run
-      - run_script
-      - git_pull
-    agents:
-      - claude
-      - gemini
-      - codex
+    capabilities: [ios_build, xcode, swift, agent_run, run_script, git_pull]
+    agents: [claude, gemini, codex]
+    queue_port: 8000
     worker_port: 8001
 
   thinkpad-x1:
-    tailscale_ip: "YOUR_THINKPAD_TAILSCALE_IP"
-    role: worker
+    tailscale_ip: "<thinkpad-ip>"
+    role: orchestrator
     os: linux
-    aliases: ["old-hostname"]    # historical names kept for stats continuity
-    capabilities:
-      - android_build
-      - python_backend
-      - docker
-      - agent_run
-      - run_script
-    agents:
-      - claude
-      - gemini
+    aliases: ["old-hostname"]              # historical names kept for stats continuity
+    capabilities: [android_build, python_backend, docker, agent_run, run_script]
+    agents: [claude, gemini]
+    queue_port: 8000
     worker_port: 8001
 ```
 
@@ -468,14 +416,16 @@ machines:
 
 ### `.env` (not committed)
 
+Copy `.env.example` (every key is documented there), `chmod 600 .env`, and fill it in. The same keys can come from the process
+environment instead. Never commit the file or paste its values into an issue or a chat.
+
 ```bash
-MACHINE_NAME=macbook-pro           # must match a key in machines.yaml
-MACHINE_ROLE=orchestrator          # orchestrator | worker
-SECRET_KEY=<openssl rand -hex 32>  # same on all machines
-TAILSCALE_IP=100.x.x.x
-ORCHESTRATOR_URL=http://100.x.x.x:8000   # worker only
-WORKER_PORT=8001                          # worker only
-POLL_INTERVAL_SECONDS=10
+MACHINE_NAME=mac-mini                       # a key in machines.yaml
+MACHINE_ROLE=worker                         # orchestrator | worker
+SECRET_KEY=<openssl rand -hex 32>           # identical on every machine
+ORCHESTRATOR_URLS=http://<mac-mini-ip>:8000,http://<thinkpad-ip>:8000   # tried in order
+MACHINE_CAPABILITIES=agent_run,run_script,git_pull
+WORKER_PORT=8001
 ```
 
 ---
@@ -508,7 +458,7 @@ automatic failover on usage limits. Setup and caveats: [clients/fleet-mcp/README
 ## Troubleshooting
 
 **Worker keeps showing "Poller error: ConnectError"**
-The worker can't reach the orchestrator. Check: (1) Tailscale is running on both machines, (2) `ORCHESTRATOR_URL` in worker `.env` matches the orchestrator's Tailscale IP, (3) orchestrator is running on port 8000.
+The worker can't reach the orchestrator. Check: (1) Tailscale is running on both machines, (2) `ORCHESTRATOR_URLS` in the worker's `.env` lists the orchestrators' Tailscale addresses, (3) orchestrator is running on port 8000.
 
 **Task goes to wrong machine**
 Make sure the orchestrator was restarted after any changes to `db.py`. The `_target_machine` filter runs in the orchestrator's SQLite query — stale code means the old query runs without the filter.

@@ -402,6 +402,24 @@ async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None
     return rows[0] if rows else None
 
 
+_SUG_BATCH = 400          # 2 variables per pair; stays under SQLite's 999-variable limit
+
+
+async def get_scrum_suggestions(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Batch of get_scrum_suggestion: {(item_key, evidence_hash): row} for the pairs that have a stored row."""
+    pairs = list(dict.fromkeys(pairs))
+    out: dict[tuple[str, str], dict] = {}
+    chunks = [pairs[i:i + _SUG_BATCH] for i in range(0, len(pairs), _SUG_BATCH)]
+    if not chunks:
+        return out
+    stmts = [[f"SELECT {_SUG_COLS}, item_key, evidence_hash FROM scrum_suggestions WHERE "
+              + " OR ".join("(item_key = ? AND evidence_hash = ?)" for _ in c), *[v for pair in c for v in pair]] for c in chunks]
+    for res in await _query(stmts, level="strong"):          # one round trip for all chunks
+        for d in _rows(res):
+            out[(d.pop("item_key"), d.pop("evidence_hash"))] = d
+    return out
+
+
 async def get_scrum_suggestion_by_id(suggestion_id: str) -> dict | None:
     res = await _query([[f"SELECT {_SUG_COLS}, item_key, evidence_hash FROM scrum_suggestions WHERE id = ?", suggestion_id]],
                        level="strong")

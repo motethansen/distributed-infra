@@ -48,9 +48,19 @@ _UNAVAILABLE_RE = re.compile(
 )
 
 
-def classify(error: str | None) -> str | None:
-    """Return 'limit', 'unavailable', or None (= do not fail over)."""
+# A text-only agent (DeepSeek) wrote a tool call instead of doing the work: nothing ran, so another agent
+# that CAN run commands may take the task over without repeating any side effect.
+_TEXT_ONLY_RE = re.compile(r"printed a tool call as text", re.IGNORECASE)
+
+
+def classify(error: str | None, agent: str | None = None, failure_kind: str | None = None) -> str | None:
+    """Return 'limit', 'unavailable', 'text_only', or None (= do not fail over).
+
+    'text_only' applies to DeepSeek only: its structured `failure_kind`, or (fallback) its error wording.
+    """
     text = error or ""
+    if agent == "deepseek" and (failure_kind == "text_only" or _TEXT_ONLY_RE.search(text)):
+        return "text_only"
     if _LIMIT_RE.search(text):
         return "limit"
     if _UNAVAILABLE_RE.search(text):

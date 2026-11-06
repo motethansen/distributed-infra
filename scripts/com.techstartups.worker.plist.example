@@ -1,56 +1,54 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Mac Mini launchd worker agent.
-  1. Copy to ~/Library/LaunchAgents/com.techstartups.worker.plist
-  2. Replace YOUR_SECRET_KEY_HERE and YOUR_TAILSCALE_IP below.
-  3. launchctl load ~/Library/LaunchAgents/com.techstartups.worker.plist
+  launchd agent: worker (port 8001) on a macOS machine. Polls every orchestrator listed in ORCHESTRATOR_URLS.
+
+  This file holds NO secrets. SECRET_KEY, DEEPSEEK_API and the rest live in the repo's .env
+  (chmod 600, gitignored); scripts/run-with-env.sh loads it, and anything set in
+  EnvironmentVariables below wins over the file.
+
+  Install (replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout):
+    mkdir -p logs && chmod 600 .env
+    cp scripts/com.techstartups.worker.plist.example ~/Library/LaunchAgents/com.techstartups.worker.plist
+    # edit the paths in the copy, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.worker.plist
+  Restart after a code change:
+    launchctl bootout gui/$(id -u)/com.techstartups.worker; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.worker.plist
 -->
 <plist version="1.0">
 <dict>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>MACHINE_CAPABILITIES</key>
-		<string>ios_build,xcode,swift,git_pull,run_script,test_run,lint,npm_build,agent_run</string>
-		<key>MACHINE_NAME</key>
-		<string>mac-mini</string>
-		<key>MACHINE_ROLE</key>
-		<string>worker</string>
-		<key>ORCHESTRATOR_URL</key>
-		<string>http://YOUR_MACBOOK_TAILSCALE_IP:8000</string>
-		<key>PATH</key>
-		<string>/Users/YOUR_USERNAME/flutter/bin:/Users/YOUR_USERNAME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/local/share/flutter/bin:/usr/bin:/usr/sbin:/bin</string>
-		<key>POLL_INTERVAL_SECONDS</key>
-		<string>10</string>
-		<key>SECRET_KEY</key>
-		<string>YOUR_SECRET_KEY_HERE</string>
-		<key>TAILSCALE_IP</key>
-		<string>YOUR_TAILSCALE_IP</string>
-		<key>WORKER_PORT</key>
-		<string>8001</string>
-	</dict>
-	<key>KeepAlive</key>
-	<true/>
-	<key>Label</key>
-	<string>com.techstartups.worker</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/uvicorn</string>
-		<string>worker.main:app</string>
-		<string>--host</string>
-		<string>0.0.0.0</string>
-		<string>--port</string>
-		<string>8001</string>
-		<string>--limit-max-requests</string>
-		<string>1000</string>
-	</array>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardErrorPath</key>
-	<string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.err</string>
-	<key>StandardOutPath</key>
-	<string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.log</string>
-	<key>WorkingDirectory</key>
-	<string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+  <key>Label</key><string>com.techstartups.worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+    <string>--</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/uvicorn</string>
+    <string>worker.main:app</string>
+    <string>--host</string><string>0.0.0.0</string>
+    <string>--port</string><string>8001</string>
+    <string>--limit-max-requests</string><string>1000</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USERNAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MACHINE_NAME</key><string>mac-mini</string>
+    <key>MACHINE_ROLE</key><string>worker</string>
+    <key>MACHINE_CAPABILITIES</key>
+    <string>agent_run,run_script,git_pull,test_run,lint</string>
+    <key>WORKER_PORT</key><string>8001</string>
+    <key>POLL_INTERVAL_SECONDS</key><string>10</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+
+  <key>StandardOutPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/worker.err</string>
 </dict>
 </plist>

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  WhatsApp bridge (port 3001) on the always-on Mac. This file holds NO secrets: INFRA_SECRET_KEY,
+  WAHA_API_KEY and the dashboard login live in services/whatsapp-bridge/.env (chmod 600, gitignored),
+  loaded by scripts/run-with-env.sh. Values set below win over the file.
+
+  Setup:
+    1. cd services/whatsapp-bridge && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    2. cp .env.example .env && chmod 600 .env   # fill in; INFRA_SECRET_KEY must equal the fleet SECRET_KEY
+    3. cp com.techstartups.whatsapp-bridge.plist.example ~/Library/LaunchAgents/com.techstartups.whatsapp-bridge.plist
+       and replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout path
+    4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.whatsapp-bridge.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.techstartups.whatsapp-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+    <string>--env-file</string><string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/.env</string>
+    <string>--</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/.venv/bin/python</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge/bridge.py</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/services/whatsapp-bridge</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ORCHESTRATOR_URL</key><string>http://localhost:8000</string>
+    <key>WAHA_URL</key><string>http://localhost:3000</string>
+    <key>BRIDGE_PORT</key><string>3001</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+
+  <key>StandardOutPath</key><string>/tmp/whatsapp-bridge.log</string>
+  <key>StandardErrorPath</key><string>/tmp/whatsapp-bridge.err</string>
+</dict>
+</plist>

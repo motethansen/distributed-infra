@@ -150,7 +150,9 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
 
     attempts: list[dict] = list(skipped)
     last: dict = {}
-    for a, m in usable:
+    queue = list(usable)
+    while queue:
+        a, m = queue.pop(0)
         p, sid, res = prompt, None, False
         if a == primary and a in RESUMABLE and session_id:
             # The agent's own session holds the conversation. If it never answered
@@ -178,7 +180,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
             if attempts:
                 result["failover"] = attempts
             return finish_result(result, requested, route_note)
-        kind = fo.classify(result.get("error"))
+        kind = fo.classify(result.get("error"), a, result.get("failure_kind"))
         if kind is None or not failover:
             break  # a real failure — don't repeat side effects on another provider
         entry = {"agent": a, "reason": kind, "error": (result.get("error") or "")[:300]}
@@ -186,6 +188,12 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
             entry["until"] = fo.mark_limited(a, result.get("error") or "").isoformat()
         attempts.append(entry)
         print(f"[failover] {a} {kind}: {(result.get('error') or '')[:120]!r} — trying next agent", flush=True)
+        if kind == "text_only" and "claude" not in [x["agent"] for x in attempts]:
+            # The next agent must be able to do the work itself: Claude (Sonnet) first, never a read-only one.
+            # Only a Claude that is already in `queue` (so it passed the privacy/exclude/cooldown filters that
+            # built `usable`) is promoted; it is never injected.
+            if any(c[0] == "claude" for c in queue):
+                queue = [("claude", "sonnet")] + [c for c in queue if c[0] != "claude"]
 
     last = dict(last or {"ok": False, "error": "no agent available"})
     last.setdefault("agent", primary)

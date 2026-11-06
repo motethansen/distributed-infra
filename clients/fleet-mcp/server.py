@@ -34,7 +34,7 @@ import httpx
 
 _HERE = Path(__file__).resolve().parent
 REPO_ROOT = _HERE.parent.parent
-DEFAULT_URLS = "http://100.76.214.54:8000,http://100.112.241.6:8000"
+DEFAULT_URLS = "http://localhost:8000"   # set ORCHESTRATOR_URLS (env or .env) to your orchestrators
 MAX_WAIT = 110          # stay under harness tool-call timeouts (Codex default is 60–120 s)
 HISTORY_TURNS = 20
 TURN_CHARS = 4000
@@ -64,7 +64,7 @@ def load_config(env: dict[str, str] | None = None, dotenv_path: Path | None = No
         "secret": get("SECRET_KEY"),
         "urls": urls,
         "state_file": Path(get("FLEET_MCP_STATE", str(REPO_ROOT / "data" / "fleet_mcp_state.json"))),
-        "vantage_url": get("VANTAGE_URL", "http://100.76.214.54:8055"),
+        "vantage_url": get("VANTAGE_URL", "http://localhost:8055"),
         "vantage_key": get("VANTAGE_INGEST_KEY") or None,
     }
 
