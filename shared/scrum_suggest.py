@@ -89,28 +89,49 @@ def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
     return [(sec, e) for sec, key in _SECTIONS for e in digest.get(key) or [] if isinstance(e, dict) and e.get("item_key")]
 
 
-_KNOWN: "OrderedDict[tuple[str, str], dict]" = OrderedDict()    # last row seen per (item_key, evidence_hash), LRU
+_KNOWN: "OrderedDict[tuple[str, str], dict]" = OrderedDict()    # {"row", "verified_at"} per (item_key, evidence_hash), LRU
+_STRAGGLERS: set[asyncio.Task] = set()                          # lookups past the deadline: cancelled, never awaited, never published
 
 
-def remember(item_key: str, ev_hash: str, row: dict) -> None:
-    _KNOWN[(item_key, ev_hash)] = _public(row)
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def remember(item_key: str, ev_hash: str, row: dict, verified_at: str | None = None) -> None:
+    _KNOWN[(item_key, ev_hash)] = {"row": _public(row), "verified_at": verified_at or _now_iso()}
     _KNOWN.move_to_end((item_key, ev_hash))
     while len(_KNOWN) > KNOWN_MAX:
         _KNOWN.popitem(last=False)
 
 
+def forget(item_key: str, ev_hash: str) -> None:
+    _KNOWN.pop((item_key, ev_hash), None)
+
+
 def _known(item_key: str, ev_hash: str) -> dict | None:
-    row = _KNOWN.get((item_key, ev_hash))                 # same evidence hash only: a changed hash is a new suggestion
-    if row is not None:
-        _KNOWN.move_to_end((item_key, ev_hash))
-    return row
+    """The last-known-good row for the SAME evidence hash (a changed hash is a new suggestion), marked as a fallback:
+    `stale: True` and `verified_at`, the time of the last successful lookup. Fresh rows never carry these keys."""
+    hit = _KNOWN.get((item_key, ev_hash))
+    if hit is None:
+        return None
+    _KNOWN.move_to_end((item_key, ev_hash))
+    return {**hit["row"], "stale": True, "verified_at": hit["verified_at"]}
+
+
+def _reap(task: asyncio.Task) -> None:
+    _STRAGGLERS.discard(task)
+    if not task.cancelled():
+        task.exception()                                  # retrieve it so a late failure is not logged as never-retrieved
 
 
 async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str] | None = None) -> dict[str, Any]:
     """Set `suggestion` on every review/decision/adjustment entry from the store only: the stored row or None.
     Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestions(pairs) (one query)
-    or else get_scrum_suggestion(item_key, hash). All lookups share one hard deadline (LOOKUP_DEADLINE_SECS).
-    When the store is slow or fails, an entry gets the last row seen for the SAME evidence hash, so ids stay stable.
+    or else get_scrum_suggestion(item_key, hash). All lookups share one hard response deadline (LOOKUP_DEADLINE_SECS),
+    enforced here and not by cancellation: stragglers are cancelled without being awaited and anything they return
+    later is ignored. A lookup that answers (row or no row) is authoritative: a miss evicts the cached pair.
+    When the store is slow or fails, an entry gets the last row seen for the SAME evidence hash with `stale: True` and
+    `verified_at` added, so ids stay stable and callers can tell it from a fresh row.
     Item keys with no answer at all are added to `unresolved`: their suggestion may exist, so the caller must not
     generate it again."""
     entries = [e for _, e in _entries(digest)]
@@ -119,45 +140,58 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
     for e in entries:
         e["suggestion"] = None
 
-    def settle(i: int, row: dict | None) -> None:
+    def settle(i: int, row: dict | None, verified_at: str) -> None:
         if row:
-            remember(entries[i]["item_key"], hashes[i], row)
+            remember(entries[i]["item_key"], hashes[i], row, verified_at)
+        else:
+            forget(entries[i]["item_key"], hashes[i])     # confirmed miss: the row is gone, never serve it as last-known
         entries[i]["suggestion"] = _public(row) if row else None
         pending.discard(i)
 
-    async def batch() -> None:
+    async def batch() -> dict:
         pairs = list(dict.fromkeys((e["item_key"], h) for e, h in zip(entries, hashes)))
-        rows = await store.get_scrum_suggestions(pairs) if pairs else {}
-        for i in list(pending):
-            settle(i, rows.get((entries[i]["item_key"], hashes[i])))
+        return await store.get_scrum_suggestions(pairs) if pairs else {}
 
-    async def single(i: int) -> None:
-        try:
-            settle(i, await store.get_scrum_suggestion(entries[i]["item_key"], hashes[i]))
-        except Exception:                                 # counted once below; stays pending
-            failed.append(i)
+    async def single(i: int) -> dict | None:
+        return await store.get_scrum_suggestion(entries[i]["item_key"], hashes[i])
 
-    failed: list[int] = []
     started = time.monotonic()
     reason = None
-    try:
-        if hasattr(store, "get_scrum_suggestions"):
-            await asyncio.wait_for(batch(), LOOKUP_DEADLINE_SECS)
-        else:
-            await asyncio.wait_for(asyncio.gather(*(single(i) for i in sorted(pending))), LOOKUP_DEADLINE_SECS)
-    except asyncio.TimeoutError:
+    failed = 0
+    if hasattr(store, "get_scrum_suggestions"):
+        jobs = {asyncio.ensure_future(batch()): None}
+    else:
+        jobs = {asyncio.ensure_future(single(i)): i for i in sorted(pending)}
+    done, late = await asyncio.wait(jobs, timeout=LOOKUP_DEADLINE_SECS) if jobs else (set(), set())
+    for t in late:                                        # past the deadline: cancel, do not wait, never read the result
+        _STRAGGLERS.add(t)
+        t.add_done_callback(_reap)
+        t.cancel()
+    if late:
         reason = "passed the deadline"
-    except Exception as exc:                              # the store is optional advice too
-        reason = f"failed ({type(exc).__name__}: {exc})"
+    verified_at = _now_iso()
+    for t in done:
+        i = jobs[t]
+        exc = None if t.cancelled() else t.exception()
+        if t.cancelled() or exc is not None:
+            failed += 1
+            if i is None and reason is None:
+                reason = f"failed ({type(exc).__name__}: {exc})" if exc else "was cancelled"
+        elif i is None:
+            rows = t.result()
+            for k in list(pending):
+                settle(k, rows.get((entries[k]["item_key"], hashes[k])), verified_at)
+        else:
+            settle(i, t.result(), verified_at)
     if failed and reason is None:
-        reason = f"failed for {len(failed)} items"
+        reason = f"failed for {failed} items"
     took = time.monotonic() - started
     if pending:
         stale = 0
         for i in sorted(pending):
             row = _known(entries[i]["item_key"], hashes[i])
             if row is not None:
-                entries[i]["suggestion"], stale = dict(row), stale + 1
+                entries[i]["suggestion"], stale = row, stale + 1
         left = {entries[i]["item_key"] for i in pending if entries[i]["suggestion"] is None}
         log.warning("scrum suggestion lookup %s after %.1fs (%d items): %d served from last known, %d without a suggestion",
                     reason or "incomplete", took, len(entries), stale, len(left))

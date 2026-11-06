@@ -193,3 +193,110 @@ def test_deadline_constant_and_lru_bound():
     for i in range(ss.KNOWN_MAX + 50):
         ss.remember(f"k{i}", "h", row(f"k{i}", "h"))
     assert len(ss._KNOWN) == ss.KNOWN_MAX and ("k0", "h") not in ss._KNOWN and (f"k{ss.KNOWN_MAX + 49}", "h") in ss._KNOWN
+
+
+class Stubborn:
+    """Store that ignores cancellation: it swallows CancelledError and, after `delay`, returns a (late) row."""
+    def __init__(self, rows, batch):
+        self.rows, self.delay, self.hang = rows, 0.6, False
+        if batch:
+            self.get_scrum_suggestions = self._batch
+
+    async def _wait(self):
+        if not self.hang:
+            return
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await asyncio.sleep(self.delay)               # slow to cancel, then answers anyway
+
+    async def get_scrum_suggestion(self, k, h):
+        await self._wait()
+        return self.rows.get((k, h))
+
+    async def _batch(self, pairs):
+        await self._wait()
+        return {p: self.rows[p] for p in pairs if p in self.rows}
+
+
+async def drain():
+    await asyncio.gather(*list(ss._STRAGGLERS), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [Flaky, FlakyBatch])
+@pytest.mark.parametrize("mode", ["slow", "raise"])
+async def test_confirmed_miss_evicts_cache_so_later_failure_does_not_resurrect(cls, mode, monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.2)
+    d1 = digest()
+    store = cls(rows_for(d1))
+    await ss.attach_cached(d1, store)
+    assert all(e["suggestion"] for e in all_entries(d1))
+    store.rows.clear()                                    # row deleted; the lookup succeeds and returns no row
+    d2 = digest()
+    await ss.attach_cached(d2, store)
+    assert all(e["suggestion"] is None for e in all_entries(d2)) and not ss._KNOWN
+    store.mode = mode
+    d3, unresolved = digest(), set()
+    await ss.attach_cached(d3, store, unresolved=unresolved)
+    assert all(e["suggestion"] is None for e in all_entries(d3))
+    assert unresolved == {e["item_key"] for e in all_entries(d3)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [True, False])
+async def test_deadline_holds_when_store_delays_cancellation_and_late_row_is_ignored(batch, monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.2)
+    d = digest()
+    store = Stubborn(rows_for(d), batch)
+    store.hang = True
+    unresolved: set[str] = set()
+    t0 = time.monotonic()
+    await ss.attach_cached(d, store, unresolved=unresolved)
+    assert time.monotonic() - t0 < 0.5                    # not 0.2 + 0.6: cancellation is not awaited
+    assert all(e["suggestion"] is None for e in all_entries(d))
+    assert unresolved == {e["item_key"] for e in all_entries(d)}
+    await drain()                                         # the late rows have now been returned by the store
+    assert all(e["suggestion"] is None for e in all_entries(d)) and not ss._KNOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [True, False])
+async def test_late_row_does_not_replace_cache_or_digest(batch, monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.2)
+    d1 = digest()
+    rows = rows_for(d1)
+    store = Stubborn(rows, batch)
+    await ss.attach_cached(d1, store)
+    before = {k: dict(v) for k, v in ((k, v["row"]) for k, v in ss._KNOWN.items())}
+    for k in rows:
+        rows[k] = {**rows[k], "text": "LATE", "id": "sg_late"}
+    store.hang = True
+    d2 = digest()
+    await ss.attach_cached(d2, store)
+    await drain()
+    assert {k: dict(v["row"]) for k, v in ss._KNOWN.items()} == before
+    assert all(e["suggestion"]["text"] != "LATE" for e in all_entries(d2))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", [Flaky, FlakyBatch])
+async def test_fallback_rows_are_marked_stale_with_verified_at_and_fresh_rows_are_not(cls, monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.2)
+    d1 = digest()
+    store = cls(rows_for(d1))
+    await ss.attach_cached(d1, store)
+    for e in all_entries(d1):
+        assert set(e["suggestion"]) == {"id", "text", "generated_at", "model"}
+    store.mode = "raise"
+    d2 = digest()
+    await ss.attach_cached(d2, store)
+    for e1, e2 in zip(all_entries(d1), all_entries(d2)):
+        s = e2["suggestion"]
+        assert s["stale"] is True and s["verified_at"] >= "2026" and s["verified_at"].endswith("Z")
+        assert {k: v for k, v in s.items() if k not in ("stale", "verified_at")} == e1["suggestion"]
+        assert not e1["suggestion"].get("stale")
+    store.mode = "ok"
+    d3 = digest()
+    await ss.attach_cached(d3, store)
+    assert all("stale" not in e["suggestion"] and "verified_at" not in e["suggestion"] for e in all_entries(d3))
