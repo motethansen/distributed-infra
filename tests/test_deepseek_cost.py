@@ -116,7 +116,7 @@ def test_shipped_price_file_covers_the_repo_models():
     monkeypatch_path = ds.Path(ds.__file__).resolve().parent.parent / "config" / "llm_prices.yaml"
     import yaml
     table = yaml.safe_load(monkeypatch_path.read_text())["deepseek"]
-    assert {"deepseek-chat", "deepseek-reasoner"} <= set(table)
+    assert {"deepseek-chat", "deepseek-flash", "deepseek-v4-pro"} <= set(table)     # the names the code and the API use
 
 
 def test_unverified_price_gives_cost_none_marked_unpriced(monkeypatch):
@@ -131,12 +131,16 @@ def test_verified_price_gives_a_number(monkeypatch):
     assert isinstance(u["cost_usd"], float) and "cost_basis" not in u
 
 
-def test_shipped_prices_are_unverified_so_nothing_is_guessed():
+def test_shipped_prices_only_mark_verified_what_the_official_page_lists():
+    """Verified entries are the two models on DeepSeek's price page and the legacy name the API serves as flash;
+    deepseek-reasoner is not on the page and must stay unpriced (absent or verified: false), never guessed."""
     ds._load_prices.cache_clear()
     path = ds.Path(ds.__file__).resolve().parent.parent / "config" / "llm_prices.yaml"
     import yaml
     table = yaml.safe_load(path.read_text())["deepseek"]
-    assert all(v["verified"] is False for v in table.values())
+    verified = {m for m, v in table.items() if v.get("verified") is True}
+    assert verified == {"deepseek-flash", "deepseek-v4-pro", "deepseek-chat"}
+    assert table["deepseek-chat"]["alias_of"] == "deepseek-flash"
 
 
 def test_cache_breakdown_on_one_attempt_does_not_underprice_the_other(monkeypatch):
@@ -164,3 +168,85 @@ def test_first_call_without_usage_and_priced_retry_is_also_unknown(monkeypatch):
     _fake_client(monkeypatch, [_Resp(DSML, None), _Resp("done", {"prompt_tokens": 1_000_000, "completion_tokens": 0})])
     out = asyncio.run(ds.run("hi"))
     assert out["usage"]["cost_usd"] is None
+
+
+# ---- time-aware official prices (DeepSeek price page, 2026-11-06): off-peak is half of peak ----------------------------------------------------
+from datetime import datetime, timezone
+
+OFFICIAL = """deepseek:
+  deepseek-flash:
+    verified: true
+    offpeak: {input_fresh: 0.15, input_cache_hit: 0.003, output: 0.60}
+    peak:    {input_fresh: 0.30, input_cache_hit: 0.006, output: 1.20}
+  deepseek-chat:
+    alias_of: deepseek-flash
+    verified: true
+  deepseek-broken-alias:
+    alias_of: deepseek-flash
+    verified: false
+"""
+USAGE_1M = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1_000_000}
+
+
+def _pin(monkeypatch, tmp_path, y, mo, d, h):
+    f = tmp_path / "official.yaml"
+    f.write_text(OFFICIAL)
+    monkeypatch.setattr(ds, "PRICES_PATH", f)
+    ds._load_prices.cache_clear()
+    monkeypatch.setattr(ds, "_now", lambda: datetime(y, mo, d, h, 30, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("hour,peak", [(0, False), (1, True), (3, True), (4, False), (5, False), (6, True), (9, True), (10, False), (23, False)])
+def test_peak_hours_are_01_04_and_06_10_utc_on_weekdays(monkeypatch, tmp_path, hour, peak):
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, hour)            # 2026-11-06 is a Friday
+    assert ds._cost_usd(USAGE_1M, "deepseek-flash") == pytest.approx(1.50 if peak else 0.75)
+
+
+def test_weekend_is_always_off_peak(monkeypatch, tmp_path):
+    _pin(monkeypatch, tmp_path, 2026, 11, 7, 7)               # Saturday 07:30 UTC would be peak on a weekday
+    assert ds._cost_usd(USAGE_1M, "deepseek-flash") == pytest.approx(0.75)
+
+
+def test_legacy_name_is_priced_as_flash_and_a_broken_alias_is_unpriced(monkeypatch, tmp_path):
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, 7)
+    assert ds._cost_usd(USAGE_1M, "deepseek-chat") == ds._cost_usd(USAGE_1M, "deepseek-flash") == pytest.approx(1.50)
+    assert ds._cost_usd(USAGE_1M, "deepseek-broken-alias") is None
+    assert ds._cost_usd(USAGE_1M, "deepseek-reasoner") is None
+
+
+def test_shipped_price_file_matches_the_official_page_numbers(monkeypatch):
+    """The real config/llm_prices.yaml: flash and pro at the official peak and off-peak rates, the legacy name aliased."""
+    import pathlib
+    real = pathlib.Path(ds.__file__).resolve().parents[1] / "config" / "llm_prices.yaml"
+    monkeypatch.setattr(ds, "PRICES_PATH", real)
+    ds._load_prices.cache_clear()
+    sat = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
+    fri_peak = datetime(2026, 11, 6, 7, 0, tzinfo=timezone.utc)
+    assert ds._rates("deepseek-flash", sat) == {"input_fresh": 0.15, "input_cache_hit": 0.003, "output": 0.60}
+    assert ds._rates("deepseek-flash", fri_peak) == {"input_fresh": 0.30, "input_cache_hit": 0.006, "output": 1.20}
+    assert ds._rates("deepseek-v4-pro", sat) == {"input_fresh": 0.66, "input_cache_hit": 0.022, "output": 1.98}
+    assert ds._rates("deepseek-v4-pro", fri_peak) == {"input_fresh": 1.32, "input_cache_hit": 0.044, "output": 3.96}
+    assert ds._rates("deepseek-chat", fri_peak) == ds._rates("deepseek-flash", fri_peak)
+    assert ds._rates("deepseek-reasoner", fri_peak) is None
+    ds._load_prices.cache_clear()
+
+
+def test_a_request_is_priced_at_its_start_time_not_when_the_usage_is_processed(monkeypatch, tmp_path):
+    """Starts at 03:59 UTC on a Friday (peak), 'finishes' after 04:00 (off-peak): it must be priced at the peak rate."""
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, 3)
+    clock = iter([datetime(2026, 11, 6, 3, 59, tzinfo=timezone.utc), datetime(2026, 11, 6, 4, 2, tzinfo=timezone.utc)])
+    monkeypatch.setattr(ds, "_now", lambda: next(clock))
+    _fake_client(monkeypatch, [_Resp("hello", {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000,
+                                               "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1_000_000})])
+    out = asyncio.run(ds.run("hi", model="deepseek-flash"))
+    assert out["usage"]["cost_usd"] == pytest.approx(1.50)      # peak: 0.30 + 1.20, not the off-peak 0.75
+
+
+def test_each_attempt_is_priced_at_its_own_start(monkeypatch, tmp_path):
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, 3)
+    clock = iter([datetime(2026, 11, 6, 3, 59, tzinfo=timezone.utc), datetime(2026, 11, 6, 4, 1, tzinfo=timezone.utc)])
+    monkeypatch.setattr(ds, "_now", lambda: next(clock))
+    one = {"prompt_tokens": 1_000_000, "completion_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1_000_000}
+    _fake_client(monkeypatch, [_Resp(DSML, one), _Resp("done", one)])
+    out = asyncio.run(ds.run("hi", model="deepseek-flash"))
+    assert out["usage"]["cost_usd"] == pytest.approx(0.30 + 0.15)   # first at peak, the retry off-peak
