@@ -9,6 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import llm_experiment as ex  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_real_venv_walk(monkeypatch):
+    """Keep the suite fast and off the real venv: the interpreter manifest is empty unless a test injects roots."""
+    monkeypatch.setattr(ex, "interpreter_roots", lambda: [])
+
+
 def commit_dir(d):
     """Make the fixture directory a committed git repo (the oracle is frozen from committed blobs only)."""
     for a in (("init", "-q"), ("config", "user.email", "t@example.com"), ("config", "user.name", "t"),

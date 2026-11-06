@@ -25,6 +25,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import sysconfig
 import tarfile
 import tempfile
 import time
@@ -860,10 +861,68 @@ def _apply_usage(res, usage):
     res.cost_usd = usage.get("cost_usd") or 0.0
 
 
-def run_one(fixture, variant, repeat, runner, workdir):
+# ── Interpreter-environment manifest ─────────────────────────────────────────
+# The test interpreter (sys.executable, the shared venv) lives outside the sandbox, so restore_trusted cannot cover it.
+# A manifest of its site-packages is taken once per experiment and compared after every agent run: a .pth file, a pytest
+# plugin entry point or an edited module there would otherwise force a pass. Full content hashing of the files that can
+# execute or register code (*.pth, *.py, *.so, *.pyd, entry_points.txt, METADATA, RECORD); files over the size cap are
+# compared by size+mtime_ns only; __pycache__ / *.pyc are skipped.
+MANIFEST_SUFFIXES = (".pth", ".py", ".so", ".pyd")
+MANIFEST_NAMES = frozenset({"entry_points.txt", "METADATA", "RECORD"})
+MANIFEST_HASH_CAP = 8_000_000
+MAX_VENV_REPORTED = 50
+
+
+def interpreter_roots():
+    """purelib + platlib of the running interpreter (deduplicated, existing)."""
+    paths = sysconfig.get_paths()
+    out = []
+    for k in ("purelib", "platlib"):
+        p = paths.get(k)
+        if p and os.path.isdir(p) and p not in out:
+            out.append(p)
+    return out
+
+
+def venv_manifest(roots=None):
+    """relative path -> (size, sha256 | 'size+mtime') for the interpreter-environment files that can run code."""
+    roots = interpreter_roots() if roots is None else [str(r) for r in roots]
+    out = {}
+    for i, root in enumerate(roots):
+        for dp, dns, fns in os.walk(root, followlinks=False):
+            dns[:] = [d for d in dns if d != "__pycache__"]
+            for n in fns:
+                if n.endswith(".pyc") or not (n.endswith(MANIFEST_SUFFIXES) or n in MANIFEST_NAMES):
+                    continue
+                full = os.path.join(dp, n)
+                rel = os.path.relpath(full, root) if i == 0 else f"[{i}]/" + os.path.relpath(full, root)
+                try:
+                    if os.path.islink(full):
+                        out[rel] = (0, "link:" + os.readlink(full))
+                        continue
+                    st = os.stat(full)
+                    if st.st_size > MANIFEST_HASH_CAP:
+                        out[rel] = (st.st_size, f"mtime:{st.st_mtime_ns}")
+                        continue
+                    with open(full, "rb") as fh:
+                        out[rel] = (st.st_size, hashlib.sha256(fh.read()).hexdigest())
+                except OSError:
+                    out[rel] = (-1, "unreadable")
+    return out
+
+
+def manifest_changes(before, after):
+    """Sorted `venv:<relative path>` entries for every file added, removed or changed between two manifests."""
+    keys = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    return [sanitize("venv:" + k, 200) for k in keys[:MAX_VENV_REPORTED]]
+
+
+def run_one(fixture, variant, repeat, runner, workdir, venv_roots=None, venv_before=None):
     res = RunResult(variant=variant, repeat=repeat)
     sb = None
     try:
+        if venv_before is None:
+            venv_before = venv_manifest(venv_roots)
         repo = resolve_repo(fixture, workdir)
         sb = make_snapshot_repo(repo, fixture.pinned_commit, workdir, fixture)
         argv = build_command(variant, fixture.prompt, MAX_BUDGET_USD)
@@ -889,8 +948,13 @@ def run_one(fixture, variant, repeat, runner, workdir):
             diff, diff_error = None, sanitize(f"{type(e).__name__}: {e}")
         # Tests run on the trusted acceptance test and pytest config, never on what the agent left there.
         changed = restore_trusted(sb, fixture)
-        res.tampered, res.tampered_files = bool(changed), changed or None
+        # ... and on the interpreter environment the agent left: checked before the tests and again after them, since
+        # code under test could add a self-deleting .pth.
+        venv_changed = manifest_changes(venv_before, venv_manifest(venv_roots))
         passed = runner.run_tests(fixture.test_cmd, sb.path) == PYTEST_PASSED
+        venv_changed = sorted(set(venv_changed) | set(manifest_changes(venv_before, venv_manifest(venv_roots))))
+        changed = changed + venv_changed
+        res.tampered, res.tampered_files = bool(changed), changed or None
         res.tests_passed = passed and not res.tampered
         if diff is None:
             res.reviewer_verdict, res.error = "diff_failed", f"diff generation failed: {diff_error}"
@@ -906,11 +970,12 @@ def run_one(fixture, variant, repeat, runner, workdir):
     return res
 
 
-def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str):
+def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str, venv_roots=None):
     freeze_test(fixture)    # refuse on a dirty / uncommitted oracle before anything else
     check_fixture_fails_before(fixture, runner)
     unsupported = detect_unsupported(variant_names, runner.cli_help())
     order = [n for n in variant_names if n == BASELINE_NAME] + [n for n in variant_names if n != BASELINE_NAME]
+    venv_before = venv_manifest(venv_roots)
     runs = []
     base = tempfile.mkdtemp(prefix="llmexp-")
     try:
@@ -918,7 +983,7 @@ def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str):
             if name in unsupported:
                 continue
             for i in range(1, repeats + 1):
-                runs.append(run_one(fixture, name, i, runner, base))
+                runs.append(run_one(fixture, name, i, runner, base, venv_roots, venv_before))
     finally:
         shutil.rmtree(base, ignore_errors=True)
     info = dict(getattr(runner, "reviewer_info", None) or {})
