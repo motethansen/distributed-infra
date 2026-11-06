@@ -597,3 +597,40 @@ def test_conftest_forcing_a_pass_does_not_survive_restore(world, tmp_path):
         (w / "sub" / "conftest.py").write_text(body)
     r = run_tampered(world, tmp_path, agent)
     assert r.tampered is True and r.tests_passed is False
+
+
+# ── Round 2, P2-5 budget detection / P2-7b tampered_files ────────────────────────────────────────────────────────
+def test_budget_stop_is_read_from_structured_fields_only(world, tmp_path):
+    answer = json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2,
+                         "total_cost_usd": 0.5, "result": "I added the --max-budget-usd flag and error_max_budget handling"})
+    fake = Real()
+    fake.run_agent = lambda argv, cwd, timeout: (answer, 0, 1.0)
+    r = ex.run_one(world[0], "baseline", 1, fake, tmp_path / "wd")
+    assert r.status == "ok"                                     # the answer text mentions the flag: not a budget stop
+    stop = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": 2.1})
+    fake.run_agent = lambda argv, cwd, timeout: (stop, 1, 1.0)
+    r = ex.run_one(world[0], "baseline", 1, fake, tmp_path / "wd")
+    assert r.status == "budget_exceeded" and r.tests_passed is False
+
+
+@pytest.mark.parametrize("out,rc,hit", [
+    (json.dumps({"subtype": "success", "result": "pass --max-budget-usd 2 to cap spend"}), 0, False),
+    (json.dumps({"subtype": "success", "is_error": False, "result": "budget exceeded handling added"}), 0, False),
+    (json.dumps({"subtype": "error_during_execution", "is_error": True, "result": "max-budget-usd"}), 1, False),
+    (json.dumps({"subtype": "error_max_budget_usd", "is_error": True}), 1, True),
+    (json.dumps([{"type": "system"}, {"type": "result", "subtype": "error_max_budget_usd", "is_error": True}]), 1, True),
+    ("Error: Exceeded USD budget (2)", 1, False),                 # no keyword match, no structure
+    ("Error: max budget reached", 1, True),                      # stderr text fallback: failed CLI, output not JSON
+    ("Error: max budget reached", 0, False),
+    ("", 1, False)])
+def test_budget_hit_cases(out, rc, hit):
+    assert ex._budget_hit(out, rc) is hit
+
+
+def test_tampered_files_are_sanitised_in_the_public_report(world):
+    leaked = "/Users/someone/secret-project/" + "conftest.py"
+    raw = ex.RunResult("baseline", 1, tampered=True, tampered_files=[leaked, "ok/conftest.py"])
+    rep = ex.build_report_dict("d", "f", "abc", 1, [raw])
+    dumped = json.dumps(rep)
+    assert "someone" not in dumped and "ok/conftest.py" in dumped
+    assert raw.tampered_files[0] == leaked                       # the run object itself is untouched

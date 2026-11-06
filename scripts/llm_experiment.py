@@ -238,6 +238,8 @@ REVIEWER_NOTE = ("The reviewer is the configured `reviewer` role (not Claude), s
 def _clean_run(r):
     d = asdict(r)
     d["error"] = sanitize(d["error"]) if d["error"] else d["error"]
+    if d.get("tampered_files"):
+        d["tampered_files"] = [sanitize(f, 200) for f in d["tampered_files"]]
     return d
 
 
@@ -799,8 +801,23 @@ def check_fixture_fails_before(fixture, runner, workdir=None):
             shutil.rmtree(base, ignore_errors=True)
 
 
-def _budget_hit(text):
-    return bool(re.search(r"max.?budget|budget.{0,20}(exceeded|reached)|error_max_budget", text or "", re.IGNORECASE))
+_BUDGET_TEXT_RE = re.compile(r"max.?budget|budget.{0,20}(exceeded|reached)|error_max_budget", re.IGNORECASE)
+
+
+def _budget_hit(out, rc=0):
+    """Did the CLI stop on the --max-budget-usd cap? Decided from the structured result object (`subtype`, e.g.
+    error_max_budget_usd, on an error result), never from the model's answer text. Only when stdout was not JSON at all
+    (the runner then hands over stderr) and the CLI failed is the text searched."""
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return bool(rc) and bool(_BUDGET_TEXT_RE.search(out or ""))
+    if isinstance(data, list):   # stream-style output: the last result object decides
+        data = next((d for d in reversed(data) if isinstance(d, dict) and d.get("type") == "result"), None)
+    if not isinstance(data, dict):
+        return False
+    subtype = str(data.get("subtype") or "")
+    return bool(subtype) and "budget" in subtype.lower() and (bool(data.get("is_error")) or subtype.startswith("error"))
 
 
 def _num_turns(out):
@@ -831,7 +848,7 @@ def run_one(fixture, variant, repeat, runner, workdir):
         text, usage, is_error = parse_json_output(out)
         _apply_usage(res, usage)
         res.turns = _num_turns(out)
-        if _budget_hit(out):
+        if _budget_hit(out, rc):
             res.status, res.tests_passed = "budget_exceeded", False
             return res
         if rc != 0 or is_error:
