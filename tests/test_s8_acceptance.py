@@ -253,9 +253,16 @@ async def test_c5_rate_limit_11th_is_429_per_actor(api):
 
 
 @pytest.mark.asyncio
-async def test_c5_rate_limit_holds_under_concurrency(api):
+async def test_c5_rate_limit_holds_under_concurrency(api, monkeypatch):
     """12 simultaneous requests from one actor: exactly 10 get in, 2 are refused, and only 10 rows exist."""
     import asyncio
+    real_count = api.db.count_commands_last_hour
+
+    async def slow_count(actor):   # widens any check-then-insert window; unused by the atomic path
+        n = await real_count(actor)
+        await asyncio.sleep(0.05)
+        return n
+    monkeypatch.setattr(api.db, "count_commands_last_hour", slow_count)
     async with _client(api) as c:
         rs = await asyncio.gather(*[_post(c, _intent("plan", actor="burst")) for _ in range(12)])
         rows = (await c.get("/scrum/responses?kind=command", headers=H)).json()

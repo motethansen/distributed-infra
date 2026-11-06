@@ -115,3 +115,46 @@ async def test_pause_changes_are_audited_and_audit_is_append_only(rq):
         rq.execute("UPDATE scrum_audit SET actor='x'")
     with pytest.raises(sqlite3.DatabaseError):
         rq.execute("DELETE FROM scrum_audit")
+
+
+@pytest.mark.asyncio
+async def test_http_rate_limit_atomic_on_rqlite_backend(rq, tmp_path, monkeypatch):
+    """The same 12-at-once burst through the real routes with main.db swapped to the rqlite backend (fake layer)."""
+    import httpx
+    monkeypatch.setenv("QUEUE_DB_PATH", str(tmp_path / "q.db")); monkeypatch.setenv("SECRET_KEY", "k")
+    import importlib
+    import orchestrator.main as m
+    importlib.reload(m)
+    monkeypatch.setattr(m, "db", r)
+    real_count = r.count_commands_last_hour
+
+    async def slow_count(actor):
+        n = await real_count(actor)
+        await asyncio.sleep(0.05)
+        return n
+    monkeypatch.setattr(r, "count_commands_last_hour", slow_count)
+    body = {"kind": "command", "verb": "plan", "project": "demo", "sprint": "2", "story_id": "S-8",
+            "plan_digest": None, "evidence": None, "actor": "burst"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://t") as c:
+        rs = await asyncio.gather(*[c.post("/scrum/responses", json=body, headers={"X-Secret-Key": "k", "Idempotency-Key": f"h{i}"})
+                                    for i in range(12)])
+        assert sorted(x.status_code for x in rs) == [201] * 10 + [429] * 2
+        # lifecycle over HTTP on this backend, 409 (not 422) for a bad target state
+        rid = next(x.json()["id"] for x in rs if x.status_code == 201)
+        h = {"X-Secret-Key": "k", "X-Actor": "w1"}
+        assert (await c.post(f"/scrum/responses/{rid}/consume", headers=h)).status_code == 200
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "queued"}, headers=h)).status_code == 409
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "done", "summary": "ok"}, headers=h)).status_code == 200
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "failed"}, headers=h)).status_code == 409
+    assert _audit(rq, rid)[-1] == (rid, "running", "done", "w1")
+
+
+@pytest.mark.asyncio
+async def test_claim_sql_itself_refuses_when_paused(rq):
+    """Backstop for a pause landing between the Python check and the claim: the UPDATE's own guard must refuse."""
+    from shared import desk_store as ds
+    rid = (await r.insert_command(_fields(), "g1", 10))["id"]
+    await r.set_pause(True, "michael")
+    cur = rq.execute(ds.CLAIM_COMMAND, ("2026-01-01T00:00:00Z", "w", rid))
+    assert cur.rowcount == 0
+    assert rq.execute("SELECT status FROM scrum_responses WHERE id=?", (rid,)).fetchone()[0] == "queued"
