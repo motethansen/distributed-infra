@@ -110,6 +110,10 @@ SET_PAUSE = "UPDATE desk_pause SET paused=?, set_by=?, set_at=?, reason=? WHERE 
 GET_PAUSE = "SELECT paused, set_by, set_at, reason FROM desk_pause WHERE id=1"
 COUNT_COMMANDS = "SELECT COUNT(*) AS n FROM scrum_responses WHERE " + KIND + "='command' AND actor=? AND created_at>=?"
 LIST_COMMANDS = ("SELECT " + COMMAND_PUBLIC + " FROM scrum_responses WHERE " + KIND + "=? ORDER BY id DESC LIMIT ?")
+# The worker (S-9) needs the typed fields to run a command; COMMAND_PUBLIC (the board's view) leaves them out.
+WORKER_COMMAND_COLS = "id, status, tier, actor, created_at, verb, project, sprint, story_id, evidence"
+LIST_WORKER_COMMANDS = ("SELECT " + WORKER_COMMAND_COLS + " FROM scrum_responses WHERE " + KIND + "='command' AND status=? "
+                        "ORDER BY id ASC LIMIT ?")
 KIND_STATUS = "SELECT " + KIND + " AS kind, status FROM scrum_responses WHERE id=?"
 
 

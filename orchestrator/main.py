@@ -221,9 +221,9 @@ async def worker_heartbeat(body: dict = Body(...), x_secret_key: str = Header(de
 
 # ── Task CRUD ────────────────────────────────────────────────────────────────
 
-async def _month_opus_cost() -> float:
-    """This calendar month's Opus spend (the Claude CLI's cost estimate), from the task rows."""
-    start = datetime.utcnow().strftime("%Y-%m-01")
+async def _month_opus_cost(day_only: bool = False) -> float:
+    """This calendar month's (or, with day_only, today's) Opus spend (the Claude CLI's cost estimate), from the task rows."""
+    start = datetime.utcnow().strftime("%Y-%m-%d" if day_only else "%Y-%m-01")
     rows = await db.usage_rows(since=start)
     return sum(r.get("cost_usd") or 0.0 for r in rows if scrum_roles.is_opus(r.get("model")))
 
@@ -567,6 +567,15 @@ async def scrum_response_result(response_id: int, raw: dict = Body(...), x_secre
     return {"id": response_id, "status": body.status}
 
 
+@app.get("/scrum/desk/commands", dependencies=[Depends(_require_secret_key)])
+async def scrum_desk_commands(status: str = "queued", x_secret_key: str = Header(default="")):
+    """The typed fields of command rows in one status (oldest first), for the desk worker. Claim with
+    POST /scrum/responses/{id}/consume, report with POST /scrum/responses/{id}/result."""
+    if status not in ("queued", "running"):
+        raise HTTPException(status_code=422, detail="status must be queued or running")
+    return await db.list_worker_commands(status)
+
+
 @app.get("/scrum/desk/pause", dependencies=[Depends(_require_secret_key)])
 async def scrum_desk_pause_get(x_secret_key: str = Header(default="")):
     return await db.get_pause()
@@ -641,7 +650,8 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
     try:
         cap = (scrum_roles.load_policy().get("roles") or {}).get("product_owner", {}).get("monthly_cost_cap_usd")
         if cap:
-            opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap)}
+            opus = {"spent": round(await _month_opus_cost(), 2), "cap": float(cap),
+                    "day_spent": round(await _month_opus_cost(day_only=True), 2)}
     except Exception:                                    # the digest is advice; it must never break the board
         opus = None
     digest = scrum_digest.build(projects, opus=opus)

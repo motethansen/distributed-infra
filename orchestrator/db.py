@@ -521,6 +521,15 @@ async def list_commands(kind: str = "command", limit: int = 200) -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+async def list_worker_commands(status: str, limit: int = 50) -> list[dict]:
+    """Typed command rows in `status` (oldest first) for the desk worker."""
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(ds.LIST_WORKER_COMMANDS, (status, limit))
+        return [dict(r) for r in await cur.fetchall()]
+
+
 # ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──
 
 async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None:
