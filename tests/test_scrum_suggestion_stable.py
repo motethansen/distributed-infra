@@ -220,7 +220,7 @@ class Stubborn:
 
 
 async def drain():
-    await asyncio.gather(*list(ss._STRAGGLERS), return_exceptions=True)
+    await asyncio.gather(*list(ss._STRAGGLERS.values()), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -300,3 +300,112 @@ async def test_fallback_rows_are_marked_stale_with_verified_at_and_fresh_rows_ar
     d3 = digest()
     await ss.attach_cached(d3, store)
     assert all("stale" not in e["suggestion"] and "verified_at" not in e["suggestion"] for e in all_entries(d3))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [True, False])
+async def test_cancelling_the_parent_cancels_and_reaps_children(batch, monkeypatch, recwarn):
+    d = digest()
+    store = Stubborn(rows_for(d), batch)
+    store.hang = True
+    parent = asyncio.ensure_future(ss.attach_cached(d, store))
+    await asyncio.sleep(0.05)
+    parent.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parent
+    assert ss._STRAGGLERS and all(t.cancelling() for t in ss._STRAGGLERS.values())
+    await drain()
+    await asyncio.sleep(0)
+    assert not ss._STRAGGLERS                             # every child ran its reaper
+
+
+@pytest.mark.asyncio
+async def test_cancelled_parent_retrieves_a_child_exception(monkeypatch, caplog):
+    class Boom:
+        async def get_scrum_suggestion(self, k, h):
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                raise RuntimeError("late failure")
+    parent = asyncio.ensure_future(ss.attach_cached(digest(), Boom()))
+    await asyncio.sleep(0.05)
+    parent.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parent
+    await drain()
+    await asyncio.sleep(0)
+    import gc
+    gc.collect()
+    assert "never retrieved" not in caplog.text and not ss._STRAGGLERS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [True, False])
+async def test_result_finished_after_the_deadline_is_ignored_even_if_the_loop_was_late(batch, monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.05)
+    d1 = digest()
+    rows = rows_for(d1)
+
+    class Blocking:
+        def __init__(self):
+            if batch:
+                self.get_scrum_suggestions = self._batch
+
+        async def get_scrum_suggestion(self, k, h):
+            time.sleep(0.2)                               # blocks the loop: finishes after the deadline, before wait returns
+            return rows.get((k, h))
+
+        async def _batch(self, pairs):
+            time.sleep(0.2)
+            return {p: rows[p] for p in pairs if p in rows}
+
+    unresolved: set[str] = set()
+    await ss.attach_cached(d1, Blocking(), unresolved=unresolved)
+    assert all(e["suggestion"] is None for e in all_entries(d1)) and not ss._KNOWN
+    assert unresolved == {e["item_key"] for e in all_entries(d1)}
+
+
+@pytest.mark.asyncio
+async def test_cap_stops_new_lookups_and_falls_back_like_a_timeout(monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.2)
+    d1 = digest()
+    store = Stubborn(rows_for(d1), False)
+    await ss.attach_cached(d1, store)                     # seeds last-known rows
+    monkeypatch.setattr(ss, "MAX_OUTSTANDING", 2)
+    started = []
+    orig = store.get_scrum_suggestion
+
+    async def counting(k, h):
+        started.append((k, h))
+        return await orig(k, h)
+    store.get_scrum_suggestion = counting
+    store.hang = True
+    d2, unresolved = digest(), set()
+    await ss.attach_cached(d2, store, unresolved=unresolved)
+    n = len(all_entries(d2))
+    assert n > 2 and len(started) == 2 and len(ss._STRAGGLERS) <= 2
+    assert all(e["suggestion"]["stale"] for e in all_entries(d2))     # skipped and timed out alike: stale fallback
+    await drain()
+
+
+@pytest.mark.asyncio
+async def test_no_second_lookup_for_a_key_already_outstanding(monkeypatch):
+    monkeypatch.setattr(ss, "LOOKUP_DEADLINE_SECS", 0.1)
+    d1 = digest()
+    store = Stubborn(rows_for(d1), False)
+    store.hang = True
+    started = []
+    orig = store.get_scrum_suggestion
+
+    async def counting(k, h):
+        started.append((k, h))
+        return await orig(k, h)
+    store.get_scrum_suggestion = counting
+    await ss.attach_cached(d1, store)
+    first = len(started)
+    assert first and len(ss._STRAGGLERS) == first
+    d2, unresolved = digest(), set()
+    await ss.attach_cached(d2, store, unresolved=unresolved)
+    assert len(started) == first                          # the stragglers are still running: nothing new started
+    assert unresolved == {e["item_key"] for e in all_entries(d2)}
+    await drain()

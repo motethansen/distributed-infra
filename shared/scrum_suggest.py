@@ -25,6 +25,7 @@ MAX_PARALLEL = 3              # model calls in flight at once
 LOOKUP_DEADLINE_SECS = 4.0    # hard bound on all cache lookups together: slow storage never makes a slow board
 SLOW_LOOKUP_LOG_SECS = 1.0    # a lookup slower than this (finished or not) logs one line
 KNOWN_MAX = 2000              # last-known-good rows kept in this process
+MAX_OUTSTANDING = 64          # lookups still running past their deadline; at the cap new ones are not started
 CALL_TIMEOUT_SECS = 12.0
 MODEL = "sonnet"
 
@@ -90,7 +91,7 @@ def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
 
 
 _KNOWN: "OrderedDict[tuple[str, str], dict]" = OrderedDict()    # {"row", "verified_at"} per (item_key, evidence_hash), LRU
-_STRAGGLERS: set[asyncio.Task] = set()                          # lookups past the deadline: cancelled, never awaited, never published
+_STRAGGLERS: dict[tuple, asyncio.Task] = {}                     # lookup key -> task past the deadline: cancelled, never awaited, never published
 
 
 def _now_iso() -> str:
@@ -119,7 +120,9 @@ def _known(item_key: str, ev_hash: str) -> dict | None:
 
 
 def _reap(task: asyncio.Task) -> None:
-    _STRAGGLERS.discard(task)
+    for key, t in list(_STRAGGLERS.items()):
+        if t is task:
+            del _STRAGGLERS[key]
     if not task.cancelled():
         task.exception()                                  # retrieve it so a late failure is not logged as never-retrieved
 
@@ -148,25 +151,43 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
         entries[i]["suggestion"] = _public(row) if row else None
         pending.discard(i)
 
-    async def batch() -> dict:
-        pairs = list(dict.fromkeys((e["item_key"], h) for e, h in zip(entries, hashes)))
-        return await store.get_scrum_suggestions(pairs) if pairs else {}
-
-    async def single(i: int) -> dict | None:
-        return await store.get_scrum_suggestion(entries[i]["item_key"], hashes[i])
+    async def timed(coro: Awaitable) -> tuple[Any, float]:
+        result = await coro
+        return result, time.monotonic()                   # when it really finished, however late the loop got back to us
 
     started = time.monotonic()
+    deadline = started + LOOKUP_DEADLINE_SECS
     reason = None
     failed = 0
+    jobs: dict[asyncio.Task, int | None] = {}
+    keys: dict[asyncio.Task, tuple] = {}
     if hasattr(store, "get_scrum_suggestions"):
-        jobs = {asyncio.ensure_future(batch()): None}
+        pairs = list(dict.fromkeys((e["item_key"], h) for e, h in zip(entries, hashes)))
+        todo = [(("batch", tuple(pairs)), None, lambda: store.get_scrum_suggestions(pairs))] if pairs else []
     else:
-        jobs = {asyncio.ensure_future(single(i)): i for i in sorted(pending)}
-    done, late = await asyncio.wait(jobs, timeout=LOOKUP_DEADLINE_SECS) if jobs else (set(), set())
-    for t in late:                                        # past the deadline: cancel, do not wait, never read the result
-        _STRAGGLERS.add(t)
-        t.add_done_callback(_reap)
-        t.cancel()
+        todo = [((entries[i]["item_key"], hashes[i]), i, lambda i=i: store.get_scrum_suggestion(entries[i]["item_key"], hashes[i]))
+                for i in sorted(pending)]
+    skipped = 0
+    for key, i, make in todo:
+        if key in _STRAGGLERS or len(_STRAGGLERS) + len(jobs) >= MAX_OUTSTANDING:
+            skipped += 1                                  # one already outstanding, or at the cap: treated as a timeout
+            continue
+        t = asyncio.ensure_future(timed(make()))
+        jobs[t], keys[t] = i, key
+    if skipped:
+        reason = "skipped (lookups still outstanding)"
+    late: set[asyncio.Task] = set()
+    try:
+        done, _ = await asyncio.wait(jobs, timeout=LOOKUP_DEADLINE_SECS) if jobs else (set(), set())
+    finally:                                              # also on cancellation: nothing is left running unreaped
+        for t in jobs:
+            if t.done():
+                _reap(t)
+            else:                                         # unfinished: cancel, do not wait, never read the result
+                late.add(t)
+                _STRAGGLERS[keys[t]] = t
+                t.add_done_callback(_reap)
+                t.cancel()
     if late:
         reason = "passed the deadline"
     verified_at = _now_iso()
@@ -177,12 +198,15 @@ async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str]
             failed += 1
             if i is None and reason is None:
                 reason = f"failed ({type(exc).__name__}: {exc})" if exc else "was cancelled"
+            continue
+        result, finished = t.result()
+        if finished > deadline:                           # finished after the deadline: too late, same as a timeout
+            reason = "passed the deadline"
         elif i is None:
-            rows = t.result()
             for k in list(pending):
-                settle(k, rows.get((entries[k]["item_key"], hashes[k])), verified_at)
+                settle(k, result.get((entries[k]["item_key"], hashes[k])), verified_at)
         else:
-            settle(i, t.result(), verified_at)
+            settle(i, result, verified_at)
     if failed and reason is None:
         reason = f"failed for {failed} items"
     took = time.monotonic() - started
