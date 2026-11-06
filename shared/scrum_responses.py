@@ -5,6 +5,15 @@ are not responses. A response whose item_key is no longer on the board is listed
 Responses are UNTRUSTED text: they are cleaned before display and NEVER enter an agent prompt (agents here run with tools);
 `structure_summary` hands a narrating agent only keys, ids and counts. Delivery is at-least-once: a crash between display and
 consume shows the response again; the endpoint's claim-once rule (409) prevents two successful consumes.
+
+Delivery is AT-LEAST-ONCE, and "consumed" means "shown to the owner at a terminal", NOT "acted on": nothing here executes,
+applies or acknowledges a response; it only stops showing it again.
+A confirm is STALE when its suggestion_id differs from the item's current suggestion id on the board digest (entry `suggestion.id`;
+an entry with no suggestion is unknown, not stale). A stale confirm is shown and labeled ("confirmed an older suggestion: ask
+again"), is never the effective answer, and is still consumed after display (it was shown). A comment is never stale.
+Comments are shown in full (cleaned of control characters) up to MAX_COMMENT=4000, the server's own maximum. A comment longer
+than that is shown cut and LEFT PENDING (never consumed by the display step, with a note naming the id): the explicit
+`responses --consume <id>` is the owner's override once the rest has been read elsewhere.
 """
 from __future__ import annotations
 
@@ -13,6 +22,8 @@ import sys
 from typing import Any, Iterable
 
 MAX_TEXT = 500
+MAX_COMMENT = 4000  # the server rejects longer comments (422), so only a changed server can exceed it
+STALE_NOTE = "confirmed an older suggestion: ask again"
 ACTIONS = ("confirm", "comment")
 UNAVAILABLE = "responses unavailable"
 NOT_TTY = "output is not a terminal: nothing was consumed"
@@ -78,31 +89,59 @@ def fetch_pending(client: Any) -> tuple[list[dict], int, str | None]:
         return [], 0, UNAVAILABLE
 
 
+def current_suggestions(digest: dict) -> dict[str, str]:
+    """item_key -> the id of the suggestion the board currently offers for it. Items without a suggestion are absent (unknown)."""
+    out: dict[str, str] = {}
+    for sec in ("review_queue", "decisions", "adjustments"):
+        for e in digest.get(sec) or []:
+            sug = e.get("suggestion") if isinstance(e, dict) else None
+            if isinstance(sug, dict) and e.get("item_key") and sug.get("id"):
+                out.setdefault(e["item_key"], sug["id"])
+    return out
+
+
+def is_stale(row: dict, current: dict | None) -> bool:
+    """A confirm of a suggestion other than the item's current one. Unknown current suggestion, or a comment: never stale."""
+    cur = (current or {}).get(row.get("item_key"))
+    return row.get("action") == "confirm" and cur is not None and row.get("suggestion_id") != cur
+
+
+def is_cut(row: dict) -> bool:
+    """The comment is longer than the display cap, so what is shown is not all of it."""
+    return row.get("action") == "comment" and len(clean(row.get("comment") or "", 10**9)) > MAX_COMMENT
+
+
 def response_text(row: dict) -> str:
-    """The text that counts: the comment if there is one, otherwise the confirmed suggestion's text."""
-    return clean(row.get("comment") or "") or clean(row.get("suggestion_text") or "")
+    """The text that counts: the comment (in full up to MAX_COMMENT) if there is one, otherwise the confirmed suggestion's text."""
+    return clean(row.get("comment") or "", MAX_COMMENT) or clean(row.get("suggestion_text") or "")
 
 
-def effective(rows: Iterable[dict]) -> dict:
-    """Per item_key the answer that counts: the newest comment; with no comment, the newest confirm. Rows must be oldest first."""
+def effective(rows: Iterable[dict], current: dict | None = None) -> dict:
+    """Per item_key the answer that counts: the newest comment; with no comment, the newest non-stale confirm.
+    A stale confirm never wins (an item with only stale confirms has no effective answer). Rows must be oldest first."""
     out: dict[str, dict] = {}
     for r in rows:
+        if is_stale(r, current):
+            continue
         cur = out.get(r["item_key"])
         if cur is None or r["action"] == "comment" or cur["action"] != "comment":
             out[r["item_key"]] = r
     return out
 
 
-def format_line(row: dict, mark: bool = False) -> str:
+def format_line(row: dict, mark: bool = False, stale: bool = False) -> str:
     return (f"[{row.get('id')}] {clean(row.get('actor') or '?', 80)} @ {clean(row.get('created_at') or '?', 40)} "
-            f"({row.get('action')}): {response_text(row)}" + ("  <- effective answer" if mark else ""))
+            f"({row.get('action')}): {response_text(row)}" + ("  <- effective answer" if mark and not stale else "")
+            + (f"  [STALE: {STALE_NOTE}]" if stale else "")
+            + (f"  (comment longer than {MAX_COMMENT} characters: shown cut, left pending; use --consume {row.get('id')} after reading it elsewhere)"
+               if is_cut(row) else ""))
 
 
-def render(rows: Iterable[dict], item_keys: Iterable[str]) -> list[str]:
+def render(rows: Iterable[dict], item_keys: Iterable[str], current: dict | None = None) -> list[str]:
     """Every pending response grouped under its item, oldest first, the effective one marked; then item_missing."""
     keys = list(item_keys)
     rows = list(rows)
-    eff = effective(rows)
+    eff = effective(rows, current)
     by_key: dict[str, list[dict]] = {}
     missing: list[dict] = []
     for r in rows:
@@ -110,23 +149,23 @@ def render(rows: Iterable[dict], item_keys: Iterable[str]) -> list[str]:
     out: list[str] = []
     for k in keys:
         if by_key.get(k):
-            out += [f"{clean(k, 120)}:"] + [f"  {format_line(r, len(by_key[k]) > 1 and eff[k] is r)}" for r in by_key[k]]
+            out += [f"{clean(k, 120)}:"] + [f"  {format_line(r, len(by_key[k]) > 1 and eff.get(k) is r, is_stale(r, current))}" for r in by_key[k]]
     if missing:
-        out += ["item_missing:"] + [f"  {format_line(r, len([m for m in missing if m['item_key'] == r['item_key']]) > 1 and eff[r['item_key']] is r)}"
+        out += ["item_missing:"] + [f"  {format_line(r, len([m for m in missing if m['item_key'] == r['item_key']]) > 1 and eff.get(r['item_key']) is r, is_stale(r, current))}"
                                     f" (item_key {clean(r['item_key'], 120)})" for r in missing]
     return out
 
 
 def collect(client: Any, digest: dict) -> dict:
-    """Fetch and render. {'text': block or '', 'ids': ids the text shows, 'rows': shown rows}. Nothing is consumed here."""
+    """Fetch and render. {'text': block or '', 'ids': ids the text shows in full (a cut comment stays pending), 'rows': shown rows}. Nothing is consumed here."""
     rows, bad, err = fetch_pending(client)
     if err:
         return {"text": f"\n## Recorded responses\n\n({err})\n", "ids": [], "rows": []}
-    lines = render(rows, board_item_keys(digest))
+    lines = render(rows, board_item_keys(digest), current_suggestions(digest))
     if bad:
         lines.append(f"{bad} malformed response(s) skipped")
     text = ("\n## Recorded responses (pending)\n\n" + "\n".join(lines) + "\n") if lines else ""
-    return {"text": text, "ids": [r["id"] for r in rows], "rows": rows}
+    return {"text": text, "ids": [r["id"] for r in rows if not is_cut(r)], "rows": rows}
 
 
 def structure_summary(rows: Iterable[dict], item_keys: Iterable[str]) -> str:

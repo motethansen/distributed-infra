@@ -439,3 +439,69 @@ def test_an_unrenderable_pending_row_is_not_consumed_by_id(monkeypatch, capsys):
         with pytest.raises(SystemExit):
             _consume_cmd(monkeypatch, c, rid)
     assert not [x for x in c.calls if x[0] == "POST"]
+
+
+# --- Codex review fixes: stale confirms, long comments -------------------------------------------------------------------------
+SDIGEST = {**DIGEST, "review_queue": [{"item_key": "demo:DM-001", "suggestion": {"id": "sug-new"}}], "as_of": "2026-11-06"}
+
+
+def _confirm(i, sid, t="2026-11-06T01:00:00Z", key="demo:DM-001"):
+    return {"id": i, "kind": "response", "item_key": key, "actor": "michael", "created_at": t, "action": "confirm",
+            "suggestion_id": sid, "suggestion_text": f"text of {sid}", "comment": None}
+
+
+def _comment(i, text, t="2026-11-06T02:00:00Z", key="demo:DM-001"):
+    return {"id": i, "kind": "response", "item_key": key, "actor": "michael", "created_at": t, "action": "comment", "comment": text}
+
+
+def test_stale_confirm_is_labeled_and_not_the_effective_answer():
+    rows = [_confirm(1, "sug-old")]
+    assert sr.effective(rows, sr.current_suggestions(SDIGEST)) == {}
+    out = "\n".join(sr.render(rows, sr.board_item_keys(SDIGEST), sr.current_suggestions(SDIGEST)))
+    assert "STALE: confirmed an older suggestion: ask again" in out and "effective answer" not in out
+
+
+def test_stale_confirm_loses_to_current_confirm_and_is_still_consumed():
+    rows = [_confirm(1, "sug-new", "2026-11-06T01:00:00Z"), _confirm(2, "sug-old", "2026-11-06T02:00:00Z")]
+    cur = sr.current_suggestions(SDIGEST)
+    assert sr.effective(rows, cur)["demo:DM-001"]["id"] == 1  # the newer confirm is stale, so the older current one counts
+    lines = sr.render(rows, ["demo:DM-001"], cur)
+    assert "effective answer" in lines[1] and "STALE" not in lines[1] and "STALE" in lines[2] and "effective answer" not in lines[2]
+    c = FakeClient(rows=rows)
+    sr.show_and_consume(c, SDIGEST, "michael", emit=lambda *a: None)
+    assert c.consumed == {1, 2}
+
+
+def test_stale_confirm_never_beats_a_comment_and_comment_is_never_stale():
+    rows = [_comment(1, "mine", "2026-11-06T01:00:00Z"), _confirm(2, "sug-old", "2026-11-06T02:00:00Z")]
+    cur = sr.current_suggestions(SDIGEST)
+    assert sr.effective(rows, cur)["demo:DM-001"]["id"] == 1 and not sr.is_stale(rows[0], cur)
+
+
+def test_confirm_with_no_current_suggestion_is_unknown_not_stale():
+    cur = sr.current_suggestions(BOARD["digest"])  # no entry carries a suggestion
+    r = _confirm(1, "anything")
+    assert cur == {} and not sr.is_stale(r, cur)
+    assert sr.effective([r], cur)["demo:DM-001"] is r
+    assert "STALE" not in "\n".join(sr.render([r], ["demo:DM-001"], cur))
+
+
+def test_long_comment_is_shown_in_full_up_to_the_cap_and_consumed():
+    text = "a" * sr.MAX_COMMENT
+    c = FakeClient(rows=[_comment(1, text)])
+    out = []
+    sr.show_and_consume(c, SDIGEST, "michael", emit=out.append)
+    assert text in out[0] and "…" not in out[0] and "left pending" not in out[0] and c.consumed == {1}
+
+
+def test_comment_over_the_cap_is_shown_cut_and_left_pending():
+    c = FakeClient(rows=[_comment(1, "b" * (sr.MAX_COMMENT + 1)), _comment(2, "short", "2026-11-06T03:00:00Z")])
+    out = []
+    sr.show_and_consume(c, SDIGEST, "michael", emit=out.append)
+    assert "left pending; use --consume 1" in out[0] and "b" * sr.MAX_COMMENT in out[0]
+    assert c.consumed == {2}
+
+
+def test_mixed_fixture_still_lists_only_kind_response_with_the_fixture_client():
+    rows, bad, err = sr.fetch_pending(FakeClient())
+    assert err is None and [r["id"] for r in rows] == [1, 2, 3] and 4 not in sr.collect(FakeClient(), SDIGEST)["ids"]
