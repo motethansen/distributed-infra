@@ -360,7 +360,8 @@ async def scrum_usage(
 ):
     """Tasks, outcomes, agents/machines involved and token usage, grouped by agent, machine,
     project, sprint, task type or day. Usage covers fleet tasks only: it cannot see how much of a
-    subscription quota is left, and tasks before 2026-10-30 have an agent but no token counts."""
+    subscription quota is left, and tasks before 2026-10-30 have an agent but no token counts.
+    `coverage.percent` is null when there are no LLM tasks in the window."""
     _check_auth(x_secret_key)
     if group_by not in _GROUPS:
         raise HTTPException(status_code=422, detail=f"group_by must be one of {list(_GROUPS)}")
@@ -371,6 +372,8 @@ async def scrum_usage(
         "tasks": len(rows),
         "totals": (tracking.summarise(rows, "all") or [{}])[0],
         "groups": tracking.summarise(rows, group_by),
+        "coverage": tracking.coverage(rows, since),
+        "cost_note": tracking.COST_NOTE,
     }
 
 

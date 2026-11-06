@@ -116,12 +116,12 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
     for r in rows:
         g = groups.setdefault(keyfn(r), {"key": keyfn(r), "tasks": 0, "done": 0, "failed": 0, "needs_human": 0,
                                           "open": 0, "tokens_in": 0, "tokens_out": 0, "tokens_total": 0,
-                                          "cost_usd": 0.0, "with_usage": 0, "agents": set(), "machines": set(),
+                                          "tokens_cache_read": 0, "tokens_cache_write": 0, "cost_usd": 0.0, "with_usage": 0, "agents": set(), "machines": set(),
                                           "stories": set(), "_secs": 0.0, "_timed": 0})
         g["tasks"] += 1
         st = r.get("status")
         g[st if st in ("done", "failed", "needs_human") else "open"] += 1
-        for k in ("tokens_in", "tokens_out", "tokens_total"):
+        for k in ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write"):
             g[k] += r.get(k) or 0
         g["cost_usd"] += r.get("cost_usd") or 0.0
         g["with_usage"] += 1 if r.get("tokens_total") is not None or r.get("tokens_in") is not None else 0
@@ -149,3 +149,36 @@ def summarise(rows: list[dict[str, Any]], group_by: str) -> list[dict[str, Any]]
         g["agent_count"], g["machine_count"] = len(g["agents"]), len(g["machines"])
         out.append(g)
     return sorted(out, key=lambda g: (-g["tasks"], g["key"]))
+
+
+USAGE_NOT_BACKFILLED_BEFORE = "2026-10-30"
+COST_NOTE = ("cost_usd is an API-equivalent estimate (tokens x list price), not an invoice. If the fleet runs "
+             "on a subscription it is a comparison unit only; nothing was billed per token.")
+
+
+def is_llm_task(r: dict[str, Any]) -> bool:
+    """llm true, or (llm unknown and an agent is recorded other than 'none'). llm false / agent 'none' is not."""
+    llm = r.get("llm")
+    if llm is not None:
+        return bool(llm)
+    return bool(r.get("agent")) and r["agent"] != "none"
+
+
+def coverage(rows: list[dict[str, Any]], since: str | None = None) -> dict[str, Any]:
+    """How many LLM tasks carry token counts. percent is null when there are no LLM tasks (not 100).
+    Rows created before USAGE_NOT_BACKFILLED_BEFORE were never backfilled, so they only count as missing
+    when the window reaches back past that date (no `since`, or `since` earlier than it); a later `since`
+    already excludes them, and the guard below keeps a row without created_at honest either way."""
+    old_counts = since is None or since[:10] < USAGE_NOT_BACKFILLED_BEFORE
+    total = with_usage = 0
+    for r in rows:
+        if not is_llm_task(r):
+            continue
+        has = r.get("tokens_in") is not None
+        if not has and not old_counts and (r.get("created_at") or "9") < USAGE_NOT_BACKFILLED_BEFORE:
+            continue
+        total += 1
+        with_usage += 1 if has else 0
+    return {"llm_tasks": total, "llm_tasks_with_usage": with_usage,
+            "percent": round(100 * with_usage / total, 1) if total else None,
+            "not_backfilled_before": USAGE_NOT_BACKFILLED_BEFORE}
