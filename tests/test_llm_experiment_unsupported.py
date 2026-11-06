@@ -48,7 +48,7 @@ class Fake:
         self.n_tests += 1
         return 1 if self.n_tests == 1 else 0  # fails before the agent, passes after
 
-    def run_reviewer(self, diff, task_prompt, cwd):
+    def run_reviewer(self, diff, task_prompt):
         return "APPROVE"
 
     def cli_help(self):

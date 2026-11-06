@@ -76,7 +76,7 @@ def test_markdown_and_reports(tmp_path):
     rep = ex.build_report_dict("2026-11-06", "fx", "abc123", 3, runs, unsupported={"lean_low_effort": "no --effort"})
     md = ex.render_markdown(rep)
     for v in ("baseline", "lean"):
-        assert ex.format_command(ex.build_command(v, "<prompt>")) in md
+        assert ex.display_command(ex.build_command(v, "<prompt>"), "<prompt>", "claude") in md
     assert "unsupported: no --effort" in md and "SAFE" in md and "abc123" in md
     assert "dev_frontend and integrator roles were NOT tested" in md
     d = ex.report_dir(tmp_path, "2026-11-06")

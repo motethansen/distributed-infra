@@ -46,7 +46,7 @@ class Fake:
         self.calls.append(("tests", test_cmd, Path(cwd)))
         return self.tests.pop(0) if len(self.tests) > 1 else self.tests[0]
 
-    def run_reviewer(self, diff, task_prompt, cwd):
+    def run_reviewer(self, diff, task_prompt):
         return "APPROVE"
 
     def cli_help(self):
@@ -76,8 +76,8 @@ def test_run_one_ok_and_worktree_removed(fx, tmp_path):
     base = tmp_path / "wd"
     r = ex.run_one(f, "lean", 1, Fake(tests=[0]), base)
     assert (r.status, r.tests_passed, r.turns, r.cost_usd, r.reviewer_verdict) == ("ok", True, 7, 0.5, "APPROVE")
-    assert not [p for p in base.glob("wt-*")]
-    assert "wt-" not in git(fx[1], "worktree", "list").split("\n", 1)[-1]
+    assert not [p for p in base.iterdir()]
+    assert git(fx[1], "worktree", "list").count("\n") == 0   # the source repo never got a linked worktree
 
 
 def test_run_one_budget_failover_error(fx, tmp_path):
@@ -232,18 +232,18 @@ def test_each_run_gets_a_fresh_absolute_worktree(fx, tmp_path, monkeypatch):
     for p in paths:
         assert p.is_absolute() and "~" not in str(p)
         assert str(p).startswith(str(tmp_path))
-    assert not list((tmp_path / "wd").glob("wt-*"))  # removed afterwards
+    assert not list((tmp_path / "wd").iterdir())  # removed afterwards
 
 
-def test_make_worktree_expands_user_and_is_absolute(fx, tmp_path, monkeypatch):
+def test_make_snapshot_repo_expands_user_and_is_absolute(fx, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     d, repo = fx
-    wt = ex.make_worktree(repo, git(repo, "rev-parse", "HEAD"), "~/base")
+    sb = ex.make_snapshot_repo(repo, git(repo, "rev-parse", "HEAD"), "~/base")
     try:
-        assert wt.is_absolute() and "~" not in str(wt) and (wt / "a.txt").is_file()
-        assert wt.parent == tmp_path / "base"
+        assert sb.path.is_absolute() and "~" not in str(sb.path) and (sb.path / "a.txt").is_file()
+        assert sb.path.parent == tmp_path / "base"
     finally:
-        ex.remove_worktree(repo, wt)
+        ex.remove_sandbox(sb)
 
 
 def test_cli_without_effort_marks_low_effort_unsupported_and_still_runs_others(fx, tmp_path):
