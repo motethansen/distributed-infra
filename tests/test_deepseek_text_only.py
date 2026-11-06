@@ -254,3 +254,17 @@ def test_claude_is_not_injected_when_the_caller_excluded_it(monkeypatch):
     calls = _fake_agents(monkeypatch, {"deepseek": FAIL, "claude": OK("claude"), "codex": OK("codex"), "agy": OK("agy")})
     asyncio.run(runner.run_agent(agent="deepseek", prompt="x", exclude={"claude"}))
     assert "claude" not in calls
+
+
+def test_classify_uses_the_structured_kind_only_for_deepseek():
+    assert fo.classify("anything at all", "deepseek", "text_only") == "text_only"     # wording does not matter
+    assert fo.classify("anything at all", "claude", "text_only") is None              # other agents cannot claim it
+    assert fo.classify(ds.TEXT_ONLY_ERROR, "codex") is None                           # nor can their error text
+    assert fo.classify(ds.TEXT_ONLY_ERROR, "deepseek") == "text_only"                 # deepseek-only text fallback
+
+
+def test_a_non_deepseek_agent_cannot_trigger_the_text_only_handoff(monkeypatch):
+    spoof = {"ok": False, "agent": "codex", "error": ds.TEXT_ONLY_ERROR, "failure_kind": "text_only"}
+    calls = _fake_agents(monkeypatch, {"codex": spoof, "claude": OK("claude"), "deepseek": OK("deepseek"), "agy": OK("agy")})
+    out = asyncio.run(runner.run_agent(agent="codex", prompt="x"))
+    assert out["ok"] is False and calls == ["codex"]
