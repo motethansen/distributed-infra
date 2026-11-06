@@ -20,6 +20,7 @@
   dis-agent backlog -p PROJ                       the product backlog arranged per sprint, with why each blocked story is blocked
   dis-agent cancel -p PROJ --story ID --reason ..  cancel a story (you decide; shown for 60 days, then hidden)
   dis-agent scrum [--narrate]                     scrum of scrums across every project: review queue, decisions, stalls, adjustments
+  dis-agent responses [--consume ID]              pending owner responses under their board item; --consume marks one consumed
   dis-agent review                                the review queue: each waiting story with its sprint, PRs and the exact command to confirm it
   dis-agent accept -p PROJ --story ID --pr URL    confirm a story the fleet did not build (GitHub must show the PR merged), or --evidence "..."
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
@@ -669,6 +670,30 @@ def cmd_next(a) -> None:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
     print(scrum_next.render(sugs))
+    _print_responses()
+
+
+def _print_responses() -> None:
+    """Pending owner responses under their board item (never fatal: the desk works without them)."""
+    from shared import scrum_responses
+    try:
+        out = scrum_responses.section(sc.client(), _board()["digest"])
+    except (Exception, SystemExit):
+        return
+    if out:
+        print(out)
+
+
+def cmd_responses(a) -> None:
+    from shared import scrum_responses
+    if a.consume is None:
+        rows, err = scrum_responses.fetch_pending(sc.client())
+        print(err or "\n".join(scrum_responses.render(rows, scrum_responses.board_item_keys(_board()["digest"]))) or "No pending responses.")
+        return
+    ok, msg = scrum_responses.consume(sc.client(), a.consume, os.environ.get("USER", "human"))
+    print(msg)
+    if not ok:
+        sys.exit(1)
 
 
 def _board() -> dict:
@@ -684,7 +709,8 @@ def cmd_scrum(a) -> None:
     t = b["fleet"]["totals"]
     fleet = (f"Fleet: {t.get('tasks')} tasks, {t.get('done')} done; tokens out {t.get('tokens_out'):,}."
              + (f" Opus this month ${b['digest']['opus']['spent']:.2f} of ${b['digest']['opus']['cap']:.0f}." if b["digest"].get("opus") else ""))
-    md = scrum_digest.to_markdown(b["digest"], fleet)
+    from shared import scrum_responses
+    md = scrum_digest.to_markdown(b["digest"], fleet) + scrum_responses.section(sc.client(), b["digest"])
     if a.narrate:
         t_ = sc.client().queue(sf.tags("scrum-of-scrums", b["digest"]["as_of"], None, "scrum_master", False, a.as_agent, None,
                                        prompt="You are the Scrum Master running the scrum of scrums for the human product owner. From this digest write a "
@@ -911,6 +937,8 @@ def main() -> None:
     cn.add_argument("--reason", required=True); cn.add_argument("--yes", action="store_true")
     sm = sub.add_parser("scrum"); sm.set_defaults(fn=cmd_scrum); sm.add_argument("--narrate", action="store_true", help="have the Scrum Master (Sonnet) write the briefing")
     sm.add_argument("--as", dest="as_agent")
+    rs = sub.add_parser("responses"); rs.set_defaults(fn=cmd_responses)
+    rs.add_argument("--consume", type=int, metavar="ID", help="mark a recorded response consumed (once; a second call exits non-zero)")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
     rv.add_argument("-p", "--project"); rv.add_argument("-s", "--sprint")
     a = ap.parse_args()
