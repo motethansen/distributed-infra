@@ -9,7 +9,8 @@ from typing import Any
 
 import aiosqlite
 
-from shared import tracking
+from shared import desk_store as ds, tracking
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
 from shared.models import Task, TaskStatus
 
 DB_PATH = os.getenv("QUEUE_DB_PATH", "./data/queue.db")
@@ -75,7 +76,7 @@ SCRUM_SUGGESTIONS_DDL = [
 ]
 _SUG_COLS = "id, text, generated_at, model"
 _RESP_PUBLIC = ("id, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, "
-                "actor, created_at, status, consumed_at, consumed_by")
+                "actor, created_at, status, consumed_at, consumed_by, COALESCE(kind, 'response') AS kind")
 _INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, section, action, suggestion_id, "
                 "suggestion_text, comment, actor, created_at, status, idempotency_key) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?)")
@@ -138,10 +139,19 @@ _MIGRATED: set[str] = set()   # db paths whose tracking columns are known to exi
 
 async def _ensure_schema(db: aiosqlite.Connection) -> None:
     await db.execute(CREATE_TABLE)
-    for stmt in SCRUM_RESPONSES_DDL + SCRUM_SUGGESTIONS_DDL:
+    for stmt in SCRUM_RESPONSES_DDL + SCRUM_SUGGESTIONS_DDL + ds.DESK_DDL:
         await db.execute(stmt)
     path = _db_path()
     if path not in _MIGRATED:
+        cur = await db.execute("PRAGMA table_info(scrum_responses)")
+        have_resp = {r[1] for r in await cur.fetchall()}
+        for col, typ in ds.DESK_COLUMNS.items():
+            if col not in have_resp:
+                try:
+                    await db.execute(f"ALTER TABLE scrum_responses ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc):
+                        raise
         cur = await db.execute("PRAGMA table_info(tasks)")
         have = {r[1] for r in await cur.fetchall()}
         for col, typ in tracking.TRACK_COLUMNS.items():
@@ -160,6 +170,8 @@ async def _ensure_schema(db: aiosqlite.Connection) -> None:
                              f"AND json_valid(payload) AND json_extract(payload,'$.{col}') IS NOT NULL")
         await db.execute("UPDATE tasks SET finished_at=updated_at WHERE finished_at IS NULL "
                          "AND status IN ('done','failed','needs_human')")
+        for stmt in ds.DESK_INDEX_DDL:
+            await db.execute(stmt)
         _MIGRATED.add(path)
     await db.commit()
 
@@ -370,6 +382,7 @@ async def insert_scrum_response(fields: dict, idempotency_key: str | None = None
                 return _replay_or_conflict(dict(row), fields)
         created_at = _utc_now_iso()
         cur = await db.execute(_INSERT_RESP, _resp_params(fields, created_at, idempotency_key))
+        await db.execute(ds.AUDIT_CREATE, ("recorded", fields["actor"], created_at))
         await db.commit()
         return {"id": cur.lastrowid, "created_at": created_at, "status": "recorded"}
 
@@ -386,18 +399,124 @@ async def list_scrum_responses(status: str | None = None, project: str | None = 
 
 
 async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
-    """'ok' | 'not_found' | 'already_consumed'. One conditional UPDATE, so only one caller wins."""
+    """'ok' | 'not_found' | 'already_consumed'. One conditional UPDATE, so only one caller wins.
+    A command row is claimed queued->running instead, and raises DeskPaused while the desk is paused."""
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await _ensure_schema(db)
-        cur = await db.execute(
-            "UPDATE scrum_responses SET status='consumed', consumed_at=?, consumed_by=? WHERE id=? AND status='recorded'",
-            (_utc_now_iso(), consumed_by, response_id))
+        cur = await db.execute(ds.KIND_STATUS, (response_id,))
+        found = await cur.fetchone()
+        if found is None:
+            return "not_found"
+        now = _utc_now_iso()
+        if found["kind"] == "command":
+            cur = await db.execute(ds.GET_PAUSE)
+            pause = await cur.fetchone()
+            if pause and pause["paused"]:
+                raise DeskPaused("desk paused")
+            cur = await db.execute(ds.CLAIM_COMMAND, (now, consumed_by, response_id))
+            await db.execute(ds.AUDIT_IF_CHANGED, (response_id, "queued", "running", consumed_by, now))
+        else:
+            cur = await db.execute(
+                "UPDATE scrum_responses SET status='consumed', consumed_at=?, consumed_by=? WHERE id=? AND status='recorded'",
+                (now, consumed_by, response_id))
+            await db.execute(ds.AUDIT_IF_CHANGED, (response_id, "recorded", "consumed", consumed_by, now))
         await db.commit()
         if cur.rowcount > 0:
             return "ok"
-        cur = await db.execute("SELECT 1 FROM scrum_responses WHERE id=?", (response_id,))
-        return "already_consumed" if await cur.fetchone() else "not_found"
+        cur = await db.execute(ds.GET_PAUSE)   # a pause that landed between the check and the claim
+        pause = await cur.fetchone()
+        if found["kind"] == "command" and found["status"] == "queued" and pause and pause["paused"]:
+            raise DeskPaused("desk paused")
+        return "already_consumed"
+
+
+# ── Desk commands (kind='command' rows in scrum_responses) ───────────────────
+
+async def insert_command(fields: dict, idempotency_key: str | None = None, rate_limit: int | None = None) -> dict:
+    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409).
+    With rate_limit, the count and the insert are one statement; DeskRateLimited (429) when the actor is at the limit."""
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        if idempotency_key is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_IDEM_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            cur = await db.execute(ds.COMMAND_IDEM_SELECT, (idempotency_key, cutoff))
+            row = await cur.fetchone()
+            if row:
+                return ds.command_replay_or_conflict(dict(row), fields)
+        created_at = _utc_now_iso()
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ds.COMMAND_RATE_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        cur = await db.execute(ds.INSERT_COMMAND_LIMITED,
+                               ds.limited_command_params(fields, created_at, idempotency_key, cutoff, rate_limit))
+        inserted, row_id = cur.rowcount, cur.lastrowid
+        await db.execute(ds.AUDIT_CREATE_IF_INSERTED, ("queued", fields["actor"], created_at))
+        await db.commit()
+        if inserted < 1:
+            if idempotency_key is not None:   # lost the race on the unique key: replay the winner, even at the limit
+                cur = await db.execute(ds.COMMAND_IDEM_LOOKUP, (idempotency_key,))
+                row = await cur.fetchone()
+                if row:
+                    return ds.command_replay_or_conflict(dict(row), fields)
+            raise DeskRateLimited("rate limited")
+        return {"id": row_id, "created_at": created_at, "status": "queued"}
+
+
+async def transition_result(response_id: int, status: str, summary: str, actor: str = "unknown") -> str:
+    """running -> done|failed, once. 'ok' | 'not_found'; DeskConflict (409) from any other state; ValueError on bad input."""
+    summary = ds.check_result(status, summary)
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        now = _utc_now_iso()
+        cur = await db.execute(ds.RESULT_COMMAND, (status, status, summary, response_id))
+        await db.execute(ds.AUDIT_IF_CHANGED, (response_id, "running", status, actor, now))
+        await db.commit()
+        if cur.rowcount > 0:
+            return "ok"
+        cur = await db.execute(ds.KIND_STATUS, (response_id,))
+        found = await cur.fetchone()
+        if found is None:
+            return "not_found"
+        raise DeskConflict(f"cannot move {found['kind']} from {found['status']} to {status}")
+
+
+async def get_pause() -> dict:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(ds.GET_PAUSE)
+        row = await cur.fetchone()
+        return ds.pause_row(dict(row) if row else None)
+
+
+async def set_pause(paused: bool, by: str, reason: str | None = None) -> dict:
+    """Pause or resume the desk. A running command is left alone; only the next claim is refused."""
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        now = _utc_now_iso()
+        await db.execute(ds.AUDIT_PAUSE, ("paused" if paused else "active", by, now))
+        await db.execute(ds.SET_PAUSE, (1 if paused else 0, by, now, (reason or "")[:500] or None))
+        await db.commit()
+    return await get_pause()
+
+
+async def count_commands_last_hour(actor: str) -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ds.COMMAND_RATE_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(ds.COUNT_COMMANDS, (actor, cutoff))
+        return (await cur.fetchone())["n"]
+
+
+async def list_commands(kind: str = "command", limit: int = 200) -> list[dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        cur = await db.execute(ds.LIST_COMMANDS, (kind, limit))
+        return [dict(r) for r in await cur.fetchall()]
 
 
 # ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──

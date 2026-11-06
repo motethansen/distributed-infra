@@ -1,0 +1,198 @@
+"""S-8 desk commands through the rqlite backend, on the same fake rqlite HTTP layer over sqlite that
+tests/test_scrum_responses.py uses (monkeypatched `_post`). Covers lifecycle, atomic rate limit, pause, audit rows."""
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+
+import pytest
+import pytest_asyncio
+
+from orchestrator import db_rqlite as r
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
+
+
+def _fields(actor="michael", verb="plan"):
+    return {"verb": verb, "project": "demo", "sprint": "2", "story_id": "S-8", "plan_digest": None,
+            "evidence": None, "actor": actor, "tier": "T1"}
+
+
+def _install(path, monkeypatch):
+    conn = sqlite3.connect(path)
+
+    async def fake_post(_path, statements, params=None):
+        await asyncio.sleep(0)   # yield like a network call, so concurrent callers interleave
+        out = []
+        for sql, *args in statements:
+            cur = conn.execute(sql, args)
+            if cur.description:
+                out.append({"columns": [d[0] for d in cur.description], "values": [list(x) for x in cur.fetchall()]})
+            else:
+                out.append({"last_insert_id": cur.lastrowid, "rows_affected": cur.rowcount})
+        conn.commit()
+        return out
+
+    monkeypatch.setattr(r, "_post", fake_post)
+    return conn
+
+
+@pytest_asyncio.fixture
+async def rq(tmp_path, monkeypatch):
+    conn = _install(tmp_path / "rq.db", monkeypatch)
+    await r.ensure_schema()
+    return conn
+
+
+def _audit(conn, rid=None):
+    q = "SELECT response_id, from_status, to_status, actor FROM scrum_audit"
+    return conn.execute(q + (" WHERE response_id=? ORDER BY id" if rid else " ORDER BY id"), (rid,) if rid else ()).fetchall()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_and_audit_attribution(rq):
+    row = await r.insert_command(_fields(actor="alice"), "k1", 10)
+    rid = row["id"]
+    assert row["status"] == "queued" and rid
+    assert await r.consume_scrum_response(rid, "worker-1") == "ok"
+    assert await r.consume_scrum_response(rid, "worker-2") == "already_consumed"
+    assert await r.transition_result(rid, "done", "all good", "worker-1") == "ok"
+    for st in ("done", "failed"):
+        with pytest.raises(DeskConflict):
+            await r.transition_result(rid, st, "again", "worker-9")
+    assert await r.transition_result(9999, "done", "", "w") == "not_found"
+    # one audit row per real change, attributed to whoever made it; the refused attempts left none
+    assert _audit(rq, rid) == [(rid, None, "queued", "alice"), (rid, "queued", "running", "worker-1"),
+                               (rid, "running", "done", "worker-1")]
+    cmd = (await r.list_commands())[0]
+    assert cmd["status"] == "done" and cmd["result_summary"] == "all good" and cmd["actor"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_idempotent_replay_adds_no_row_and_conflict_raises(rq):
+    a = await r.insert_command(_fields(), "same", 10)
+    b = await r.insert_command(_fields(), "same", 10)
+    assert b["id"] == a["id"] and b.get("replayed")
+    with pytest.raises(ValueError):
+        await r.insert_command(_fields(verb="validate"), "same", 10)
+    assert len(await r.list_commands()) == 1 and len(_audit(rq)) == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_is_atomic_under_concurrency(rq):
+    results = await asyncio.gather(*[r.insert_command(_fields(actor="burst"), f"c{i}", 10) for i in range(12)],
+                                   return_exceptions=True)
+    assert sum(isinstance(x, dict) for x in results) == 10
+    assert sum(isinstance(x, DeskRateLimited) for x in results) == 2
+    assert rq.execute("SELECT COUNT(*) FROM scrum_responses WHERE kind='command'").fetchone()[0] == 10
+    assert len(_audit(rq)) == 10                       # the refused inserts wrote no audit row
+    assert (await r.insert_command(_fields(actor="other"), "o1", 10))["id"]   # per actor
+
+
+@pytest.mark.asyncio
+async def test_same_key_concurrent_inserts_make_one_command(rq, monkeypatch):
+    real_one = r._one
+
+    async def slow_one(*a, **kw):   # widens a lookup-then-insert window; unused by the atomic path
+        out = await real_one(*a, **kw)
+        await asyncio.sleep(0.05)
+        return out
+    monkeypatch.setattr(r, "_one", slow_one)
+    results = await asyncio.gather(*[r.insert_command(_fields(actor="dup"), "one", 10) for _ in range(8)])
+    assert len({x["id"] for x in results}) == 1 and sum(not x.get("replayed") for x in results) == 1
+    assert rq.execute("SELECT COUNT(*) FROM scrum_responses WHERE kind='command'").fetchone()[0] == 1
+    assert len(_audit(rq)) == 1
+
+
+@pytest.mark.asyncio
+async def test_same_key_retry_at_limit_replays_but_new_key_is_429(rq):
+    first = await r.insert_command(_fields(actor="lim"), "k0", 10)
+    for n in range(9):
+        await r.insert_command(_fields(actor="lim"), f"f{n}", 10)
+    again = await r.insert_command(_fields(actor="lim"), "k0", 10)
+    assert again["id"] == first["id"] and again.get("replayed")
+    with pytest.raises(DeskRateLimited):
+        await r.insert_command(_fields(actor="lim"), "brand-new", 10)
+    with pytest.raises(ValueError):   # same key, different arguments still conflicts at the limit
+        await r.insert_command(_fields(actor="lim", verb="validate"), "k0", 10)
+    assert len(_audit(rq)) == 10
+
+
+@pytest.mark.asyncio
+async def test_unique_index_applies_to_an_existing_database(tmp_path, monkeypatch):
+    conn = _install(tmp_path / "old.db", monkeypatch)
+    await r.ensure_schema()
+    conn.execute("DROP INDEX idx_scrum_responses_command_idem")
+    await r.ensure_schema()   # re-ensure adds it back, additively
+    assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='idx_scrum_responses_command_idem'").fetchone()
+
+
+@pytest.mark.asyncio
+async def test_pause_set_get_blocks_claim_and_persists(rq, tmp_path, monkeypatch):
+    assert (await r.get_pause())["paused"] is False
+    p = await r.set_pause(True, "michael", "maintenance")
+    assert p["paused"] is True and p["by"] == "michael" and p["reason"] == "maintenance"
+    queued = (await r.insert_command(_fields(), "p1", 10))["id"]   # still queues while paused
+    with pytest.raises(DeskPaused):
+        await r.consume_scrum_response(queued, "w")
+    # "restart": a fresh connection to the same database, schema re-ensured, pause must survive
+    rq.close()
+    _install(tmp_path / "rq.db", monkeypatch)
+    await r.ensure_schema()
+    assert (await r.get_pause())["paused"] is True
+    await r.set_pause(False, "bob")
+    assert (await r.get_pause())["paused"] is False
+    assert await r.consume_scrum_response(queued, "w") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_pause_changes_are_audited_and_audit_is_append_only(rq):
+    await r.set_pause(True, "alice")
+    await r.set_pause(False, "bob")
+    assert _audit(rq) == [(None, "active", "paused", "alice"), (None, "paused", "active", "bob")]
+    with pytest.raises(sqlite3.DatabaseError):
+        rq.execute("UPDATE scrum_audit SET actor='x'")
+    with pytest.raises(sqlite3.DatabaseError):
+        rq.execute("DELETE FROM scrum_audit")
+
+
+@pytest.mark.asyncio
+async def test_http_rate_limit_atomic_on_rqlite_backend(rq, tmp_path, monkeypatch):
+    """The same 12-at-once burst through the real routes with main.db swapped to the rqlite backend (fake layer)."""
+    import httpx
+    monkeypatch.setenv("QUEUE_DB_PATH", str(tmp_path / "q.db")); monkeypatch.setenv("SECRET_KEY", "k")
+    import importlib
+    import orchestrator.main as m
+    importlib.reload(m)
+    monkeypatch.setattr(m, "db", r)
+    real_count = r.count_commands_last_hour
+
+    async def slow_count(actor):
+        n = await real_count(actor)
+        await asyncio.sleep(0.05)
+        return n
+    monkeypatch.setattr(r, "count_commands_last_hour", slow_count)
+    body = {"kind": "command", "verb": "plan", "project": "demo", "sprint": "2", "story_id": "S-8",
+            "plan_digest": None, "evidence": None, "actor": "burst"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=m.app), base_url="http://t") as c:
+        rs = await asyncio.gather(*[c.post("/scrum/responses", json=body, headers={"X-Secret-Key": "k", "Idempotency-Key": f"h{i}"})
+                                    for i in range(12)])
+        assert sorted(x.status_code for x in rs) == [201] * 10 + [429] * 2
+        # lifecycle over HTTP on this backend, 409 (not 422) for a bad target state
+        rid = next(x.json()["id"] for x in rs if x.status_code == 201)
+        h = {"X-Secret-Key": "k", "X-Actor": "w1"}
+        assert (await c.post(f"/scrum/responses/{rid}/consume", headers=h)).status_code == 200
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "queued"}, headers=h)).status_code == 409
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "done", "summary": "ok"}, headers=h)).status_code == 200
+        assert (await c.post(f"/scrum/responses/{rid}/result", json={"status": "failed"}, headers=h)).status_code == 409
+    assert _audit(rq, rid)[-1] == (rid, "running", "done", "w1")
+
+
+@pytest.mark.asyncio
+async def test_claim_sql_itself_refuses_when_paused(rq):
+    """Backstop for a pause landing between the Python check and the claim: the UPDATE's own guard must refuse."""
+    from shared import desk_store as ds
+    rid = (await r.insert_command(_fields(), "g1", 10))["id"]
+    await r.set_pause(True, "michael")
+    cur = rq.execute(ds.CLAIM_COMMAND, ("2026-01-01T00:00:00Z", "w", rid))
+    assert cur.rowcount == 0
+    assert rq.execute("SELECT status FROM scrum_responses WHERE id=?", (rid,)).fetchone()[0] == "queued"

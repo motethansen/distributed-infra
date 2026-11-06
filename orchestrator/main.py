@@ -16,11 +16,14 @@ from typing import Any, Literal
 import yaml
 from fastapi import Body, Depends, FastAPI, HTTPException, Header, Query
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
 from shared import scrum, scrum_digest, scrum_suggest, tracking
+from shared.desk_allowlist import ALLOWED_TIERS_THIS_SPRINT
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
+from shared.desk_intent import CommandIntent, intent_missing, intent_verdict
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -467,29 +470,120 @@ class ScrumResponseIn(BaseModel):
         return self
 
 
+COMMAND_RATE_LIMIT_PER_HOUR = 10
+
+
+class DeskResultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: str
+    summary: str = Field(default="", max_length=2000)
+
+
+class DeskPauseIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    paused: bool
+    by: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+def _validate_body(model: type[BaseModel], raw: Any):
+    """model_validate with a 422 that never echoes the submitted values (request bodies stay out of logs and replies)."""
+    try:
+        return model.model_validate(raw)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=[{"loc": list(x["loc"]), "msg": x["msg"], "type": x["type"]}
+                                                     for x in e.errors(include_input=False, include_url=False)])
+
+
 @app.post("/scrum/responses", status_code=201, dependencies=[Depends(_require_secret_key)])
-async def scrum_response_create(body: ScrumResponseIn, x_secret_key: str = Header(default=""),
+async def scrum_response_create(raw: dict = Body(...), x_secret_key: str = Header(default=""),
                                 idempotency_key: str | None = Header(default=None)):
-    """Record an owner's answer to a board item. Append-only: nothing is overwritten."""
+    """Record an owner's answer to a board item (kind='response', append-only) or queue a desk command
+    (kind='command', allowlisted verbs only). The `actor` is asserted by the key holder, as in S-1: a label for the
+    audit trail, not proof of identity. Request bodies are never logged."""
+    if raw.get("kind") == "command":
+        return await _scrum_command_create(raw, idempotency_key)
+    body = _validate_body(ScrumResponseIn, raw)
     try:
         return await db.insert_scrum_response(body.model_dump(), idempotency_key)
     except ValueError:
         raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different response")
 
 
+async def _scrum_command_create(raw: dict, idempotency_key: str | None):
+    intent = _validate_body(CommandIntent, raw)
+    try:
+        verdict, tier = intent_verdict(intent)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Unknown verb")
+    if intent_missing(intent):
+        raise HTTPException(status_code=422, detail="Missing required field for this verb: " + ", ".join(intent_missing(intent)))
+    if tier == "T2":
+        raise HTTPException(status_code=403, detail="needs confirm-with-digest (sprint 3)")
+    if tier not in ALLOWED_TIERS_THIS_SPRINT:
+        raise HTTPException(status_code=403, detail="not available from the page")
+    if not idempotency_key:
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required for commands")
+    fields = intent.model_dump()
+    fields["tier"] = tier
+    try:
+        # Recorded as queued even while the desk is paused; only the claim is refused.
+        row = await db.insert_command(fields, idempotency_key, COMMAND_RATE_LIMIT_PER_HOUR)
+    except DeskRateLimited:
+        raise HTTPException(status_code=429, detail="Too many commands from this actor in the last hour")
+    except ValueError:
+        raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different command")
+    log.info("desk command queued id=%s verb=%s tier=%s actor=%s", row["id"], intent.verb, tier, intent.actor)
+    return {"id": row["id"], "status": "queued", "tier": tier}
+
+
 @app.get("/scrum/responses", dependencies=[Depends(_require_secret_key)])
 async def scrum_response_list(status: str | None = None, project: str | None = None, latest: bool = False,
-                              x_secret_key: str = Header(default="")):
-    """Recorded responses, newest first. latest=1 → only the newest per item_key. status=pending means not yet consumed."""
+                              kind: str | None = None, x_secret_key: str = Header(default="")):
+    """Recorded responses, newest first. latest=1 → only the newest per item_key. status=pending means not yet consumed.
+    kind=command → desk command intents (status, tier, actor, created_at, result summary)."""
+    if kind == "command":
+        return await db.list_commands(kind="command")
     status = "recorded" if status == "pending" else status
     return await db.list_scrum_responses(status=status, project=project, latest=latest)
+
+
+@app.post("/scrum/responses/{response_id}/result", dependencies=[Depends(_require_secret_key)])
+async def scrum_response_result(response_id: int, raw: dict = Body(...), x_secret_key: str = Header(default=""),
+                                x_actor: str = Header(default="")):
+    """A worker reports how a claimed (running) command ended. Allowed once, only from running; else 409."""
+    body = _validate_body(DeskResultIn, raw)
+    if body.status not in ("done", "failed"):   # a running command can only end done or failed
+        raise HTTPException(status_code=409, detail="Command cannot move to " + body.status[:20])
+    try:
+        outcome = await db.transition_result(response_id, body.status, body.summary, x_actor or "unknown")
+    except DeskConflict:
+        raise HTTPException(status_code=409, detail="Command is not running")
+    if outcome == "not_found":
+        raise HTTPException(status_code=404, detail="No such command")
+    return {"id": response_id, "status": body.status}
+
+
+@app.get("/scrum/desk/pause", dependencies=[Depends(_require_secret_key)])
+async def scrum_desk_pause_get(x_secret_key: str = Header(default="")):
+    return await db.get_pause()
+
+
+@app.post("/scrum/desk/pause", dependencies=[Depends(_require_secret_key)])
+async def scrum_desk_pause_set(raw: dict = Body(...), x_secret_key: str = Header(default="")):
+    """Pause or resume the desk. `by` is asserted by the key holder. Commands keep queueing while paused."""
+    body = _validate_body(DeskPauseIn, raw)
+    return await db.set_pause(body.paused, body.by, body.reason)
 
 
 @app.post("/scrum/responses/{response_id}/consume", dependencies=[Depends(_require_secret_key)])
 async def scrum_response_consume(response_id: int, x_secret_key: str = Header(default=""),
                                  x_actor: str = Header(default="")):
     """Mark a response consumed (once). A second call is 409."""
-    outcome = await db.consume_scrum_response(response_id, x_actor or "unknown")
+    try:
+        outcome = await db.consume_scrum_response(response_id, x_actor or "unknown")
+    except DeskPaused:
+        raise HTTPException(status_code=423, detail="desk paused")
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail="No such response")
     if outcome == "already_consumed":
