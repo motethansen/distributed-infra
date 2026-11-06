@@ -22,7 +22,8 @@ from typing import Any
 
 import httpx
 
-from shared import tracking
+from shared import desk_store as ds, tracking
+from shared.desk_errors import DeskConflict, DeskPaused
 from shared.models import Task, TaskStatus
 
 RQLITE_URL = os.getenv("RQLITE_URL", "http://localhost:4001").rstrip("/")
@@ -94,7 +95,7 @@ SCRUM_SUGGESTIONS_DDL = [
 ]
 _SUG_COLS = "id, text, generated_at, model"
 _RESP_PUBLIC = ("id, item_key, project, item_id, section, action, suggestion_id, suggestion_text, comment, "
-                "actor, created_at, status, consumed_at, consumed_by")
+                "actor, created_at, status, consumed_at, consumed_by, COALESCE(kind, 'response') AS kind")
 _INSERT_RESP = ("INSERT INTO scrum_responses (item_key, project, item_id, section, action, suggestion_id, "
                 "suggestion_text, comment, actor, created_at, status, idempotency_key) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'recorded', ?)")
@@ -194,6 +195,17 @@ async def ensure_schema() -> None:
     operation. Idempotent, and safe if two orchestrators start at once."""
     await _execute([[CREATE_TABLE]])
     await _execute([[stmt] for stmt in SCRUM_RESPONSES_DDL + SCRUM_SUGGESTIONS_DDL])
+    # Desk columns/tables go through Raft, so one ensure_schema reaches every voter; ALTERs are guarded and duplicate-safe.
+    res = await _query([["SELECT name FROM pragma_table_info('scrum_responses')"]], level="strong")
+    have_resp = {r["name"] for r in _rows(res[0])} if res else set()
+    for col, typ in ds.DESK_COLUMNS.items():
+        if col not in have_resp:
+            try:
+                await _execute([[f"ALTER TABLE scrum_responses ADD COLUMN {col} {typ}"]])
+            except RqliteError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+    await _execute([[stmt] for stmt in ds.DESK_DDL])
     res = await _query([["SELECT name FROM pragma_table_info('tasks')"]], level="weak")
     have = {r["name"] for r in _rows(res[0])} if res else set()
     for col, typ in tracking.TRACK_COLUMNS.items():
@@ -370,7 +382,8 @@ async def insert_scrum_response(fields: dict, idempotency_key: str | None = None
         if rows:
             return _replay_or_conflict(rows[0], fields)
     created_at = _utc_now_iso()
-    res = await _execute([[_INSERT_RESP, *_resp_params(fields, created_at, idempotency_key)]])
+    res = await _execute([[_INSERT_RESP, *_resp_params(fields, created_at, idempotency_key)],
+                          [ds.AUDIT_CREATE, "recorded", fields["actor"], created_at]])
     return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "recorded"}
 
 
@@ -382,15 +395,88 @@ async def list_scrum_responses(status: str | None = None, project: str | None = 
     return _rows(res[0]) if res else []
 
 
+async def _one(sql: str, *params, level: str = "strong") -> dict | None:
+    res = await _query([[sql, *params]], level=level)
+    rows = _rows(res[0]) if res else []
+    return rows[0] if rows else None
+
+
 async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
-    """'ok' | 'not_found' | 'already_consumed'. One conditional UPDATE, so only one caller wins."""
-    res = await _execute([[
-        "UPDATE scrum_responses SET status='consumed', consumed_at=?, consumed_by=? WHERE id=? AND status='recorded'",
-        _utc_now_iso(), consumed_by, response_id]])
+    """'ok' | 'not_found' | 'already_consumed'. One conditional UPDATE, so only one caller wins.
+    A command row is claimed queued->running instead, and raises DeskPaused while the desk is paused."""
+    found = await _one(ds.KIND_STATUS, response_id)
+    if found is None:
+        return "not_found"
+    now = _utc_now_iso()
+    if found["kind"] == "command":
+        pause = await _one(ds.GET_PAUSE)
+        if pause and pause["paused"]:
+            raise DeskPaused("desk paused")
+        res = await _execute([[ds.CLAIM_COMMAND, now, consumed_by, response_id],
+                              [ds.AUDIT_IF_CHANGED, response_id, "queued", "running", consumed_by, now]])
+    else:
+        res = await _execute([[
+            "UPDATE scrum_responses SET status='consumed', consumed_at=?, consumed_by=? WHERE id=? AND status='recorded'",
+            now, consumed_by, response_id],
+            [ds.AUDIT_IF_CHANGED, response_id, "recorded", "consumed", consumed_by, now]])
     if res and res[0].get("rows_affected", 0) > 0:
         return "ok"
-    res = await _query([["SELECT 1 FROM scrum_responses WHERE id=?", response_id]], level="strong")
-    return "already_consumed" if res and _rows(res[0]) else "not_found"
+    if found["kind"] == "command" and found["status"] == "queued":
+        pause = await _one(ds.GET_PAUSE)   # a pause that landed between the check and the claim
+        if pause and pause["paused"]:
+            raise DeskPaused("desk paused")
+    return "already_consumed"
+
+
+# ── Desk commands (kind='command' rows in scrum_responses) ───────────────────
+
+async def insert_command(fields: dict, idempotency_key: str | None = None) -> dict:
+    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409)."""
+    if idempotency_key is not None:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_IDEM_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        row = await _one(ds.COMMAND_IDEM_SELECT, idempotency_key, cutoff)
+        if row:
+            return ds.command_replay_or_conflict(row, fields)
+    created_at = _utc_now_iso()
+    res = await _execute([[ds.INSERT_COMMAND, *ds.command_params(fields, created_at, idempotency_key)],
+                          [ds.AUDIT_CREATE, "queued", fields["actor"], created_at]])
+    return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "queued"}
+
+
+async def transition_result(response_id: int, status: str, summary: str, actor: str = "unknown") -> str:
+    """running -> done|failed, once. 'ok' | 'not_found'; DeskConflict (409) from any other state; ValueError on bad input."""
+    summary = ds.check_result(status, summary)
+    res = await _execute([[ds.RESULT_COMMAND, status, status, summary, response_id],
+                          [ds.AUDIT_IF_CHANGED, response_id, "running", status, actor, _utc_now_iso()]])
+    if res and res[0].get("rows_affected", 0) > 0:
+        return "ok"
+    found = await _one(ds.KIND_STATUS, response_id)
+    if found is None:
+        return "not_found"
+    raise DeskConflict(f"cannot move {found['kind']} from {found['status']} to {status}")
+
+
+async def get_pause() -> dict:
+    return ds.pause_row(await _one(ds.GET_PAUSE))
+
+
+async def set_pause(paused: bool, by: str, reason: str | None = None) -> dict:
+    """Pause or resume the desk. A running command is left alone; only the next claim is refused."""
+    now = _utc_now_iso()
+    await _execute([[ds.AUDIT_PAUSE, "paused" if paused else "active", by, now],
+                    [ds.SET_PAUSE, 1 if paused else 0, by, now, (reason or "")[:500] or None]])
+    return await get_pause()
+
+
+async def count_commands_last_hour(actor: str) -> int:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ds.COMMAND_RATE_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    row = await _one(ds.COUNT_COMMANDS, actor, cutoff)
+    return int(row["n"]) if row else 0
+
+
+async def list_commands(kind: str = "command", limit: int = 200) -> list[dict]:
+    res = await _query([[ds.LIST_COMMANDS, kind, limit]], level="strong")
+    return _rows(res[0]) if res else []
 
 
 # ── Scrum suggestions (one Sonnet-written next step per item and evidence; old rows stay readable) ──

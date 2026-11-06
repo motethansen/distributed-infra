@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
 from shared import scrum, scrum_digest, scrum_suggest, tracking
+from shared.desk_errors import DeskPaused
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
 # Queue backend selector (#20 Phase 2). Default = the single-node aiosqlite file
@@ -489,7 +490,10 @@ async def scrum_response_list(status: str | None = None, project: str | None = N
 async def scrum_response_consume(response_id: int, x_secret_key: str = Header(default=""),
                                  x_actor: str = Header(default="")):
     """Mark a response consumed (once). A second call is 409."""
-    outcome = await db.consume_scrum_response(response_id, x_actor or "unknown")
+    try:
+        outcome = await db.consume_scrum_response(response_id, x_actor or "unknown")
+    except DeskPaused:
+        raise HTTPException(status_code=423, detail="Desk paused")
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail="No such response")
     if outcome == "already_consumed":

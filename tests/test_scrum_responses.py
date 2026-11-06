@@ -152,9 +152,8 @@ async def test_rqlite_backend_matches(tmp_path, monkeypatch):
         return out
 
     monkeypatch.setattr(r, "_post", fake_post)
-    for stmt in r.SCRUM_RESPONSES_DDL:
-        await r._execute([[stmt]])
-    await r._execute([[stmt] for stmt in r.SCRUM_RESPONSES_DDL])   # idempotent
+    await r.ensure_schema()
+    await r.ensure_schema()   # idempotent: the desk ALTERs/DDL are guarded
     a = await r.insert_scrum_response(BODY)
     b = await r.insert_scrum_response({**BODY, "action": "comment", "comment": "later"})
     assert b["id"] > a["id"] and a["status"] == "recorded"
