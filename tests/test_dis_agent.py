@@ -886,7 +886,13 @@ def test_validate_tests_the_repo_the_plan_names_not_the_story_projects_own(tmp_p
 
 def test_validate_without_repo_project_still_uses_the_story_projects_repo(tmp_path, monkeypatch):
     import argparse
+    import json
     base = _plans(tmp_path, monkeypatch)
+    f = base / "S-roles" / "S-1.plan.json"
+    plan = json.loads(f.read_text())
+    plan.pop("repo_project", None)
+    f.write_text(json.dumps(plan))
+    assert "repo_project" not in json.loads(f.read_text())
     monkeypatch.setattr(da, "projects_cfg", lambda: {"machines": {}, "projects": {"demo": {"repo": "git@github.com:o/demo.git", "dir": "demo-stories"}}})
     queued = []
     verdict = '{"validation":{"suite":"1 passed, 0 failed","criteria":[{"n":1,"status":"pass","evidence":"t"},{"n":2,"status":"pass","evidence":"t"}]}}'
