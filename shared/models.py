@@ -72,6 +72,9 @@ class Task(BaseModel):
     tokens_out: int | None = None
     tokens_total: int | None = None
     cost_usd: float | None = None
+    tokens_cache_read: int | None = None
+    tokens_cache_write: int | None = None
+    llm: bool | None = None
     started_at: str | None = None
     finished_at: str | None = None
     project: str | None = None

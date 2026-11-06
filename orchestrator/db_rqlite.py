@@ -351,6 +351,7 @@ async def reap_stale(cutoff_iso: str, note: str) -> list[dict]:
 
 
 _USAGE_COLS = ("id,type,status,assigned_to,agent,model,tokens_in,tokens_out,tokens_total,cost_usd,"
+               "tokens_cache_read,tokens_cache_write,llm,"
                "started_at,finished_at,created_at,project,sprint,story,role")
 
 

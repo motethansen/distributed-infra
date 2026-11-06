@@ -19,6 +19,9 @@ TRACK_COLUMNS: dict[str, str] = {
     "tokens_out": "INTEGER",
     "tokens_total": "INTEGER",
     "cost_usd": "REAL",
+    "tokens_cache_read": "INTEGER",   # prompt tokens served from the provider's cache
+    "tokens_cache_write": "INTEGER",  # prompt tokens written to the provider's cache
+    "llm": "INTEGER",         # 1 if a language model answered, 0 if not (stored 0/1, NULL = unknown)
     "started_at": "TEXT",     # first time the task went in_progress
     "finished_at": "TEXT",    # last time it reached done/failed/needs_human
     "project": "TEXT",        # from the payload, so sprints/projects can be summed in SQL
@@ -48,11 +51,16 @@ def from_result(result: Any) -> dict[str, Any]:
         if isinstance(v, str) and v:
             out[k] = v[:80]
     u = result.get("usage")
+    llm = result.get("llm", u.get("llm") if isinstance(u, dict) else None)
+    if isinstance(llm, bool):
+        out["llm"] = int(llm)
     if isinstance(u, dict):
         tin, tout, ttot = _int(u.get("tokens_in")), _int(u.get("tokens_out")), _int(u.get("tokens_total"))
         if ttot is None and tin is not None and tout is not None:
             ttot = tin + tout
-        for k, v in (("tokens_in", tin), ("tokens_out", tout), ("tokens_total", ttot)):
+        cr, cw = _int(u.get("tokens_cache_read")), _int(u.get("tokens_cache_write"))
+        for k, v in (("tokens_in", tin), ("tokens_out", tout), ("tokens_total", ttot),
+                     ("tokens_cache_read", cr), ("tokens_cache_write", cw)):
             if v is not None:
                 out[k] = v
         try:
