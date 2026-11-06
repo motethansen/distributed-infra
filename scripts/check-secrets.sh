@@ -21,7 +21,7 @@ case "${1:-}" in
   --worktree)
     # Only files git would commit (tracked + new, not ignored): never .env, .venv or data/.
     git ls-files -z --cached --others --exclude-standard | while IFS= read -r -d '' f; do
-      [[ -f "$f" ]] && printf '%s\0' "$f"
+      if [[ -f "$f" ]]; then printf '%s\0' "$f"; fi
     done | tar --null -T - -cf - 2>/dev/null | tar -xf - -C "$tmp"
     gitleaks detect --source "$tmp" --no-git --config "$PWD/.gitleaks.toml" --redact --no-banner ;;
   "")

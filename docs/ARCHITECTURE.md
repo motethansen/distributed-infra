@@ -68,7 +68,7 @@ forwards); a write is durable on a **quorum (2 of 3)** before it acks. Any one n
 
 | Node | How it runs | Data |
 |---|---|---|
-| mac-mini | Docker `rqlite/rqlite`, `-p 4001:4001 -p 4002:4002`, restart `unless-stopped` | named volume |
+| mac-mini | Docker `rqlite/rqlite`, ports published **only on its Tailscale address** (`-p <tailscale-ip>:4001:4001 -p <tailscale-ip>:4002:4002`), restart `unless-stopped` | named volume |
 | thinkpad | native Linux binary `~/rqlite/rqlited`, systemd user unit `rqlite-node.service` ([template](../scripts/rqlite-node.service.example)) | `~/rqlite-data` |
 | cloud Docker host | Docker `rqlite/rqlite`, ports published **only on its Tailscale address** | named volume |
 
@@ -206,7 +206,7 @@ login is a recurring failure mode (on macOS the CLI keeps its login in the Keych
 
 | Event | Queue writable? | Fleet impact |
 |---|---|---|
-| **mac-mini down** | ✅ yes (thinkpad + cloud host = quorum) | thinkpad orchestrator + thinkpad/macbook workers keep running (failover); WhatsApp down (bridge is on mac-mini); mac-mini-pinned tasks wait |
+| **mac-mini down** | ✅ yes (thinkpad + cloud host = quorum) | thinkpad orchestrator + thinkpad worker keep running (failover); WhatsApp down (bridge is on mac-mini); mac-mini-pinned tasks wait |
 | **thinkpad down** | ✅ yes (mac-mini + cloud host) | mac-mini orchestrator + workers keep running; Android-pinned tasks wait |
 | **cloud host down** | ✅ yes (mac-mini + thinkpad) | none: it is voter-only. Losing it AND the home internet together is the case to watch |
 | **home internet down** | ✅ yes (mac-mini + thinkpad are still 2 of 3) | cloud-hosted services keep running; agents that need their provider's API stall |
