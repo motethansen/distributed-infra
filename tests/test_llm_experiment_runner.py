@@ -9,6 +9,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import llm_experiment as ex  # noqa: E402
 
 
+def commit_dir(d):
+    """Make the fixture directory a committed git repo (the oracle is frozen from committed blobs only)."""
+    for a in (("init", "-q"), ("config", "user.email", "t@example.com"), ("config", "user.name", "t"),
+              ("add", "-A"), ("commit", "-qm", "fixture")):
+        subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+
 def git(repo, *a):
     return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
 
@@ -120,6 +127,7 @@ def test_install_test_file_copies_into_worktree(fx, tmp_path):
     meta = json.loads((d / "fixture.json").read_text())
     meta.update(test_file="acceptance_test.py", test_cmd="python -m pytest test_acc.py -q")
     (d / "fixture.json").write_text(json.dumps(meta))
+    commit_dir(d)
     fixture = ex.load_fixture(d)
     wt = tmp_path / "wt"
     wt.mkdir()
@@ -181,6 +189,7 @@ def test_acceptance_test_installed_before_gate_and_runs(fx, tmp_path):
     meta = json.loads((d / "fixture.json").read_text())
     meta.update(test_file="acc.py", test_dest="test_dest_name.py")
     (d / "fixture.json").write_text(json.dumps(meta))
+    commit_dir(d)
     f = ex.load_fixture(d)
     assert f.test_dest == "test_dest_name.py"
     seen = []

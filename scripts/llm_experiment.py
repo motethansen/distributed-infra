@@ -244,7 +244,7 @@ def _clean_run(r):
 
 
 def build_report_dict(date, fixture, commit, repeats, runs, unsupported=None, max_budget_usd=2.0, prompt="<prompt>",
-                      cli="claude", reviewer=None):
+                      cli="claude", reviewer=None, oracle=None):
     unsupported = unsupported or {}
     names = [n for n in VARIANTS if n not in unsupported or not VARIANTS[n]["optional"]]
     by_variant = {n: [r for r in runs if r.variant == n] for n in names}
@@ -252,7 +252,7 @@ def build_report_dict(date, fixture, commit, repeats, runs, unsupported=None, ma
     base = summaries.get(BASELINE_NAME)
     verdicts = {n: verdict(summaries[n], base, repeats, name=n) if n in summaries else "UNSUPPORTED" for n in names}
     return {
-        "date": date, "fixture": fixture, "commit": commit, "repeats": repeats,
+        "date": date, "fixture": fixture, "commit": commit, "repeats": repeats, "oracle": oracle or {},
         "commands": {n: display_command(build_command(n, prompt, max_budget_usd), prompt, cli) for n in names},
         "reviewer": {"role": "reviewer", **{k: sanitize(v, 500) for k, v in (reviewer or {}).items()},
                      "note": REVIEWER_NOTE},
@@ -273,7 +273,9 @@ def _fmt(v):
 def render_markdown(report):
     L = [f"# LLM flag experiment {report['date']}", "",
          f"- Date: {report['date']}", f"- Fixture: {report['fixture']}",
-         f"- Pinned commit: {report['commit']}", f"- Repeats: {report['repeats']}", "",
+         f"- Pinned commit: {report['commit']}", f"- Repeats: {report['repeats']}",
+         f"- Acceptance test (committed blob): sha1 {_fmt((report.get('oracle') or {}).get('test_blob_sha1'))}, "
+         f"sha256 {_fmt((report.get('oracle') or {}).get('test_sha256'))}", "",
          "## Commands", "", "| variant | command |", "|---|---|"]
     for n, cmd in report["commands"].items():
         L.append(f"| {n} | `{cmd}` |")
@@ -356,6 +358,7 @@ class Fixture:
     # Trusted bytes, read ONCE (freeze_fixture) before any agent runs and never re-read from disk during a run.
     test_bytes: "bytes | None" = None
     test_sha256: "str | None" = None
+    test_blob_sha1: "str | None" = None
     trusted: dict = field(default_factory=dict)   # commit as given -> Trusted
 
 
@@ -404,14 +407,32 @@ def _git(repo, *args):
 
 
 def freeze_test(fixture):
-    """Read the fixture's acceptance test into memory once (bytes + sha256). Later calls reuse those bytes."""
+    """Read the fixture's acceptance test into memory once, from the COMMITTED blob of the harness repo (`git show
+    HEAD:<path>`), never from the mutable working tree. Refuses (nothing is spent) if the fixture directory is dirty or
+    the working file differs from the blob. Records the blob sha1 and the sha256 for the report."""
     if not fixture.test_file or fixture.test_bytes is not None:
         return
-    src = Path(fixture.fixture_dir) / fixture.test_file
+    fdir = Path(fixture.fixture_dir)
+    src = fdir / fixture.test_file
     if not src.is_file():
         raise FixtureError(f"fixture {fixture.name}: test_file {fixture.test_file} not found in {fixture.fixture_dir}")
-    fixture.test_bytes = src.read_bytes()
-    fixture.test_sha256 = hashlib.sha256(fixture.test_bytes).hexdigest()
+    top = _git(fdir, "rev-parse", "--show-toplevel").stdout.strip()
+    if not top:
+        raise FixtureError(f"fixture {fixture.name}: {fdir} is not inside a git repository, so its acceptance test "
+                           "cannot be frozen from a committed blob")
+    rel = os.path.relpath(os.path.realpath(src), os.path.realpath(top))
+    dirty = _git(top, "status", "--porcelain", "--", os.path.relpath(os.path.realpath(fdir), os.path.realpath(top))).stdout
+    if dirty.strip():
+        raise FixtureError(f"fixture {fixture.name}: the fixture directory has uncommitted changes; commit or revert "
+                           f"them before running (git status --porcelain: {sanitize(dirty.strip(), 200)})")
+    blob = subprocess.run(["git", "-C", top, "show", "HEAD:" + rel], capture_output=True)
+    if blob.returncode != 0:
+        raise FixtureError(f"fixture {fixture.name}: {rel} is not committed at HEAD of {top}")
+    if src.read_bytes() != blob.stdout:
+        raise FixtureError(f"fixture {fixture.name}: {rel} differs from its committed blob; refusing to run")
+    fixture.test_bytes = blob.stdout
+    fixture.test_sha256 = hashlib.sha256(blob.stdout).hexdigest()
+    fixture.test_blob_sha1 = _git(top, "rev-parse", "HEAD:" + rel).stdout.strip()
 
 
 def install_acceptance_test(fixture, root):
@@ -886,6 +907,7 @@ def run_one(fixture, variant, repeat, runner, workdir):
 
 
 def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str):
+    freeze_test(fixture)    # refuse on a dirty / uncommitted oracle before anything else
     check_fixture_fails_before(fixture, runner)
     unsupported = detect_unsupported(variant_names, runner.cli_help())
     order = [n for n in variant_names if n == BASELINE_NAME] + [n for n in variant_names if n != BASELINE_NAME]
@@ -905,7 +927,9 @@ def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str):
         info["warning"] = "the reviewer differed between runs: " + ", ".join(f"{a}/{m}" for a, m in sorted(map(str, x) for x in seen))
     report = build_report_dict(date_str, fixture.name, fixture.pinned_commit, repeats, runs, unsupported=unsupported,
                                max_budget_usd=MAX_BUDGET_USD, prompt=fixture.prompt,
-                               cli=getattr(runner, "cli", "claude"), reviewer=info)
+                               cli=getattr(runner, "cli", "claude"), reviewer=info,
+                               oracle={"test_file": fixture.test_file, "test_blob_sha1": fixture.test_blob_sha1,
+                                       "test_sha256": fixture.test_sha256})
     # build_report_dict only lists unsupported *optional* variants; make the rest visible too.
     for n, reason in unsupported.items():
         report["unsupported"].setdefault(n, reason)

@@ -25,6 +25,13 @@ def git(repo, *a):
     return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True).stdout.strip()
 
 
+def commit_dir(d):
+    """Make the fixture directory a committed git repo (the oracle is frozen from committed blobs only)."""
+    for a in (("init", "-q"), ("config", "user.email", "t@example.com"), ("config", "user.name", "t"),
+              ("add", "-A"), ("commit", "-qm", "fixture")):
+        subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+
+
 @pytest.fixture
 def world(tmp_path):
     """A source repo with a buggy pinned commit and a fixed known-good commit, plus a fixture dir."""
@@ -48,6 +55,7 @@ def world(tmp_path):
     (d / "fixture.json").write_text(json.dumps({
         "name": "f", "repo_url_or_path": str(repo), "pinned_commit": pinned, "known_good_commit": good,
         "test_file": "acc.py", "test_dest": "test_acc.py", "test_cmd": "python -m pytest test_acc.py -q"}))
+    commit_dir(d)
     return ex.load_fixture(d), repo, pinned, good
 
 
@@ -645,3 +653,41 @@ def test_absolute_pythonpath_lets_the_launcher_import_the_checkout_from_another_
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     assert ex.SubprocessRunner(cli="claude").run_tests("python -m pytest test_x.py -q", sandbox) == ex.PYTEST_PASSED
+
+
+# ── Round 3, P1-b: the oracle is frozen from committed blobs ─────────────────────────────────────────────────────
+def test_modified_uncommitted_acceptance_test_is_refused_and_nothing_runs(world, tmp_path):
+    fixture = world[0]
+    (Path(fixture.fixture_dir) / "acc.py").write_text("def test_add():\n    pass\n")   # weakened, not committed
+    runner = Real()
+    with pytest.raises(ex.FixtureError, match="uncommitted|differs"):
+        ex.run_experiment(fixture, ["baseline"], 1, runner, tmp_path / "out", "2026-01-01")
+    assert fixture.test_bytes is None and runner.diffs == []
+
+
+def test_untracked_file_in_fixture_dir_is_refused(world):
+    fixture = world[0]
+    (Path(fixture.fixture_dir) / "extra.py").write_text("x = 1\n")
+    with pytest.raises(ex.FixtureError, match="uncommitted"):
+        ex.freeze_test(fixture)
+
+
+def test_fixture_outside_git_is_refused(world, tmp_path):
+    fixture = world[0]
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "acc.py").write_text(ACCEPT)
+    fixture.fixture_dir = loose
+    with pytest.raises(ex.FixtureError, match="git"):
+        ex.freeze_test(fixture)
+
+
+def test_committed_acceptance_test_is_used_and_its_blob_hash_is_reported(world, tmp_path):
+    fixture = world[0]
+    expected = git(fixture.fixture_dir, "rev-parse", "HEAD:acc.py")
+    ex.freeze_test(fixture)
+    assert fixture.test_bytes == ACCEPT.encode() and fixture.test_blob_sha1 == expected
+    report = ex.build_report_dict("2026-01-01", "f", "abc", 1, [], oracle={"test_blob_sha1": fixture.test_blob_sha1,
+                                                                            "test_sha256": fixture.test_sha256})
+    assert report["oracle"]["test_blob_sha1"] == expected
+    assert expected in ex.render_markdown(report)
