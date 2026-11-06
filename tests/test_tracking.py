@@ -54,19 +54,22 @@ def test_summarise_groups_totals_and_counts_distinct_agents_and_machines():
 
 # ── what each agent CLI prints ───────────────────────────────────────────────
 
-def test_claude_json_output_gives_text_usage_and_counts_cache_tokens():
+def test_claude_json_output_gives_text_usage_and_keeps_cache_tokens_separate():
     from agents.claude_agent import parse_json_output
     out = json.dumps({"result": " pong\n", "is_error": False, "total_cost_usd": 0.0005,
                       "usage": {"input_tokens": 2, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 36578,
                                 "output_tokens": 4}})
     text, usage, is_err = parse_json_output(out)
     assert text == "pong" and not is_err
-    assert usage == {"tokens_in": 36590, "tokens_out": 4, "cost_usd": 0.0005}
+    assert usage == {"tokens_in": 2, "tokens_cache_read": 36578, "tokens_cache_write": 10, "tokens_out": 4,
+                     "cost_usd": 0.0005, "model": None, "agent": "claude"}
 
 
 def test_claude_plain_or_error_output_falls_back_to_the_raw_text():
     from agents.claude_agent import parse_json_output
-    assert parse_json_output("Not logged in · Please run /login") == ("Not logged in · Please run /login", None, False)
+    text, usage, is_err = parse_json_output("Not logged in · Please run /login")
+    assert (text, is_err) == ("Not logged in · Please run /login", False)
+    assert usage["agent"] == "claude" and all(v is None for k, v in usage.items() if k != "agent")
     text, _, is_err = parse_json_output(json.dumps({"result": "Credit balance too low", "is_error": True}))
     assert is_err and text == "Credit balance too low"
 
@@ -96,7 +99,8 @@ async def test_claude_agent_end_to_end_with_a_fake_cli(tmp_path, monkeypatch):
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setattr(claude_agent, "_find_cli", lambda: str(fake))
     r = await claude_agent.run("hi", "sonnet")
-    assert r["ok"] and r["response"] == "pong" and r["usage"] == {"tokens_in": 3, "tokens_out": 2, "cost_usd": 0.001}
+    assert r["ok"] and r["response"] == "pong" and (
+        r["usage"]["tokens_in"], r["usage"]["tokens_out"], r["usage"]["cost_usd"]) == (3, 2, 0.001)
     # and the orchestrator would store it:
     assert tracking.from_result(r)["tokens_total"] == 5
 

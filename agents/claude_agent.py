@@ -127,34 +127,70 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     text, usage, is_error = parse_json_output(out)
 
     if proc.returncode != 0 or is_error:
-        return {"error": err or text, "agent": "claude", "ok": False}
+        failed = {"error": err or text, "agent": "claude", "ok": False}
+        if _has_usage(usage):
+            failed["usage"] = usage   # what the CLI printed is still spent, even if the task failed
+        return failed
 
     result = {"agent": "claude", "model": effective_model or "claude-default",
               "response": text, "session_id": session_id, "ok": True}
-    if usage:
+    if _has_usage(usage):
         result["usage"] = usage
     return result
 
 
-def parse_json_output(out: str) -> tuple[str, dict | None, bool]:
-    """(answer text, usage, is_error) from `claude -p --output-format json`; if the output is not
-    that JSON (older CLI, or a plain error), the raw text is the answer and there is no usage."""
+USAGE_KEYS = ("tokens_in", "tokens_cache_read", "tokens_cache_write", "tokens_out", "cost_usd", "model", "agent")
+
+
+def _count(v) -> int | None:
+    """A token count, or None when the CLI did not print one (missing is not 0)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return int(v) if v >= 0 else None
+
+
+def _model_of(d: dict) -> str | None:
+    mu = d.get("modelUsage")
+    if isinstance(mu, dict) and mu:
+        def spend(k):
+            v = mu.get(k)
+            return (v.get("costUSD") or 0) if isinstance(v, dict) and isinstance(v.get("costUSD"), (int, float)) else 0
+        return str(max(mu, key=spend))[:80]   # the model that cost most (a run can also use a small helper model)
+    m = d.get("model")
+    return m[:80] if isinstance(m, str) and m else None
+
+
+def parse_json_output(out: str) -> tuple[str, dict, bool]:
+    """(answer text, usage, is_error) from `claude -p --output-format json`.
+
+    usage always has every key of USAGE_KEYS: tokens_in (usage.input_tokens, uncached only),
+    tokens_cache_read, tokens_cache_write, tokens_out, cost_usd (total_cost_usd), model, agent='claude'.
+    A key the CLI did not print is None, never 0. If the output is not that JSON (older CLI, plain
+    text, a plain error) the raw text is the answer and every usage field except agent is None.
+    Never raises. Usage is returned even when is_error is true."""
+    usage: dict = {k: None for k in USAGE_KEYS}
+    usage["agent"] = "claude"
     try:
         d = json.loads(out)
-    except ValueError:
-        return out, None, False
+    except (ValueError, TypeError):
+        return out, usage, False
     if not isinstance(d, dict) or "result" not in d:
-        return out, None, False
+        return out, usage, False
     text = d.get("result")
     text = text.strip() if isinstance(text, str) else out
     u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
-    usage = None
-    if u:
-        tin = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-        usage = {"tokens_in": tin, "tokens_out": int(u.get("output_tokens") or 0)}
-        if d.get("total_cost_usd") is not None:
-            usage["cost_usd"] = d["total_cost_usd"]   # the CLI's estimate; a subscription is not billed per token
+    usage["tokens_in"] = _count(u.get("input_tokens"))
+    usage["tokens_cache_read"] = _count(u.get("cache_read_input_tokens"))
+    usage["tokens_cache_write"] = _count(u.get("cache_creation_input_tokens"))
+    usage["tokens_out"] = _count(u.get("output_tokens"))
+    cost = d.get("total_cost_usd")   # the CLI's estimate; a subscription is not billed per token
+    usage["cost_usd"] = cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
+    usage["model"] = _model_of(d)
     return text, usage, bool(d.get("is_error"))
+
+
+def _has_usage(usage: dict) -> bool:
+    return any(usage.get(k) is not None for k in USAGE_KEYS if k not in ("agent", "model"))
 
 
 if __name__ == "__main__":
