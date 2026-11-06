@@ -150,7 +150,9 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
 
     attempts: list[dict] = list(skipped)
     last: dict = {}
-    for a, m in usable:
+    queue = list(usable)
+    while queue:
+        a, m = queue.pop(0)
         p, sid, res = prompt, None, False
         if a == primary and a in RESUMABLE and session_id:
             # The agent's own session holds the conversation. If it never answered
@@ -186,6 +188,10 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
             entry["until"] = fo.mark_limited(a, result.get("error") or "").isoformat()
         attempts.append(entry)
         print(f"[failover] {a} {kind}: {(result.get('error') or '')[:120]!r} — trying next agent", flush=True)
+        if kind == "text_only" and "claude" in AGENTS and not fo.cooling_until("claude") \
+                and "claude" not in [x["agent"] for x in attempts]:
+            # The next agent must be able to do the work itself: Claude (Sonnet) first, never a read-only one.
+            queue = [("claude", "sonnet")] + [c for c in queue if c[0] != "claude"]
 
     last = dict(last or {"ok": False, "error": "no agent available"})
     last.setdefault("agent", primary)

@@ -40,6 +40,8 @@ roles:
     model: sonnet
   dev_backend:
     best_for: "self-contained API routes, schemas, scripts, webhook handlers. Returns code as text."
+    # DeepSeek has no shell or file access. If it answers with a tool call written out as text, the run is a
+    # failure (not a success) and the task moves to Claude Sonnet, which can edit files. See agents/deepseek_agent.py.
     agent: deepseek
     model: deepseek-chat
     private_fallback: { agent: claude, model: sonnet }
