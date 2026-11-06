@@ -408,7 +408,7 @@ def install_acceptance_test(fixture, root):
 
 # Files that change what pytest collects/configures or what Python imports at start-up. Restored from the pinned snapshot.
 GUARDED_NAMES = frozenset({"conftest.py", "pytest.ini", "tox.ini", "setup.cfg", "pyproject.toml",
-                           "sitecustomize.py", "usercustomize.py"})
+                           "sitecustomize.py", "usercustomize.py", "pytest.py", "pytest", "_pytest"})
 
 
 @dataclass
@@ -633,13 +633,22 @@ def parse_verdict(text):
     return found[-1] if found else "UNKNOWN"
 
 
+TRUSTED_PYTEST_INI = "[pytest]\npythonpath = .\n"
+
+
 def resolve_test_argv(test_cmd, cwd, python=None, ini=None):
-    """Tokenise test_cmd, run bare `python` as the interpreter the harness itself uses, and pin pytest to a trusted
-    config (-c, --rootdir) without the cache plugin so nothing in the agent's tree configures the run."""
+    """Tokenise test_cmd and launch pytest as `python -I -B -m pytest`: isolated mode puts neither the cwd nor the script
+    dir on sys.path and ignores PYTHON* variables, so nothing the agent added (pytest.py, sitecustomize.py, ...) can
+    shadow the installed pytest. The trusted ini (-c) sets `pythonpath = .`, which pytest applies after it has started,
+    so the tests can still import the agent's code. No cache plugin; the rootdir is pinned."""
     argv = shlex.split(test_cmd)
     if argv and argv[0] in ("python", "python3"):
         argv[0] = python or sys.executable
-    if "pytest" in argv or (len(argv) > 2 and argv[1:3] == ["-m", "pytest"]):
+    if argv and argv[0] == "pytest":
+        argv[:1] = [python or sys.executable, "-m", "pytest"]
+    if len(argv) > 2 and argv[1:3] == ["-m", "pytest"]:
+        argv[1:1] = ["-I", "-B"]
+    if "pytest" in argv:
         if ini:
             argv += ["-c", str(ini)]
         argv += ["--rootdir", str(cwd), "-p", "no:cacheprovider"]
@@ -675,7 +684,7 @@ class SubprocessRunner:
     def run_tests(self, test_cmd, cwd):
         with tempfile.TemporaryDirectory(prefix="llmexp-home-") as home:
             ini = Path(home) / "pytest.ini"
-            ini.write_text("[pytest]\n")
+            ini.write_text(TRUSTED_PYTEST_INI)
             (Path(home) / "home").mkdir()
             argv = resolve_test_argv(test_cmd, cwd, ini=ini)
             try:
