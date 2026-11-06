@@ -777,7 +777,10 @@ def cmd_validate(a) -> None:
         sys.exit(f"no plan for {a.story} under {base}")
     cfg = projects_cfg()
     branch = sf.story_branch(a.project, sprint, sf.story_for_plan(plan))
-    pre = sf.repo_preamble(a.project, (cfg["projects"] or {}).get(a.project), branch)
+    # A story may be built in another project's repo (a Vantage story that changes the orchestrator): the plan's
+    # `repo_project` names that repo, exactly as `go` uses it. Testing the story project's own repo finds no code.
+    repo_name = plan.get("repo_project") or a.project
+    pre = sf.repo_preamble(repo_name, (cfg["projects"] or {}).get(repo_name), branch)
     c = sc.client()
     t = c.queue(sf.tags(a.project, sprint, plan["story"]["id"], "tester", a.approved, None, None,
                         prompt=pre + sf.validate_prompt(plan["story"], a.branch, branch), timeout=1800, flow_key="validate"), f"validate {plan['story']['id']}")
