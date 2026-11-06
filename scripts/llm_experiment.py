@@ -684,9 +684,9 @@ def trusted_pytest_ini(root):
     return f"[pytest]\npythonpath = {os.path.abspath(str(root))}\n"
 
 
-def resolve_test_argv(test_cmd, cwd, python=None, ini=None):
+def resolve_test_argv(test_cmd, cwd, python=None, ini=None, pycache_dir=None):
     """Tokenise test_cmd and launch pytest as `python -I -B -m pytest`: isolated mode puts neither the cwd nor the script
-    dir on sys.path and ignores PYTHON* variables, so nothing the agent added (pytest.py, sitecustomize.py, ...) can
+    dir on sys.path and ignores PYTHON* variables, and a fresh pycache_prefix means no existing bytecode cache is read, so nothing the agent added (pytest.py, sitecustomize.py, ...) can
     shadow the installed pytest. The trusted ini (-c) sets `pythonpath` to the absolute checkout path, which pytest applies after it has started,
     so the tests can still import the agent's code. No cache plugin; the rootdir is pinned."""
     argv = shlex.split(test_cmd)
@@ -695,7 +695,10 @@ def resolve_test_argv(test_cmd, cwd, python=None, ini=None):
     if argv and argv[0] == "pytest":
         argv[:1] = [python or sys.executable, "-m", "pytest"]
     if len(argv) > 2 and argv[1:3] == ["-m", "pytest"]:
-        argv[1:1] = ["-I", "-B"]
+        # -B only stops Python WRITING bytecode; it still READS existing caches. An agent could plant a forged .pyc (valid
+        # source timestamp and size) next to an installed pytest module. `-X pycache_prefix` points the cache at a fresh
+        # empty directory, so no existing __pycache__ anywhere is ever read.
+        argv[1:1] = ["-I", "-B", "-X", "pycache_prefix=" + str(pycache_dir or tempfile.mkdtemp(prefix="exp-pyc-"))]
     if "pytest" in argv:
         if ini:
             argv += ["-c", str(ini)]

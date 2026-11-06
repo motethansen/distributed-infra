@@ -553,10 +553,10 @@ def test_diff_baseline_ignores_an_agent_rewritten_pristine_dir(world, tmp_path):
 # ── Round 2, P1-3: nothing in the agent's tree can shadow or reconfigure pytest ──────────────────────────────────
 def test_pytest_is_launched_isolated_with_a_trusted_pythonpath_ini(tmp_path):
     ini = tmp_path / "t.ini"
-    argv = ex.resolve_test_argv("python -m pytest test_acc.py -q", tmp_path, python="/venv/py", ini=ini)
-    assert argv[:4] == ["/venv/py", "-I", "-B", "-m"] and argv[4] == "pytest"
-    assert argv[:1] + argv[4:5] == ["/venv/py", "pytest"]
-    assert ex.resolve_test_argv("pytest x.py", tmp_path, python="/venv/py")[:5] == ["/venv/py", "-I", "-B", "-m", "pytest"]
+    argv = ex.resolve_test_argv("python -m pytest test_acc.py -q", tmp_path, python="/venv/py", ini=ini, pycache_dir=tmp_path / "pyc")
+    assert argv[:6] == ["/venv/py", "-I", "-B", "-X", "pycache_prefix=%s" % (tmp_path / "pyc"), "-m"] and argv[6] == "pytest"
+    bare = ex.resolve_test_argv("pytest x.py", tmp_path, python="/venv/py", pycache_dir=tmp_path / "pyc")
+    assert bare[:7] == ["/venv/py", "-I", "-B", "-X", "pycache_prefix=%s" % (tmp_path / "pyc"), "-m", "pytest"]
     assert f"pythonpath = {tmp_path}\n" in ex.trusted_pytest_ini(tmp_path)
 
 
@@ -748,3 +748,34 @@ def test_pycache_in_the_venv_is_not_tampering(world, tmp_path, fake_venv):
         (v / "pkg" / "__pycache__").mkdir()
         (v / "pkg" / "__pycache__" / "x.cpython-314.pyc").write_bytes(b"\0")
     assert run_with_venv(world, tmp_path, fake_venv, agent).tampered is False
+
+
+
+def test_launcher_ignores_forged_bytecode_caches(tmp_path):
+    """-B only stops writes. A forged .pyc with a valid source timestamp and size would be read unless pycache_prefix points at a fresh dir."""
+    import importlib.util, importlib._bootstrap_external as be, os, subprocess, sys
+    mod = tmp_path / "trojan.py"
+    mod.write_text("VALUE = 'good'\n")
+    st = mod.stat()
+    cache = tmp_path / "__pycache__"
+    cache.mkdir()
+    evil = compile("VALUE = 'evil'\n", str(mod), "exec")
+    (cache / importlib.util.cache_from_source("trojan.py").split(os.sep)[-1]).write_bytes(
+        be._code_to_timestamp_pyc(evil, int(st.st_mtime), st.st_size))
+    probe = "import sys; sys.path.insert(0, %r); import trojan; print(trojan.VALUE)" % str(tmp_path)
+    without = subprocess.run([sys.executable, "-B", "-c", probe], capture_output=True, text=True).stdout.strip()
+    assert without == "evil"            # the attack works when the cache is trusted
+    argv = ex.resolve_test_argv("python -m pytest x.py", tmp_path, python=sys.executable, pycache_dir=tmp_path / "fresh")
+    flags = argv[1:argv.index("-m")]
+    assert "-I" in flags and "-B" in flags and "pycache_prefix=%s" % (tmp_path / "fresh") in " ".join(flags)
+    with_prefix = subprocess.run([sys.executable, "-B", "-X", "pycache_prefix=" + str(tmp_path / "fresh"), "-c", probe],
+                                 capture_output=True, text=True).stdout.strip()
+    assert with_prefix == "good"        # the same attack is neutralised by the launcher's flags
+
+
+def test_each_resolved_launcher_gets_its_own_fresh_pycache_dir(tmp_path):
+    a = ex.resolve_test_argv("python -m pytest x.py", tmp_path, python="python")
+    b = ex.resolve_test_argv("python -m pytest x.py", tmp_path, python="python")
+    pa = [t for t in a if t.startswith("pycache_prefix=")]
+    pb = [t for t in b if t.startswith("pycache_prefix=")]
+    assert pa and pb and pa != pb
