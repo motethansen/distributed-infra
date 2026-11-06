@@ -153,7 +153,7 @@ def _cost_usd(usage: dict, model: str) -> float | None:
 def _attempts_cost(attempts: list, model: str) -> float | None:
     """Each attempt is priced from its own usage (own cache breakdown, or all-miss when it has none); the
     costs are then summed. None if any attempt cannot be priced."""
-    costs = [_cost_usd(a, model) for a in attempts]
+    costs = [_cost_usd(a, model) if isinstance(a, dict) else None for a in attempts]   # an attempt with no usage at all is unpriced
     return None if not costs or any(c is None for c in costs) else sum(costs)
 
 
@@ -163,11 +163,12 @@ def _with_usage(result: dict, usage, model: str) -> dict:
     Fields the API did not report are None, not 0."""
     result["agent"] = "deepseek"
     result["model"] = model
-    attempts = [a for a in (usage if isinstance(usage, (list, tuple)) else [usage]) if isinstance(a, dict)]
+    every_attempt = list(usage) if isinstance(usage, (list, tuple)) else [usage]   # keeps an attempt that reported no usage
+    attempts = [a for a in every_attempt if isinstance(a, dict)]
     u = _sum_usage(*attempts) or {}
     if any(_num(u.get(k)) is not None for k in _USAGE_KEYS):
         result["usage"] = {"tokens_in": _num(u.get("prompt_tokens")), "tokens_out": _num(u.get("completion_tokens")),
-                           "cost_usd": _attempts_cost(attempts, model)}
+                           "cost_usd": _attempts_cost(every_attempt, model)}
         if result["usage"]["cost_usd"] is None:
             result["usage"]["cost_basis"] = "unpriced"
         if _num(u.get("prompt_cache_hit_tokens")) is not None:

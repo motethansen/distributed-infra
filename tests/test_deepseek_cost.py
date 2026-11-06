@@ -148,3 +148,19 @@ def test_cache_breakdown_on_one_attempt_does_not_underprice_the_other(monkeypatc
     assert u["tokens_in"] == 200
     # attempt 1: 100 miss * 1.0; attempt 2: 40 miss * 1.0 + 60 hit * 0.1  (per million)
     assert u["cost_usd"] == pytest.approx((100 * 1.0 + 40 * 1.0 + 60 * 0.1) / 1_000_000)
+
+
+def test_retry_without_usage_does_not_record_the_first_call_as_the_whole_cost(monkeypatch):
+    """First call reports usage, the retry reports none: the retry was paid for but cannot be priced, so the total is unknown (NULL), not the first call's cost."""
+    _fake_client(monkeypatch, [_Resp(DSML, {"prompt_tokens": 1_000_000, "completion_tokens": 100_000}),
+                               _Resp("done", None)])
+    out = asyncio.run(ds.run("hi"))
+    assert out["ok"] is True
+    assert out["usage"]["cost_usd"] is None and out["usage"]["cost_basis"] == "unpriced"
+    assert out["usage"]["tokens_in"] == 1_000_000          # the tokens that WERE reported are still kept
+
+
+def test_first_call_without_usage_and_priced_retry_is_also_unknown(monkeypatch):
+    _fake_client(monkeypatch, [_Resp(DSML, None), _Resp("done", {"prompt_tokens": 1_000_000, "completion_tokens": 0})])
+    out = asyncio.run(ds.run("hi"))
+    assert out["usage"]["cost_usd"] is None
