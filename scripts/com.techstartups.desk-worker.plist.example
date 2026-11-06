@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent: desk worker (scripts/desk_worker.py) on the mac-mini. Claims typed desk commands from the orchestrator.
+
+  This file holds NO secrets. DESK_SECRET lives in the repo's .env (chmod 600, gitignored), loaded by
+  scripts/run-with-env.sh. ORCHESTRATOR_URL below is a placeholder: use your orchestrator's tailnet address.
+
+  Install (replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout):
+    cp scripts/com.techstartups.desk-worker.plist.example ~/Library/LaunchAgents/com.techstartups.desk-worker.plist
+    # edit the paths and ORCHESTRATOR_URL in the copy, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.desk-worker.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.techstartups.desk-worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+    <string>--</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/python</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/desk_worker.py</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USERNAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>ORCHESTRATOR_URL</key><string>http://100.64.0.1:8000</string>
+    <key>DESK_POLL_SECONDS</key><string>30</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+
+  <key>StandardOutPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/desk-worker.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/desk-worker.err</string>
+</dict>
+</plist>
