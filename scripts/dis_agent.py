@@ -679,7 +679,7 @@ def _print_responses() -> None:
     try:
         out = scrum_responses.section(sc.client(), _board()["digest"])
     except (Exception, SystemExit):
-        return
+        out = "\nresponses unavailable"
     if out:
         print(out)
 

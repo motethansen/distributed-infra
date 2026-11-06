@@ -96,3 +96,8 @@ def test_an_unavailable_endpoint_does_not_break_the_desk():
         def _call(self, *a, **k):
             raise sf.PlanError("no orchestrator reachable")
     assert "unavailable" in sr.section(Down(), DIGEST)
+
+
+def test_next_prints_responses_unavailable_when_the_orchestrator_is_unreachable(capsys):
+    da._print_responses()  # sc.client is refused by the fixture
+    assert "responses unavailable" in capsys.readouterr().out

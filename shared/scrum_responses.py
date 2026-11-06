@@ -22,12 +22,12 @@ def fetch_pending(client: Any) -> tuple[list[dict], str | None]:
     """(response rows, error). Never raises: the desk must still render when the responses endpoint is unavailable."""
     try:
         body = client._call("GET", "/scrum/responses", params={"status": "pending", "latest": 1})
-    except Exception as e:
-        return [], f"responses unavailable ({str(e)[:100]})"
+    except Exception:
+        return [], "responses unavailable"
     if isinstance(body, dict):
         body = body.get("responses") or body.get("items")
     if not isinstance(body, list):
-        return [], "responses unavailable (unexpected reply)"
+        return [], "responses unavailable"
     # The S-1 rows carry no `kind`: they are all responses. Once rows have a kind, only kind=response is a response.
     return [r for r in body if isinstance(r, dict) and r.get("kind", "response") == "response"], None
 
