@@ -656,13 +656,16 @@ def parse_verdict(text):
     return found[-1] if found else "UNKNOWN"
 
 
-TRUSTED_PYTEST_INI = "[pytest]\npythonpath = .\n"
+def trusted_pytest_ini(root):
+    """The harness's own pytest config. pytest resolves `pythonpath` relative to the ini's directory, which is outside
+    the checkout, so the sandbox root is written as an ABSOLUTE path."""
+    return f"[pytest]\npythonpath = {os.path.abspath(str(root))}\n"
 
 
 def resolve_test_argv(test_cmd, cwd, python=None, ini=None):
     """Tokenise test_cmd and launch pytest as `python -I -B -m pytest`: isolated mode puts neither the cwd nor the script
     dir on sys.path and ignores PYTHON* variables, so nothing the agent added (pytest.py, sitecustomize.py, ...) can
-    shadow the installed pytest. The trusted ini (-c) sets `pythonpath = .`, which pytest applies after it has started,
+    shadow the installed pytest. The trusted ini (-c) sets `pythonpath` to the absolute checkout path, which pytest applies after it has started,
     so the tests can still import the agent's code. No cache plugin; the rootdir is pinned."""
     argv = shlex.split(test_cmd)
     if argv and argv[0] in ("python", "python3"):
@@ -707,7 +710,7 @@ class SubprocessRunner:
     def run_tests(self, test_cmd, cwd):
         with tempfile.TemporaryDirectory(prefix="llmexp-home-") as home:
             ini = Path(home) / "pytest.ini"
-            ini.write_text(TRUSTED_PYTEST_INI)
+            ini.write_text(trusted_pytest_ini(cwd))
             (Path(home) / "home").mkdir()
             argv = resolve_test_argv(test_cmd, cwd, ini=ini)
             try:

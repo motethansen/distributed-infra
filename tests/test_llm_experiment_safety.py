@@ -543,7 +543,7 @@ def test_pytest_is_launched_isolated_with_a_trusted_pythonpath_ini(tmp_path):
     assert argv[:4] == ["/venv/py", "-I", "-B", "-m"] and argv[4] == "pytest"
     assert argv[:1] + argv[4:5] == ["/venv/py", "pytest"]
     assert ex.resolve_test_argv("pytest x.py", tmp_path, python="/venv/py")[:5] == ["/venv/py", "-I", "-B", "-m", "pytest"]
-    assert "pythonpath = ." in ex.TRUSTED_PYTEST_INI
+    assert f"pythonpath = {tmp_path}\n" in ex.trusted_pytest_ini(tmp_path)
 
 
 def test_isolated_launcher_alone_ignores_a_shadow_pytest_module(tmp_path):
@@ -634,3 +634,14 @@ def test_tampered_files_are_sanitised_in_the_public_report(world):
     dumped = json.dumps(rep)
     assert "someone" not in dumped and "ok/conftest.py" in dumped
     assert raw.tampered_files[0] == leaked                       # the run object itself is untouched
+
+
+def test_absolute_pythonpath_lets_the_launcher_import_the_checkout_from_another_cwd(tmp_path, monkeypatch):
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "mymod.py").write_text("VALUE = 7\n")
+    (sandbox / "test_x.py").write_text("import mymod\n\n\ndef test_x():\n    assert mymod.VALUE == 7\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert ex.SubprocessRunner(cli="claude").run_tests("python -m pytest test_x.py -q", sandbox) == ex.PYTEST_PASSED
