@@ -112,3 +112,25 @@ def test_main_exits_nonzero_on_broken_fixture(fx, tmp_path, monkeypatch):
 def test_parse_verdict():
     assert ex.parse_verdict("blah APPROVE\nREQUEST_CHANGES") == "REQUEST_CHANGES"
     assert ex.parse_verdict("nothing") == "UNKNOWN"
+
+
+def test_install_test_file_copies_into_worktree(fx, tmp_path):
+    d, repo = fx
+    (d / "acceptance_test.py").write_text("def test_x(): pass\n")
+    meta = json.loads((d / "fixture.json").read_text())
+    meta.update(test_file="acceptance_test.py", test_cmd="python -m pytest test_acc.py -q")
+    (d / "fixture.json").write_text(json.dumps(meta))
+    fixture = ex.load_fixture(d)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    ex.install_test_file(fixture, wt)
+    assert (wt / "test_acc.py").read_text() == "def test_x(): pass\n"
+
+
+def test_di020_fixture_is_well_formed():
+    d = Path(__file__).resolve().parent / "fixtures" / "experiments" / "di020_cwd_expanduser"
+    fixture = ex.load_fixture(d)
+    assert len(fixture.pinned_commit) == 40 and len(fixture.known_good_commit) == 40
+    assert fixture.pinned_commit != fixture.known_good_commit
+    assert fixture.test_cmd == "python -m pytest test_di020_acceptance.py -q"
+    assert (d / fixture.test_file).is_file()

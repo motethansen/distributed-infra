@@ -218,6 +218,8 @@ class Fixture:
     test_cmd: str
     prompt: str
     known_good_commit: "str | None" = None
+    test_file: "str | None" = None  # file in the fixture dir, copied into the worktree root as test_<name>
+    fixture_dir: "Path | None" = None
 
 
 def load_fixture(path):
@@ -241,7 +243,8 @@ def load_fixture(path):
     if not prompt.strip():
         raise FixtureError(f"fixture {d.name}: task.md is empty")
     return Fixture(name=data["name"], repo_url_or_path=data["repo_url_or_path"], pinned_commit=data["pinned_commit"],
-                   test_cmd=data["test_cmd"], prompt=prompt, known_good_commit=data.get("known_good_commit"))
+                   test_cmd=data["test_cmd"], prompt=prompt, known_good_commit=data.get("known_good_commit"),
+                   test_file=data.get("test_file"), fixture_dir=d)
 
 
 def resolve_fixture_arg(task):
@@ -253,6 +256,21 @@ def resolve_fixture_arg(task):
 # ── Worktrees ────────────────────────────────────────────────────────────────
 def _git(repo, *args):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+
+
+def install_test_file(fixture, wt):
+    """Copy the fixture's acceptance test into the worktree root: the pinned commit predates it.
+
+    fixture.json's test_file is a file name inside the fixture dir; the copy is named by test_cmd's target
+    (test_di020_acceptance.py for DI-020), taken from the first `test_*.py` token of test_cmd.
+    """
+    if not fixture.test_file:
+        return
+    src = Path(fixture.fixture_dir) / fixture.test_file
+    if not src.is_file():
+        raise FixtureError(f"fixture {fixture.name}: test_file {fixture.test_file} not found in {fixture.fixture_dir}")
+    m = re.search(r"(test_[\w.-]+\.py)", fixture.test_cmd)
+    shutil.copyfile(src, Path(wt) / (m.group(1) if m else "test_" + fixture.test_file))
 
 
 def make_worktree(repo, commit, base_dir):
@@ -361,6 +379,7 @@ def check_fixture_fails_before(fixture, runner, workdir=None):
     try:
         repo = resolve_repo(fixture, base)
         wt = make_worktree(repo, fixture.pinned_commit, base)
+        install_test_file(fixture, wt)
         if runner.run_tests(fixture.test_cmd, wt) == 0:
             raise FixtureBrokenError(BROKEN_FIXTURE_MSG)
     finally:
@@ -396,6 +415,7 @@ def run_one(fixture, variant, repeat, runner, workdir):
     try:
         repo = resolve_repo(fixture, workdir)
         wt = make_worktree(repo, fixture.pinned_commit, workdir)
+        install_test_file(fixture, wt)
         argv = build_command(variant, fixture.prompt, MAX_BUDGET_USD)
         out, rc, wall = runner.run_agent(argv, wt, AGENT_TIMEOUT_S)
         res.wall_s = wall
