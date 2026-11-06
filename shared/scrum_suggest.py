@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import logging
 import re
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -20,7 +22,9 @@ log = logging.getLogger(__name__)
 
 MAX_CHARS = 300
 MAX_PARALLEL = 3              # model calls in flight at once
-LOOKUP_DEADLINE_SECS = 2.0    # all cache lookups together: slow storage shows no suggestions, never a slow board
+LOOKUP_DEADLINE_SECS = 4.0    # hard bound on all cache lookups together: slow storage never makes a slow board
+SLOW_LOOKUP_LOG_SECS = 1.0    # a lookup slower than this (finished or not) logs one line
+KNOWN_MAX = 2000              # last-known-good rows kept in this process
 CALL_TIMEOUT_SECS = 12.0
 MODEL = "sonnet"
 
@@ -85,31 +89,82 @@ def _entries(digest: dict[str, Any]) -> list[tuple[str, dict]]:
     return [(sec, e) for sec, key in _SECTIONS for e in digest.get(key) or [] if isinstance(e, dict) and e.get("item_key")]
 
 
+_KNOWN: "OrderedDict[tuple[str, str], dict]" = OrderedDict()    # last row seen per (item_key, evidence_hash), LRU
+
+
+def remember(item_key: str, ev_hash: str, row: dict) -> None:
+    _KNOWN[(item_key, ev_hash)] = _public(row)
+    _KNOWN.move_to_end((item_key, ev_hash))
+    while len(_KNOWN) > KNOWN_MAX:
+        _KNOWN.popitem(last=False)
+
+
+def _known(item_key: str, ev_hash: str) -> dict | None:
+    row = _KNOWN.get((item_key, ev_hash))                 # same evidence hash only: a changed hash is a new suggestion
+    if row is not None:
+        _KNOWN.move_to_end((item_key, ev_hash))
+    return row
+
+
 async def attach_cached(digest: dict[str, Any], store: Any, unresolved: set[str] | None = None) -> dict[str, Any]:
     """Set `suggestion` on every review/decision/adjustment entry from the store only: the stored row or None.
-    Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestion(item_key, hash).
-    The lookups run together and share one deadline (LOOKUP_DEADLINE_SECS). Item keys whose lookup did not finish
-    are added to `unresolved`: their suggestion may exist, so the caller must not generate it again."""
+    Never calls the model. In place; returned for convenience. `store` has get_scrum_suggestions(pairs) (one query)
+    or else get_scrum_suggestion(item_key, hash). All lookups share one hard deadline (LOOKUP_DEADLINE_SECS).
+    When the store is slow or fails, an entry gets the last row seen for the SAME evidence hash, so ids stay stable.
+    Item keys with no answer at all are added to `unresolved`: their suggestion may exist, so the caller must not
+    generate it again."""
     entries = [e for _, e in _entries(digest)]
-    pending = {e["item_key"] for e in entries}
+    hashes = [evidence_hash(e) for e in entries]
+    pending = set(range(len(entries)))
     for e in entries:
         e["suggestion"] = None
 
-    async def look(e: dict) -> None:
-        try:
-            row = await store.get_scrum_suggestion(e["item_key"], evidence_hash(e))
-        except Exception as exc:                          # the store is optional advice too
-            log.warning("scrum suggestion lookup failed for %s: %s", e["item_key"], exc)
-            return                                        # not a confirmed miss: stays unresolved, so no model call
-        e["suggestion"] = _public(row) if row else None
-        pending.discard(e["item_key"])
+    def settle(i: int, row: dict | None) -> None:
+        if row:
+            remember(entries[i]["item_key"], hashes[i], row)
+        entries[i]["suggestion"] = _public(row) if row else None
+        pending.discard(i)
 
+    async def batch() -> None:
+        pairs = list(dict.fromkeys((e["item_key"], h) for e, h in zip(entries, hashes)))
+        rows = await store.get_scrum_suggestions(pairs) if pairs else {}
+        for i in list(pending):
+            settle(i, rows.get((entries[i]["item_key"], hashes[i])))
+
+    async def single(i: int) -> None:
+        try:
+            settle(i, await store.get_scrum_suggestion(entries[i]["item_key"], hashes[i]))
+        except Exception:                                 # counted once below; stays pending
+            failed.append(i)
+
+    failed: list[int] = []
+    started = time.monotonic()
+    reason = None
     try:
-        await asyncio.wait_for(asyncio.gather(*(look(e) for e in entries)), LOOKUP_DEADLINE_SECS)
+        if hasattr(store, "get_scrum_suggestions"):
+            await asyncio.wait_for(batch(), LOOKUP_DEADLINE_SECS)
+        else:
+            await asyncio.wait_for(asyncio.gather(*(single(i) for i in sorted(pending))), LOOKUP_DEADLINE_SECS)
     except asyncio.TimeoutError:
-        log.warning("scrum suggestion lookups passed %.1fs; %d items show no suggestion this time", LOOKUP_DEADLINE_SECS, len(pending))
-    if unresolved is not None:
-        unresolved |= pending
+        reason = "passed the deadline"
+    except Exception as exc:                              # the store is optional advice too
+        reason = f"failed ({type(exc).__name__}: {exc})"
+    if failed and reason is None:
+        reason = f"failed for {len(failed)} items"
+    took = time.monotonic() - started
+    if pending:
+        stale = 0
+        for i in sorted(pending):
+            row = _known(entries[i]["item_key"], hashes[i])
+            if row is not None:
+                entries[i]["suggestion"], stale = dict(row), stale + 1
+        left = {entries[i]["item_key"] for i in pending if entries[i]["suggestion"] is None}
+        log.warning("scrum suggestion lookup %s after %.1fs (%d items): %d served from last known, %d without a suggestion",
+                    reason or "incomplete", took, len(entries), stale, len(left))
+        if unresolved is not None:
+            unresolved |= left
+    elif took > SLOW_LOOKUP_LOG_SECS:
+        log.warning("scrum suggestion lookup slow: %.1fs for %d items", took, len(entries))
     return digest
 
 

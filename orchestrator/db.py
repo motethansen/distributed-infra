@@ -412,6 +412,29 @@ async def get_scrum_suggestion(item_key: str, evidence_hash: str) -> dict | None
         return dict(row) if row else None
 
 
+_SUG_BATCH = 400          # 2 variables per pair; stays under SQLite's 999-variable limit
+
+
+async def get_scrum_suggestions(pairs: list[tuple[str, str]]) -> dict[tuple[str, str], dict]:
+    """Batch of get_scrum_suggestion: {(item_key, evidence_hash): row} for the pairs that have a stored row."""
+    pairs = list(dict.fromkeys(pairs))
+    out: dict[tuple[str, str], dict] = {}
+    if not pairs:
+        return out
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        await _ensure_schema(db)
+        for i in range(0, len(pairs), _SUG_BATCH):
+            chunk = pairs[i:i + _SUG_BATCH]
+            where = " OR ".join("(item_key = ? AND evidence_hash = ?)" for _ in chunk)
+            cur = await db.execute(f"SELECT {_SUG_COLS}, item_key, evidence_hash FROM scrum_suggestions WHERE {where}",
+                                   [v for pair in chunk for v in pair])
+            for r in await cur.fetchall():
+                d = dict(r)
+                out[(d.pop("item_key"), d.pop("evidence_hash"))] = d
+    return out
+
+
 async def get_scrum_suggestion_by_id(suggestion_id: str) -> dict | None:
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
