@@ -185,12 +185,41 @@ async def test_c4_second_result_is_409(api):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("st", ["queued", "running", "bogus"])
-async def test_c4_result_status_other_than_done_failed_rejected(api, st):
+async def test_c4_result_status_other_than_done_failed_is_409(api, st):
     async with _client(api) as c:
         i = await _queued(c)
         await c.post(f"/scrum/responses/{i}/consume", headers=H)
         r = await c.post(f"/scrum/responses/{i}/result", json={"status": st, "summary": "x"}, headers=H)
-    assert r.status_code in (409, 422)
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [{"summary": "x"}, {"status": 5, "summary": "x"}, {"status": "done", "summary": "x" * 2001},
+                                  {"status": "done", "extra": 1}])
+async def test_c4_malformed_result_body_is_422(api, body):
+    async with _client(api) as c:
+        i = await _queued(c)
+        await c.post(f"/scrum/responses/{i}/consume", headers=H)
+        r = await c.post(f"/scrum/responses/{i}/result", json=body, headers=H)
+    assert r.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path, to", [("done", "running"), ("failed", "done"), ("queued", "done"),
+                                      ("queued", "failed"), ("running", "queued"), ("done", "queued"),
+                                      ("failed", "running")])
+async def test_c4_every_other_transition_is_409(api, path, to):
+    """Lifecycle is queued -> running -> done|failed only; reach `path`, then try to move to `to`."""
+    async with _client(api) as c:
+        i = await _queued(c)
+        if path != "queued":
+            await c.post(f"/scrum/responses/{i}/consume", headers=H)
+        if path in ("done", "failed"):
+            assert (await c.post(f"/scrum/responses/{i}/result", json={"status": path, "summary": ""}, headers=H)).status_code == 200
+        r = await c.post(f"/scrum/responses/{i}/result", json={"status": to, "summary": "x"}, headers=H)
+        assert r.status_code == 409
+        state = [x for x in (await c.get("/scrum/responses?kind=command", headers=H)).json() if x["id"] == i][0]
+    assert state["status"] == path
 
 
 @pytest.mark.asyncio
@@ -221,6 +250,32 @@ async def test_c5_rate_limit_11th_is_429_per_actor(api):
             assert (await _post(c, _intent("plan", actor="rl"))).status_code == 201, n
         assert (await _post(c, _intent("plan", actor="rl"))).status_code == 429
         assert (await _post(c, _intent("plan", actor="other"))).status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_c5_rate_limit_holds_under_concurrency(api):
+    """12 simultaneous requests from one actor: exactly 10 get in, 2 are refused, and only 10 rows exist."""
+    import asyncio
+    async with _client(api) as c:
+        rs = await asyncio.gather(*[_post(c, _intent("plan", actor="burst")) for _ in range(12)])
+        rows = (await c.get("/scrum/responses?kind=command", headers=H)).json()
+    codes = sorted(r.status_code for r in rs)
+    assert codes == [201] * 10 + [429] * 2
+    assert len([r for r in rows if r["actor"] == "burst"]) == 10
+    con = sqlite3.connect(api.db._db_path())
+    assert con.execute("SELECT COUNT(*) FROM scrum_audit WHERE actor='burst'").fetchone()[0] == 10
+
+
+@pytest.mark.asyncio
+async def test_c5_replay_at_the_limit_returns_original_not_429(api):
+    async with _client(api) as c:
+        first = await _post(c, _intent("plan", actor="rl2"), key="same")
+        for _ in range(9):
+            await _post(c, _intent("plan", actor="rl2"))
+        again = await _post(c, _intent("plan", actor="rl2"), key="same")
+        extra = await _post(c, _intent("plan", actor="rl2"))
+    assert again.status_code == 201 and again.json()["id"] == first.json()["id"]
+    assert extra.status_code == 429
 
 
 # 6

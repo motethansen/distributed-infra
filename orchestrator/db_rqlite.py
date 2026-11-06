@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 
 from shared import desk_store as ds, tracking
-from shared.desk_errors import DeskConflict, DeskPaused
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
 from shared.models import Task, TaskStatus
 
 RQLITE_URL = os.getenv("RQLITE_URL", "http://localhost:4001").rstrip("/")
@@ -430,16 +430,21 @@ async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
 
 # ── Desk commands (kind='command' rows in scrum_responses) ───────────────────
 
-async def insert_command(fields: dict, idempotency_key: str | None = None) -> dict:
-    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409)."""
+async def insert_command(fields: dict, idempotency_key: str | None = None, rate_limit: int | None = None) -> dict:
+    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409).
+    With rate_limit, the count and the insert are one statement; DeskRateLimited (429) when the actor is at the limit."""
     if idempotency_key is not None:
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_IDEM_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         row = await _one(ds.COMMAND_IDEM_SELECT, idempotency_key, cutoff)
         if row:
             return ds.command_replay_or_conflict(row, fields)
     created_at = _utc_now_iso()
-    res = await _execute([[ds.INSERT_COMMAND, *ds.command_params(fields, created_at, idempotency_key)],
-                          [ds.AUDIT_CREATE, "queued", fields["actor"], created_at]])
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ds.COMMAND_RATE_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    res = await _execute([[ds.INSERT_COMMAND_LIMITED,
+                           *ds.limited_command_params(fields, created_at, idempotency_key, cutoff, rate_limit)],
+                          [ds.AUDIT_CREATE_IF_INSERTED, "queued", fields["actor"], created_at]])
+    if not res or res[0].get("rows_affected", 0) < 1:
+        raise DeskRateLimited("rate limited")
     return {"id": res[0]["last_insert_id"], "created_at": created_at, "status": "queued"}
 
 

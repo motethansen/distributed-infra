@@ -7,3 +7,7 @@ class DeskConflict(Exception):
 
 class DeskPaused(Exception):
     """The desk is paused, so no new command may be claimed (HTTP 423)."""
+
+
+class DeskRateLimited(Exception):
+    """The actor already queued the maximum number of commands in the window (HTTP 429)."""

@@ -10,7 +10,7 @@ from typing import Any
 import aiosqlite
 
 from shared import desk_store as ds, tracking
-from shared.desk_errors import DeskConflict, DeskPaused
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
 from shared.models import Task, TaskStatus
 
 DB_PATH = os.getenv("QUEUE_DB_PATH", "./data/queue.db")
@@ -431,8 +431,9 @@ async def consume_scrum_response(response_id: int, consumed_by: str) -> str:
 
 # ── Desk commands (kind='command' rows in scrum_responses) ───────────────────
 
-async def insert_command(fields: dict, idempotency_key: str | None = None) -> dict:
-    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409)."""
+async def insert_command(fields: dict, idempotency_key: str | None = None, rate_limit: int | None = None) -> dict:
+    """Queue a command. Same Idempotency-Key within 10s replays it; with a different body it raises ValueError (409).
+    With rate_limit, the count and the insert are one statement; DeskRateLimited (429) when the actor is at the limit."""
     async with aiosqlite.connect(_db_path()) as db:
         db.row_factory = aiosqlite.Row
         await _ensure_schema(db)
@@ -443,10 +444,15 @@ async def insert_command(fields: dict, idempotency_key: str | None = None) -> di
             if row:
                 return ds.command_replay_or_conflict(dict(row), fields)
         created_at = _utc_now_iso()
-        cur = await db.execute(ds.INSERT_COMMAND, ds.command_params(fields, created_at, idempotency_key))
-        await db.execute(ds.AUDIT_CREATE, ("queued", fields["actor"], created_at))
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=ds.COMMAND_RATE_WINDOW_SECS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        cur = await db.execute(ds.INSERT_COMMAND_LIMITED,
+                               ds.limited_command_params(fields, created_at, idempotency_key, cutoff, rate_limit))
+        inserted, row_id = cur.rowcount, cur.lastrowid
+        await db.execute(ds.AUDIT_CREATE_IF_INSERTED, ("queued", fields["actor"], created_at))
         await db.commit()
-        return {"id": cur.lastrowid, "created_at": created_at, "status": "queued"}
+        if inserted < 1:
+            raise DeskRateLimited("rate limited")
+        return {"id": row_id, "created_at": created_at, "status": "queued"}
 
 
 async def transition_result(response_id: int, status: str, summary: str, actor: str = "unknown") -> str:

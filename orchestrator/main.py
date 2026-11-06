@@ -22,7 +22,7 @@ from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
 from shared import scrum, scrum_digest, scrum_suggest, tracking
 from shared.desk_allowlist import ALLOWED_TIERS_THIS_SPRINT
-from shared.desk_errors import DeskConflict, DeskPaused
+from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
 from shared.desk_intent import CommandIntent, intent_missing, intent_verdict
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
 
@@ -475,7 +475,7 @@ COMMAND_RATE_LIMIT_PER_HOUR = 10
 
 class DeskResultIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    status: Literal["done", "failed"]
+    status: str
     summary: str = Field(default="", max_length=2000)
 
 
@@ -524,13 +524,13 @@ async def _scrum_command_create(raw: dict, idempotency_key: str | None):
         raise HTTPException(status_code=403, detail="not available from the page")
     if not idempotency_key:
         raise HTTPException(status_code=400, detail="Idempotency-Key header is required for commands")
-    if await db.count_commands_last_hour(intent.actor) >= COMMAND_RATE_LIMIT_PER_HOUR:
-        raise HTTPException(status_code=429, detail="Too many commands from this actor in the last hour")
     fields = intent.model_dump()
     fields["tier"] = tier
     try:
         # Recorded as queued even while the desk is paused; only the claim is refused.
-        row = await db.insert_command(fields, idempotency_key)
+        row = await db.insert_command(fields, idempotency_key, COMMAND_RATE_LIMIT_PER_HOUR)
+    except DeskRateLimited:
+        raise HTTPException(status_code=429, detail="Too many commands from this actor in the last hour")
     except ValueError:
         raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different command")
     log.info("desk command queued id=%s verb=%s tier=%s actor=%s", row["id"], intent.verb, tier, intent.actor)
@@ -553,6 +553,8 @@ async def scrum_response_result(response_id: int, raw: dict = Body(...), x_secre
                                 x_actor: str = Header(default="")):
     """A worker reports how a claimed (running) command ended. Allowed once, only from running; else 409."""
     body = _validate_body(DeskResultIn, raw)
+    if body.status not in ("done", "failed"):   # a running command can only end done or failed
+        raise HTTPException(status_code=409, detail="Command cannot move to " + body.status[:20])
     try:
         outcome = await db.transition_result(response_id, body.status, body.summary, x_actor or "unknown")
     except DeskConflict:

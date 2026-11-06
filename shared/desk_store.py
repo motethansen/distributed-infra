@@ -64,6 +64,15 @@ COMMAND_PUBLIC = "id, status, tier, actor, created_at, verb, result_summary"
 INSERT_COMMAND = ("INSERT INTO scrum_responses (item_key, project, section, action, actor, created_at, status, "
                   "idempotency_key, kind, verb, sprint, story_id, plan_digest, evidence, tier) "
                   "VALUES (?, ?, 'desk', 'command', ?, ?, 'queued', ?, 'command', ?, ?, ?, ?, ?, ?)")
+# Count-and-insert as ONE statement: the row is added only while the actor has fewer than `limit` commands since
+# `cutoff`, so concurrent requests cannot both pass a check that only one of them should. Params: the INSERT_COMMAND
+# values, then actor, cutoff, limit.
+INSERT_COMMAND_LIMITED = ("INSERT INTO scrum_responses (item_key, project, section, action, actor, created_at, status, "
+                          "idempotency_key, kind, verb, sprint, story_id, plan_digest, evidence, tier) "
+                          "SELECT ?, ?, 'desk', 'command', ?, ?, 'queued', ?, 'command', ?, ?, ?, ?, ?, ? "
+                          "WHERE (SELECT COUNT(*) FROM scrum_responses WHERE COALESCE(kind, 'response')='command' "
+                          "AND actor=? AND created_at>=?) < ?")
+NO_RATE_LIMIT = 1 << 62
 COMMAND_IDEM_FIELDS = ("project", "actor", "verb", "sprint", "story_id", "plan_digest", "evidence", "tier")
 COMMAND_IDEM_SELECT = ("SELECT id, created_at, status, kind, " + ", ".join(COMMAND_IDEM_FIELDS) +
                        " FROM scrum_responses WHERE idempotency_key = ? AND created_at >= ? ORDER BY id ASC LIMIT 1")
@@ -71,6 +80,9 @@ COMMAND_IDEM_SELECT = ("SELECT id, created_at, status, kind, " + ", ".join(COMMA
 # Each audit row is written in the same transaction as the change it records.
 AUDIT_CREATE = ("INSERT INTO scrum_audit (response_id, from_status, to_status, actor, at) "
                 "VALUES (last_insert_rowid(), NULL, ?, ?, ?)")
+# Only when the preceding INSERT actually added a row (a rate-limited INSERT ... SELECT adds none).
+AUDIT_CREATE_IF_INSERTED = ("INSERT INTO scrum_audit (response_id, from_status, to_status, actor, at) "
+                            "SELECT last_insert_rowid(), NULL, ?, ?, ? WHERE changes() > 0")
 AUDIT_IF_CHANGED = ("INSERT INTO scrum_audit (response_id, from_status, to_status, actor, at) "
                     "SELECT ?, ?, ?, ?, ? WHERE changes() > 0")
 AUDIT_PAUSE = ("INSERT INTO scrum_audit (response_id, from_status, to_status, actor, at) "
@@ -96,6 +108,12 @@ def command_params(fields: dict, created_at: str, idempotency_key: str | None) -
         ev = json.dumps(ev, sort_keys=True)
     return (f"command:{verb}", fields["project"], fields["actor"], created_at, idempotency_key, verb,
             fields.get("sprint"), fields.get("story_id"), fields.get("plan_digest"), ev, fields.get("tier"))
+
+
+def limited_command_params(fields: dict, created_at: str, idempotency_key: str | None, cutoff: str,
+                           limit: int | None) -> tuple:
+    return (*command_params(fields, created_at, idempotency_key), fields["actor"], cutoff,
+            NO_RATE_LIMIT if limit is None else limit)
 
 
 def command_replay_or_conflict(row: dict, fields: dict) -> dict:
