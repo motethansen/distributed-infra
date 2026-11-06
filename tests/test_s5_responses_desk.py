@@ -587,3 +587,21 @@ def test_confirmed_text_between_500_and_the_cap_is_shown_in_full_and_consumed():
     out = []
     sr.show_and_consume(c, SDIGEST, "michael", emit=out.append)
     assert "t" * 1500 in out[0] and "left pending" not in out[0] and c.consumed == {1}
+
+
+BIDI = ["‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨", "⁩", "​", "‌", "‍",
+        "‎", "‏", "⁠", "﻿", "­", "؜"]
+
+
+@pytest.mark.parametrize("ch", BIDI)
+def test_clean_removes_invisible_and_direction_controls(ch):
+    assert sr.clean(f"ali{ch}ce{ch} @{ch}now") == "alice @now"
+
+
+@pytest.mark.parametrize("field", ["comment", "actor", "created_at", "item_key", "suggestion_text"])
+def test_direction_controls_never_reach_printed_lines(field):
+    bad = "".join(BIDI) + "x"
+    base = _confirm(1, "sug-new") if field == "suggestion_text" else _comment(1, "ok")
+    row = {**base, field: bad}
+    lines = sr.render([row], [], sr.current_suggestions(SDIGEST))
+    assert not any(ch in l for l in lines for ch in BIDI), lines

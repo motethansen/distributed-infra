@@ -30,11 +30,14 @@ NOT_TTY = "output is not a terminal: nothing was consumed"
 # every run of whitespace or control characters (LF, CR, TAB, ESC, C1, NEL, U+2028/2029, NBSP ...) is one space, so untrusted text can never
 # start a line of its own
 _CTRL = re.compile(r"[\s\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+# invisible and direction-changing format characters (zero-width, bidi embeddings/overrides/isolates, soft hyphen, BOM, Arabic letter mark)
+# are removed outright: they would reorder the labels printed after the text, or make two different actors/item keys look identical
+_FORMAT = re.compile("[\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]")
 
 
 def clean(text: Any, limit: int = MAX_TEXT) -> str:
     """Untrusted text made safe to print or embed: every run of whitespace/control characters becomes one space, cut to `limit`."""
-    s = _CTRL.sub(" ", str(text if text is not None else "")).strip()
+    s = _CTRL.sub(" ", _FORMAT.sub("", str(text if text is not None else ""))).strip()
     return s if len(s) <= limit else s[:limit] + "…"
 
 
