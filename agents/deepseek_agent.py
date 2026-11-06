@@ -157,8 +157,9 @@ def _with_usage(result: dict, usage, model: str) -> dict:
     u = usage if isinstance(usage, dict) else {}
     if any(_num(u.get(k)) is not None for k in _USAGE_KEYS):
         result["usage"] = {"tokens_in": _num(u.get("prompt_tokens")), "tokens_out": _num(u.get("completion_tokens")),
-                           "cost_usd": _cost_usd(u, model),
-                           "tokens_cache_read": _num(u.get("prompt_cache_hit_tokens"))}
+                           "cost_usd": _cost_usd(u, model)}
+        if _num(u.get("prompt_cache_hit_tokens")) is not None:
+            result["usage"]["tokens_cache_read"] = _num(u.get("prompt_cache_hit_tokens"))
         result["llm"] = True
     return result
 
