@@ -181,6 +181,10 @@ def median_and_spread(values):
     return statistics.median(values), min(values), max(values)
 
 
+REJECT_VERDICTS = ("REQUEST_CHANGES", "REJECT")
+UNREVIEWED_VERDICTS = (None, "unavailable", "UNKNOWN")
+
+
 def summarise_variant(runs):
     valid = [r for r in runs if r.status not in EXCLUDED_STATUSES]
     summary = {
@@ -188,6 +192,11 @@ def summarise_variant(runs):
         "n_excluded": len(runs) - len(valid),
         # budget_exceeded runs are in `valid` but never count as passes.
         "tests_passed_count": sum(1 for r in valid if r.status == "ok" and r.tests_passed is True),
+        "tampered_count": sum(1 for r in valid if r.tampered),
+        "diff_failed_count": sum(1 for r in valid if r.reviewer_verdict == "diff_failed"),
+        "rejected_count": sum(1 for r in valid if (r.reviewer_verdict or "").upper() in REJECT_VERDICTS),
+        # no review happened (reviewer unavailable, unparseable answer, or not run): shown as UNREVIEWED, does not block
+        "unreviewed_count": sum(1 for r in valid if r.reviewer_verdict in UNREVIEWED_VERDICTS),
     }
     for field in METRIC_FIELDS:
         if valid:
@@ -207,12 +216,19 @@ def verdict(summary, baseline_summary, repeats, name=None, unsupported=None):
         return "NOT SAFE"
     if summary["tests_passed_count"] != repeats:
         return "NOT SAFE"
+    if summary.get("tampered_count") or summary.get("diff_failed_count") or summary.get("rejected_count"):
+        return "NOT SAFE"
     base = baseline_summary["cost_usd"]["median"] if baseline_summary else None
     cost = summary["cost_usd"]["median"]
     if base is None or cost is None or not cost < base:
         return "NOT SAFE"
     return "SAFE"
 
+
+VERDICT_RULE = ("SAFE requires all of: 3 of 3 acceptance passes; no tampering; the diff was generated for every run; "
+                "median cost strictly below the baseline; the reviewer did not request changes on any run. A run the "
+                "reviewer could not judge (`unavailable`, unparseable, or not run) does not block SAFE but is flagged "
+                "UNREVIEWED.")
 
 REVIEWER_NOTE = ("The reviewer is the configured `reviewer` role (not Claude), so its spend is outside the Claude cost "
                  "caps and outside cost_usd. The same reviewer was used for every variant. `unavailable` means the role "
@@ -282,6 +298,11 @@ def render_markdown(report):
         L.append("| " + " | ".join([n, str(s["n_valid"]), str(s["n_excluded"]),
                                     f"{s['tests_passed_count']}/{report['repeats']}", *cells,
                                     report["verdicts"][n]]) + " |")
+    L += ["", "## Verdict rule", "", VERDICT_RULE]
+    for n, s in report["summaries"].items():
+        if s.get("unreviewed_count"):
+            L.append(f"- **UNREVIEWED**: {n} has {s['unreviewed_count']} run(s) without a reviewer verdict"
+                     + (" (verdict: " + report["verdicts"][n] + ")" if report["verdicts"][n] == "SAFE" else "") + ".")
     if report["unsupported"]:
         L += ["", "## Unsupported", ""]
         L += [f"- {n}: unsupported: {reason}" for n, reason in report["unsupported"].items()]

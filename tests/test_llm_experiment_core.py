@@ -96,3 +96,55 @@ def test_three_of_three_with_higher_cost_is_not_safe():
     pricey = summ([run(cost=5.0) for _ in range(3)])
     assert pricey["tests_passed_count"] == 3
     assert ex.verdict(pricey, BASE, 3) == "NOT SAFE"
+
+
+# ── Round 2, P2-4: every SAFE condition has its own test ─────────────────────────────────────────────────────────
+def three(**kw):
+    return summ([run(cost=1.0, reviewer_verdict="APPROVE", **kw) for _ in range(3)])
+
+
+def test_safe_baseline_case_for_the_conditions_below():
+    assert ex.verdict(three(), BASE, 3) == "SAFE"
+
+
+def test_tampered_run_blocks_safe_even_if_tests_passed_is_true():
+    s = summ([run(reviewer_verdict="APPROVE"), run(reviewer_verdict="APPROVE"),
+              run(reviewer_verdict="APPROVE", tampered=True)])
+    assert s["tampered_count"] == 1 and ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_diff_failed_blocks_safe():
+    s = summ([run(reviewer_verdict="APPROVE"), run(reviewer_verdict="APPROVE"), run(reviewer_verdict="diff_failed")])
+    assert s["diff_failed_count"] == 1 and ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_any_reviewer_reject_blocks_safe():
+    s = summ([run(reviewer_verdict="APPROVE"), run(reviewer_verdict="APPROVE"), run(reviewer_verdict="REQUEST_CHANGES")])
+    assert s["rejected_count"] == 1 and ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_median_cost_must_be_strictly_below_baseline():
+    s = summ([run(cost=2.0, reviewer_verdict="APPROVE") for _ in range(3)])
+    assert ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_two_of_three_passes_block_safe():
+    s = summ([run(reviewer_verdict="APPROVE"), run(reviewer_verdict="APPROVE"), run(passed=False, reviewer_verdict="APPROVE")])
+    assert ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_unavailable_reviewer_does_not_block_but_is_shown_as_unreviewed(tmp_path):
+    unrev = [run("lean", i, 1.0, reviewer_verdict="unavailable") for i in (1, 2, 3)]
+    s = summ(unrev)
+    assert s["unreviewed_count"] == 3 and ex.verdict(s, BASE, 3) == "SAFE"
+    rep = ex.build_report_dict("d", "f", "abc", 3, [run("baseline", i, 2.0) for i in (1, 2, 3)] + unrev)
+    md = ex.render_markdown(rep)
+    assert rep["verdicts"]["lean"] == "SAFE" and "UNREVIEWED" in md and "lean has 3 run(s)" in md
+
+
+def test_report_states_the_safe_rule_under_the_verdict():
+    rep = ex.build_report_dict("d", "f", "abc", 3, [run("baseline", i, 2.0) for i in (1, 2, 3)])
+    md = ex.render_markdown(rep)
+    assert md.index("## Median / min / max") < md.index("## Verdict rule") < md.index("## Scope")
+    for phrase in ("3 of 3 acceptance passes", "no tampering", "diff was generated", "strictly below", "did not request changes"):
+        assert phrase in md
