@@ -163,10 +163,11 @@ def _rates(model: str, now=None) -> dict | None:
     return r
 
 
-def _cost_usd(usage: dict, model: str) -> float | None:
+def _cost_usd(usage: dict, model: str, when=None) -> float | None:
     """USD cost of one call's usage dict from the price table, at the rate for the current time; None when the model
-    is unknown, its prices are not marked verified: true, or they are incomplete."""
-    p = _rates(model)
+    is unknown, its prices are not marked verified: true, or they are incomplete. `when` is the time the REQUEST
+    started (DeepSeek bills a request at the rate in force then); None means now."""
+    p = _rates(model, when)
     if p is None:
         return None
     tin, tout = usage.get("prompt_tokens"), usage.get("completion_tokens")
@@ -181,14 +182,16 @@ def _cost_usd(usage: dict, model: str) -> float | None:
     return (miss * p["input_fresh"] + hit * p["input_cache_hit"] + (tout or 0) * p["output"]) / 1_000_000
 
 
-def _attempts_cost(attempts: list, model: str) -> float | None:
+def _attempts_cost(attempts: list, model: str, starts: list | None = None) -> float | None:
     """Each attempt is priced from its own usage (own cache breakdown, or all-miss when it has none); the
     costs are then summed. None if any attempt cannot be priced."""
-    costs = [_cost_usd(a, model) if isinstance(a, dict) else None for a in attempts]   # an attempt with no usage at all is unpriced
+    starts = list(starts or [])
+    costs = [_cost_usd(a, model, starts[i] if i < len(starts) else None) if isinstance(a, dict) else None   # no usage at all: unpriced
+             for i, a in enumerate(attempts)]
     return None if not costs or any(c is None for c in costs) else sum(costs)
 
 
-def _with_usage(result: dict, usage, model: str) -> dict:
+def _with_usage(result: dict, usage, model: str, starts: list | None = None) -> dict:
     """Stamp agent, model and usage (tokens_in, tokens_out, cost_usd) on a result. `usage` is the raw API usage
     dict of one call, or a list of them (first call and retry); tokens are summed, cost is summed per call.
     Fields the API did not report are None, not 0."""
@@ -199,7 +202,7 @@ def _with_usage(result: dict, usage, model: str) -> dict:
     u = _sum_usage(*attempts) or {}
     if any(_num(u.get(k)) is not None for k in _USAGE_KEYS):
         result["usage"] = {"tokens_in": _num(u.get("prompt_tokens")), "tokens_out": _num(u.get("completion_tokens")),
-                           "cost_usd": _attempts_cost(every_attempt, model)}
+                           "cost_usd": _attempts_cost(every_attempt, model, starts)}
         if result["usage"]["cost_usd"] is None:
             result["usage"]["cost_basis"] = "unpriced"
         if _num(u.get("prompt_cache_hit_tokens")) is not None:
@@ -225,7 +228,10 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     effective_model = model or DEFAULT_MODEL
     effective_timeout = timeout if timeout is not None else DEFAULT_TIMEOUT_SECS
 
+    starts: list = []        # when each request started: the price in force at the start applies (peak vs off-peak)
+
     async def _ask(client, user_prompt: str) -> dict:
+        starts.append(_now())
         resp = await client.post(
             DEEPSEEK_API_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -249,7 +255,7 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
                 try:
                     retry = await _ask(client, prompt + RETRY_REMINDER)
                 except Exception as e:
-                    return _with_usage(_failure(e), usage, effective_model)   # the first call was paid for
+                    return _with_usage(_failure(e), usage, effective_model, starts)   # the first call was paid for
                 usage.append(retry.get("usage"))
                 data = retry
     except Exception as e:
@@ -258,8 +264,8 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     text = data["choices"][0]["message"]["content"]
     if _is_text_only_failure(text):
         return _with_usage({"error": TEXT_ONLY_ERROR, "agent": "deepseek", "ok": False,
-                            "failure_kind": FAILURE_KIND_TEXT_ONLY}, usage, effective_model)
-    return _with_usage({"response": text, "ok": True}, usage, effective_model)
+                            "failure_kind": FAILURE_KIND_TEXT_ONLY}, usage, effective_model, starts)
+    return _with_usage({"response": text, "ok": True}, usage, effective_model, starts)
 
 
 if __name__ == "__main__":

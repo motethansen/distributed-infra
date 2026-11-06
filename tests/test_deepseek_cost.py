@@ -229,3 +229,24 @@ def test_shipped_price_file_matches_the_official_page_numbers(monkeypatch):
     assert ds._rates("deepseek-chat", fri_peak) == ds._rates("deepseek-flash", fri_peak)
     assert ds._rates("deepseek-reasoner", fri_peak) is None
     ds._load_prices.cache_clear()
+
+
+def test_a_request_is_priced_at_its_start_time_not_when_the_usage_is_processed(monkeypatch, tmp_path):
+    """Starts at 03:59 UTC on a Friday (peak), 'finishes' after 04:00 (off-peak): it must be priced at the peak rate."""
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, 3)
+    clock = iter([datetime(2026, 11, 6, 3, 59, tzinfo=timezone.utc), datetime(2026, 11, 6, 4, 2, tzinfo=timezone.utc)])
+    monkeypatch.setattr(ds, "_now", lambda: next(clock))
+    _fake_client(monkeypatch, [_Resp("hello", {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000,
+                                               "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1_000_000})])
+    out = asyncio.run(ds.run("hi", model="deepseek-flash"))
+    assert out["usage"]["cost_usd"] == pytest.approx(1.50)      # peak: 0.30 + 1.20, not the off-peak 0.75
+
+
+def test_each_attempt_is_priced_at_its_own_start(monkeypatch, tmp_path):
+    _pin(monkeypatch, tmp_path, 2026, 11, 6, 3)
+    clock = iter([datetime(2026, 11, 6, 3, 59, tzinfo=timezone.utc), datetime(2026, 11, 6, 4, 1, tzinfo=timezone.utc)])
+    monkeypatch.setattr(ds, "_now", lambda: next(clock))
+    one = {"prompt_tokens": 1_000_000, "completion_tokens": 0, "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 1_000_000}
+    _fake_client(monkeypatch, [_Resp(DSML, one), _Resp("done", one)])
+    out = asyncio.run(ds.run("hi", model="deepseek-flash"))
+    assert out["usage"]["cost_usd"] == pytest.approx(0.30 + 0.15)   # first at peak, the retry off-peak
