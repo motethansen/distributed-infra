@@ -84,3 +84,15 @@ def test_markdown_and_reports(tmp_path):
     ex.write_reports(rep, d)
     assert json.loads((d / "report.json").read_text())["commit"] == "abc123"
     assert (d / "report.md").exists()
+
+
+def test_two_of_three_is_not_safe_even_when_cheaper():
+    cheap_two = summ([run(cost=0.1), run(cost=0.1), run(cost=0.1, passed=False)])
+    assert cheap_two["cost_usd"]["median"] < BASE["cost_usd"]["median"]
+    assert ex.verdict(cheap_two, BASE, 3) == "NOT SAFE"
+
+
+def test_three_of_three_with_higher_cost_is_not_safe():
+    pricey = summ([run(cost=5.0) for _ in range(3)])
+    assert pricey["tests_passed_count"] == 3
+    assert ex.verdict(pricey, BASE, 3) == "NOT SAFE"
