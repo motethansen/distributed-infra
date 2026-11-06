@@ -1,5 +1,9 @@
 # systemd user-level unit for an orchestrator on Linux, backed by the local rqlite node.
-# No secrets here: SECRET_KEY etc. come from .env (chmod 600, gitignored).
+# No secrets here: SECRET_KEY etc. come from .env (chmod 600, gitignored), loaded by scripts/run-with-env.sh.
+#
+# Precedence: Environment= below WINS over .env (same as the launchd plists). That is why the unit does not
+# use EnvironmentFile=: systemd would let .env override Environment=, so a `QUEUE_BACKEND=sqlite` line in .env
+# would silently switch this rqlite orchestrator back to a local database.
 #
 # Install:
 #   cp scripts/orchestrator.service ~/.config/systemd/user/orchestrator.service
@@ -14,11 +18,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/Projects/distributed-infra
-EnvironmentFile=%h/Projects/distributed-infra/.env
 Environment=QUEUE_BACKEND=rqlite
-Environment=RQLITE_URL=http://localhost:4001
+Environment=RQLITE_URL=http://<THIS_TAILSCALE_IP>:4001
 Environment=MACHINE_ROLE=orchestrator
-ExecStart=%h/Projects/distributed-infra/.venv/bin/uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000
+ExecStart=%h/Projects/distributed-infra/scripts/run-with-env.sh -- %h/Projects/distributed-infra/.venv/bin/uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
 

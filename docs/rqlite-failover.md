@@ -148,7 +148,7 @@ stop there.
 Replace `aiosqlite.connect(DB_PATH)` with an rqlite client (HTTP, or `pyrqlite`
 DB-API). The SQL strings are unchanged; only the connection/execute plumbing moves.
 
-- New env: `RQLITE_URL` (e.g. `http://localhost:4001`) — each orchestrator talks to
+- New env: `RQLITE_URL` (e.g. `http://<THIS_TAILSCALE_IP>:4001`; the node listens on its Tailscale address only, see `scripts/rqlite-node.service.example`) — each orchestrator talks to
   its **local** rqlite node; the node forwards writes to the leader.
 - `_ensure_schema` runs once at cluster bootstrap, not per-connection.
 

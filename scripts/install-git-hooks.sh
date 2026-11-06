@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install a pre-commit hook that runs scripts/check-secrets.sh, so a secret cannot be committed by accident.
+# Install a pre-commit hook that runs scripts/check-secrets.sh (which scans the STAGED content), so a secret cannot be committed by accident.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 hook="$(git -C "$ROOT" rev-parse --git-path hooks/pre-commit)"

@@ -145,7 +145,7 @@ Then:
 curl -s "http://<any-node-ip>:4001/nodes?nonvoters&timeout=3s"     # expect 3 voters, all reachable
 # on each orchestrator's .env:
 #   QUEUE_BACKEND=rqlite
-#   RQLITE_URL=http://localhost:4001
+#   RQLITE_URL=http://<THIS_TAILSCALE_IP>:4001
 ```
 
 Workers take several orchestrators in `ORCHESTRATOR_URLS` and fail over between them.
@@ -175,7 +175,7 @@ Test an agent on a worker: `./da`, then `assign say hello --agent=claude --type=
 
 | Symptom | Check |
 |---|---|
-| Worker logs `Poller error: ConnectError` | Tailscale up on both machines; `ORCHESTRATOR_URLS` correct; orchestrator listening on its Tailscale address (`QUEUE_HOST=0.0.0.0` or the tailnet IP) |
+| Worker logs `Poller error: ConnectError` | Tailscale up on both machines; `ORCHESTRATOR_URLS` correct; orchestrator listening on its Tailscale address (the service templates pass `--host` to uvicorn explicitly: edit it there, `QUEUE_HOST` in `.env` is not what they use) |
 | `401`/`403` from the API | `SECRET_KEY` differs between machines, or the `x-secret-key` header is missing |
 | Task stays `pending` | No online worker advertises that task type in `MACHINE_CAPABILITIES`, or `_target_machine` names a machine that is offline |
 | Queue returns `503` | rqlite lost quorum (2 of 3 nodes down); `curl …/nodes?nonvoters&timeout=3s` shows which |

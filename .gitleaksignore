@@ -1,0 +1,27 @@
+# Exact fingerprints (commit:file:rule:line) of findings that exist only in OLD history and cannot be rewritten.
+# Contains no names, emails or commit text. New findings are never covered by this file.
+072e4d7d730bb526bb4b0b5f55b999e2e2cc359a:workers/whatsapp-bridge/docker-compose.yml:env-assignment-with-value:16
+07d30cd5a76a77180893f30652e4c2f8ee6c8c36:docs/ARCHITECTURE.md:tailnet-device-ip:244
+07d30cd5a76a77180893f30652e4c2f8ee6c8c36:docs/ARCHITECTURE.md:tailnet-device-ip:245
+07d30cd5a76a77180893f30652e4c2f8ee6c8c36:docs/ARCHITECTURE.md:tailnet-device-ip:246
+07d30cd5a76a77180893f30652e4c2f8ee6c8c36:docs/ARCHITECTURE.md:tailnet-device-ip:252
+081f633a12b1752c405e7bcbecc087779f11e7f2:clients/fleet-mcp/server.py:tailnet-device-ip:37
+081f633a12b1752c405e7bcbecc087779f11e7f2:clients/fleet-mcp/server.py:tailnet-device-ip:67
+081f633a12b1752c405e7bcbecc087779f11e7f2:clients/fleet-mcp/vantage_reporter.py:tailnet-device-ip:7
+2a6bb2c9a38bbef87095abc8f41a84b4d408fb0a:workers/whatsapp-bridge/docker-compose.yml:env-assignment-with-value:15
+45cf7b8c2037708c98fdedbddaf5e8c97d5076a2:scripts/scrum_cli.py:tailnet-device-ip:42
+46da64cf7cc22b3405c40e0e21fcab91920c39e7:tests/test_netinfo.py:tailnet-device-ip:26
+46da64cf7cc22b3405c40e0e21fcab91920c39e7:tests/test_netinfo.py:tailnet-device-ip:62
+46da64cf7cc22b3405c40e0e21fcab91920c39e7:tests/test_netinfo.py:tailnet-device-ip:65
+46da64cf7cc22b3405c40e0e21fcab91920c39e7:tests/test_netinfo.py:tailnet-device-ip:83
+46da64cf7cc22b3405c40e0e21fcab91920c39e7:tests/test_netinfo.py:tailnet-device-ip:9
+6897505f9fb75bdf7b35cc5f9c14ed5a5ad79f83:clients/claude-commands/sprint.md:tailnet-device-ip:12
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:106
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:107
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:108
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:118
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:119
+8a81b72ec21a83697c6e12eb3ad9ba9eca072ec7:tests/test_netinfo.py:tailnet-device-ip:120
+ab74dac3c802ec08b43ae7a14a5584fb9541198c:scripts/scrum_cli.py:tailnet-device-ip:42
+c673b1f7a74864aae234b5117c9841cd3465e7e7:clients/claude-commands/sprint.md:tailnet-device-ip:12
+072e4d7d730bb526bb4b0b5f55b999e2e2cc359a:workers/whatsapp-bridge/.env.example:env-assignment-with-value:11

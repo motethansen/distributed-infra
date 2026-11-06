@@ -1,7 +1,9 @@
 # systemd user-level unit for a Linux worker (no sudo needed).
 #
 # This file holds NO secrets. SECRET_KEY, ORCHESTRATOR_URLS, DEEPSEEK_API and the rest live in
-# <checkout>/.env (chmod 600, gitignored) and are loaded by EnvironmentFile=.
+# <checkout>/.env (chmod 600, gitignored) and are loaded by scripts/run-with-env.sh.
+# Precedence: Environment= below WINS over .env (same as the launchd plists); the unit deliberately has no
+# EnvironmentFile=, because systemd would let .env override Environment= (e.g. MACHINE_ROLE).
 # %h is the home directory of the user running the unit; edit the checkout path if yours differs.
 #
 # Install:
@@ -20,9 +22,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/Projects/distributed-infra
-EnvironmentFile=%h/Projects/distributed-infra/.env
 Environment=MACHINE_ROLE=worker
-ExecStart=%h/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
+ExecStart=%h/Projects/distributed-infra/scripts/run-with-env.sh -- %h/Projects/distributed-infra/.venv/bin/uvicorn worker.main:app --host 0.0.0.0 --port 8001
 Restart=on-failure
 RestartSec=10
 

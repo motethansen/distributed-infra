@@ -9,6 +9,9 @@
 #   systemd `Environment=` line, CI secret or shell export can override any key.
 # * The file is parsed, never sourced: only KEY=VALUE lines are read, so nothing in it can
 #   run as code. Surrounding quotes are stripped; `#` comment lines and blank lines are skipped.
+#   A comment after a value is dropped: `A=1 # note`, `B="two words" # note` and `C='x' # note` give 1, two words, x.
+#   (Inside quotes a `#` is kept. Unquoted, a `#` only starts a comment when preceded by whitespace.)
+# * Refuses an env file that is a symlink (a link could point a secrets loader at another file).
 # * Refuses to run if the file is readable by group/others (it holds secrets): chmod 600 .env
 # * Values are never printed.
 set -euo pipefail
@@ -25,7 +28,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $# -gt 0 ]] || { echo "usage: run-with-env.sh [--env-file PATH] -- COMMAND [ARGS...]" >&2; exit 2; }
 
-if [[ -f "$ENV_FILE" ]]; then
+if [[ -L "$ENV_FILE" ]]; then
+  echo "run-with-env: $ENV_FILE is a symlink; refusing to load it. Point --env-file at the real file." >&2
+  exit 1
+elif [[ -f "$ENV_FILE" ]]; then
   # stat differs between macOS (-f %Lp) and Linux (-c %a)
   mode="$(stat -f '%Lp' "$ENV_FILE" 2>/dev/null || stat -c '%a' "$ENV_FILE")"
   if [[ "${mode: -2}" != "00" ]]; then
@@ -41,8 +47,8 @@ if [[ -f "$ENV_FILE" ]]; then
     key="${key%"${key##*[![:space:]]}"}"                    # trim trailing space on key
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
     val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
-    if [[ "$val" == \"*\" && ${#val} -ge 2 ]]; then val="${val:1:${#val}-2}"
-    elif [[ "$val" == \'*\' && ${#val} -ge 2 ]]; then val="${val:1:${#val}-2}"
+    if [[ "$val" =~ ^\"([^\"]*)\"([[:space:]]+\#.*)?$ ]]; then val="${BASH_REMATCH[1]}"       # "quoted" [# comment]
+    elif [[ "$val" =~ ^\'([^\']*)\'([[:space:]]+\#.*)?$ ]]; then val="${BASH_REMATCH[1]}"     # 'quoted' [# comment]
     else val="${val%%[[:space:]]#*}"; val="${val%"${val##*[![:space:]]}"}"; fi   # strip trailing ` # comment`
     [[ -z "${!key+x}" ]] && export "$key=$val"
   done < "$ENV_FILE"

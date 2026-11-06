@@ -39,7 +39,7 @@ from Tailscale itself (`tailscale status`), with worker-poll recency as a separa
 |---|---|---|---|
 | **mac-mini** | `<mac-mini-ip>` | orchestrator + worker + **rqlite voter** + WhatsApp bridge + WAHA + Vantage monitor | launchd |
 | **thinkpad-x1** | `<thinkpad-ip>` | orchestrator + worker + **rqlite voter** | systemd `--user` (lingering) |
-| **cloud Docker host** (a small droplet, `vizneo-docker`) | `<droplet-ip>` | **rqlite voter** only, in Docker | Docker `--restart unless-stopped` |
+| **cloud Docker host** (a small droplet) | `<droplet-ip>` | **rqlite voter** only, in Docker | Docker `--restart unless-stopped` |
 | **macbook-pro** | `<macbook-ip>` | owner's own machine: dev checkout, `dis-agent` / `da` CLIs. **Never a worker.** | none |
 
 - **mac-mini** is the always-on primary (orchestrator, WhatsApp bridge, Vantage, one voter).
@@ -50,7 +50,7 @@ from Tailscale itself (`tailscale status`), with worker-poll recency as a separa
 - **macbook-pro** submits work and reviews it. It is not an rqlite node and runs no worker, so a
   sleeping laptop never stalls the fleet.
 
-The earlier design used a Synology NAS (`daffy`) as the third voter. The NAS was decommissioned
+The earlier design used a Synology NAS as the third voter. The NAS was decommissioned
 on 2026-11-01 and replaced by the cloud Docker host; nothing in the running system refers to it.
 
 Two kinds of checkout: development happens on the owner's laptop; mac-mini and thinkpad run the
@@ -89,7 +89,7 @@ cluster, so both serve identical results.
 
 - **mac-mini** — launchd `com.techstartups.orchestrator`, port 8000.
 - **thinkpad** — systemd `--user` `orchestrator.service`, port 8000.
-- Both: `QUEUE_BACKEND=rqlite`, `RQLITE_URL=http://localhost:4001` (each talks to its
+- Both: `QUEUE_BACKEND=rqlite`, `RQLITE_URL=http://<THIS_TAILSCALE_IP>:4001` (each talks to its
   local rqlite node; followers forward writes to the leader).
 
 Backend selection is one line in `orchestrator/main.py`:
@@ -227,7 +227,10 @@ login is a recurring failure mode (on macOS the CLI keeps its login in the Keych
 | rqlite runbook / design | [rqlite-failover.md](rqlite-failover.md) · unit template `scripts/rqlite-node.service.example` |
 
 **Rollback:** the pre-cutover SQLite snapshot (`~/Projects/distributed-infra/data/queue.db`)
-is untouched. Reverting = remove `QUEUE_BACKEND` from the orchestrator plist + bootout/bootstrap.
+is untouched. Reverting = set `QUEUE_BACKEND=sqlite` where it is actually defined and restart. Removing it is not
+enough: the default is `sqlite` only when NEITHER the service definition (plist `EnvironmentVariables`, unit `Environment=`)
+NOR `.env` sets it, and a `QUEUE_BACKEND=rqlite` line in `.env` keeps the cluster in use. Check both places, then restart
+(launchd: bootout + bootstrap; systemd: `systemctl --user restart orchestrator`).
 
 **Decommissioned (2026-07-12):** the Phase-1 Litestream replication (the stopgap before
 rqlite) has been removed now that the cluster is live — the `com.techstartups.litestream`
@@ -257,7 +260,7 @@ current LAN IPs and whether Tailscale reaches it directly or through a relay).
   `-join <other-node>:4002` (it re-syncs from a snapshot in about a second).
 - **Changing a node's advertised address:** restart it with the new `-raft-adv-addr` and `-join` while a
   quorum is running.
-- **Before any membership change:** `curl localhost:4001/db/backup -o ~/Backups/rqlite-queue-<date>.sqlite`.
+- **Before any membership change:** `curl <THIS_TAILSCALE_IP>:4001/db/backup -o ~/Backups/rqlite-queue-<date>.sqlite`.
 - **Never** publish 4001/4002 on a public interface: rqlite here has no authentication. Reach it over Tailscale only.
 - Leadership sits wherever the last election put it (it may be the cloud host); it does not matter for
   correctness. `.stepdown <node>` in the rqlite CLI asks for a move but did not take effect in testing, so do

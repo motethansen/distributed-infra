@@ -60,3 +60,20 @@ def test_invalid_keys_are_skipped(tmp_path):
     f = envfile(tmp_path, "1BAD=x\nGOOD=y\nA B=z\n")
     r = run(f, "bash", "-c", 'echo "$GOOD"')
     assert r.stdout.strip() == "y"
+
+
+def test_quoted_value_followed_by_a_comment(tmp_path):
+    f = envfile(tmp_path, 'A="two words" # note\nB=\'x y\'   # note\nC="has # inside" # note\nD="plain"\nE=\'q\'\n')
+    r = run(f, "bash", "-c", 'echo "$A|$B|$C|$D|$E"')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "two words|x y|has # inside|plain|q"
+
+
+def test_refuses_a_symlinked_env_file(tmp_path):
+    real = envfile(tmp_path, "A=1\n")
+    link = tmp_path / "link.env"
+    link.symlink_to(real)
+    r = run(link, "bash", "-c", 'echo "[$A]"')
+    assert r.returncode != 0
+    assert "is a symlink; refusing" in r.stderr
+    assert r.stdout == ""            # the command never ran

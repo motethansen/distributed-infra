@@ -21,7 +21,7 @@ Every script and service reads configuration from the **environment**. Provide i
 |---|---|---|
 | A `.env` file in the checkout | `cp .env.example .env && chmod 600 .env` | a machine you own; the default |
 | The process environment | `export SECRET_KEY=…`, or `Environment=` in a unit | containers, one-off runs, anything a secret manager injects |
-| `EnvironmentFile=` (systemd) | points at the same `.env` | Linux services |
+| `scripts/run-with-env.sh` in `ExecStart=` (systemd) | loads the same `.env`; `Environment=` lines in the unit win over it | Linux services |
 | `scripts/run-with-env.sh` | loads `.env` into a launchd job or any command | macOS services |
 | GitHub Actions secrets | `${{ secrets.NAME }}` in a workflow | CI and automated deploys |
 | A password manager | Bitwarden, 1Password, … holds the originals | the source of truth; copy values into `.env` when setting up a machine |
@@ -48,11 +48,11 @@ value in each machine's `.env`, and keep the original in your password manager. 
 
 | Check | Where | What it does |
 |---|---|---|
-| `scripts/check-secrets.sh` | your machine | scans the files git would commit, with [gitleaks](https://github.com/gitleaks/gitleaks) and `.gitleaks.toml` |
+| `scripts/check-secrets.sh` | your machine | scans the staged (index) content, i.e. exactly what a commit would contain, with [gitleaks](https://github.com/gitleaks/gitleaks) and `.gitleaks.toml` |
 | `scripts/install-git-hooks.sh` | once per clone | runs that scan before every commit |
 | `secret-scan` job | `.github/workflows/ci.yml` | scans the commits of every push and pull request; the build fails on a finding |
 | `.gitleaks.toml` | repo root | built-in rules plus: Tailscale auth keys, real tailnet addresses, `SECRET_KEY=<value>`-style assignments |
-| `.gitleaks-baseline.json` | repo root | findings already in old commits (redacted), so only *new* ones fail |
+| `.gitleaksignore` | repo root | exact fingerprints (commit:file:rule:line, no personal data) of findings already in old commits, so only *new* ones fail |
 
 Also enable, in the repository's **Settings → Code security**: *Secret scanning* and *Push protection*. They block a push that
 contains a known provider token before it lands. The alternative local hook [`git-secrets`](https://github.com/awslabs/git-secrets) works too;

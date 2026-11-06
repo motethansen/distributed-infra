@@ -10,7 +10,8 @@
   Install (replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout):
     mkdir -p logs && chmod 600 .env
     cp scripts/com.techstartups.orchestrator.plist.example ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
-    # edit the paths in the copy, then:
+    # edit the paths in the copy and replace THIS_TAILSCALE_IP (the RQLITE_URL below) with this machine's
+    # `tailscale ip -4`, because the rqlite node listens on that address only, then:
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
   Restart after a code change:
     launchctl bootout gui/$(id -u)/com.techstartups.orchestrator; launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.orchestrator.plist
@@ -38,7 +39,7 @@
     <key>MACHINE_NAME</key><string>mac-mini</string>
     <key>MACHINE_ROLE</key><string>orchestrator</string>
     <key>QUEUE_BACKEND</key><string>rqlite</string>
-    <key>RQLITE_URL</key><string>http://localhost:4001</string>
+    <key>RQLITE_URL</key><string>http://THIS_TAILSCALE_IP:4001</string>
   </dict>
 
   <key>RunAtLoad</key><true/>
