@@ -68,6 +68,16 @@ async def _stop(proc: asyncio.subprocess.Process) -> None:
 
 async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int | None = None,
               session_id: str = "", resume: bool = False, allow_opus: bool = False, tools_off: bool = False) -> dict:
+    # The cost policy is checked before the CLI is looked up: refusing Opus must not depend on what is installed
+    # (on a machine without the CLI the caller would otherwise be told "not found" and retry elsewhere).
+    effective_model = _resolve_model(model, allow_opus)
+    if effective_model is None:
+        return {
+            "error": f"opus blocked by cost policy (requested model={model!r}); use 'sonnet' or 'haiku'",
+            "agent": "claude",
+            "ok": False,
+        }
+
     cli = _find_cli()
     if not cli:
         return {
@@ -75,14 +85,6 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
                 "claude CLI not found. Install: npm install -g @anthropic-ai/claude-code  "
                 "then login: claude login"
             ),
-            "agent": "claude",
-            "ok": False,
-        }
-
-    effective_model = _resolve_model(model, allow_opus)
-    if effective_model is None:
-        return {
-            "error": f"opus blocked by cost policy (requested model={model!r}); use 'sonnet' or 'haiku'",
             "agent": "claude",
             "ok": False,
         }

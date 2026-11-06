@@ -82,6 +82,17 @@ async def test_opus_without_role_is_still_refused_by_the_agent(api, tmp_path, mo
     assert not r["ok"] and "opus blocked" in r["error"]
 
 
+@pytest.mark.asyncio
+async def test_opus_policy_is_checked_before_the_cli_is_looked_up(monkeypatch):
+    """CI has no claude CLI: the refusal must still be the policy, not 'CLI not found'."""
+    from agents import claude_agent
+    monkeypatch.setattr(claude_agent, "_find_cli", lambda: None)
+    r = await claude_agent.run("hi", "opus", allow_opus=False)
+    assert not r["ok"] and "opus blocked" in r["error"]
+    r2 = await claude_agent.run("hi", "sonnet")
+    assert not r2["ok"] and "CLI not found" in r2["error"]          # an allowed model still reports the missing CLI
+
+
 async def _spend(api, usd):
     from shared.models import Task, TaskStatus
     t = await api.db.insert_task(Task(type=TaskType.agent_run, created_by="t", payload={"role": "product_owner"}))
