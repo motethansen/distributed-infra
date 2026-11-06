@@ -195,6 +195,36 @@ def test_fake_call_fence_is_detected_and_real_fence_beside_it_is_kept():
     assert ds.looks_like_tool_call(both) and not ds._is_text_only_failure(both)
 
 
+def test_commentary_before_a_fake_call_in_a_fence_is_still_imitation(monkeypatch):
+    reply = "```\nI'll run this now:\n<tool_call>{\"name\": \"bash\"}</tool_call>\n```"
+    sent = _patch_http(monkeypatch, [reply, reply])
+    out = asyncio.run(ds.run("run the tests"))
+    assert len(sent) == 2 and out["ok"] is False and out["failure_kind"] == "text_only"
+
+
+@pytest.mark.parametrize("label", ["FILE: fixture.xml\n", "FILE: fixture.xml\n\n  \n"])
+def test_a_file_labeled_xml_fixture_is_content_not_imitation(monkeypatch, label):
+    reply = label + "```xml\n<tool_call>{\"name\": \"bash\"}</tool_call>\n```"
+    sent = _patch_http(monkeypatch, [reply])
+    out = asyncio.run(ds.run("write an XML fixture"))
+    assert out["ok"] is True and len(sent) == 1 and "<tool_call>" in out["response"]
+    assert not ds.looks_like_tool_call(reply)
+
+
+def test_label_is_case_sensitive_and_must_be_adjacent():
+    fence = "```xml\n<tool_call>x</tool_call>\n```"
+    assert ds._is_text_only_failure("file: f.xml\n" + fence)
+    assert ds._is_text_only_failure("FILE: f.xml\nsome words\n" + fence)
+
+
+def test_unlabeled_xml_example_beside_real_code_is_kept_but_flagged(monkeypatch):
+    reply = ("Example:\n```xml\n<tool_call>x</tool_call>\n```\nFILE: a.py\n```python\nx = 1\n```")
+    assert ds.looks_like_tool_call(reply) and not ds._is_text_only_failure(reply)
+    _patch_http(monkeypatch, [reply])
+    out = asyncio.run(ds.run("x"))
+    assert out["ok"] is True and "x = 1" in out["response"]
+
+
 def test_dsml_in_prose_does_not_trigger_a_retry(monkeypatch):
     sent = _patch_http(monkeypatch, ["DSML is a markup DeepSeek uses; the <invoke> tag is one part.\nFILE: a.py\n```python\nx = 1\n```"])
     out = asyncio.run(ds.run("explain DSML"))

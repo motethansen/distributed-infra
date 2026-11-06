@@ -57,18 +57,24 @@ TEXT_ONLY_ERROR = ("deepseek printed a tool call as text: it is text-only and ca
                    "so no work was done")
 
 
+# A fence directly preceded by the system prompt's `FILE: path` line is file content, whatever it contains.
+_FILE_LABEL_RE = re.compile(r"(?:^|\n)[ \t]*FILE:[ \t]*\S[^\n]*\s*$")
+
+
 def _split(text: str) -> tuple[bool, bool]:
     """(imitation, real_code): does the reply contain a printed tool call, and does real code remain once
-    fenced blocks whose body is itself tool-call markup are discarded?"""
+    imitation fences are discarded? A fence labelled `FILE: path` is real code. Any other fence with a wrapper
+    anywhere in its body is imitation; one without is real code. A wrapper outside any fence is imitation."""
     text = text or ""
     imitation = real_code = False
-    for body in _FENCE_RE.findall(text):
+    for m in _FENCE_RE.finditer(text):
+        body = m.group(1)
         if not body.strip():
             continue
-        if _WRAPPER_RE.match(body.lstrip()):
-            imitation = True        # a fence holding only the fake call is not code
-        else:
+        if _FILE_LABEL_RE.search(text[:m.start()]) or not _WRAPPER_RE.search(body):
             real_code = True
+        else:
+            imitation = True        # an unlabeled fence holding a fake call is not code
     outside = _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
     if _WRAPPER_RE.search(outside):
         imitation = True            # a wrapper outside any fence always counts
