@@ -159,3 +159,154 @@ def test_client_network_error():
     def opener(*a, **k): raise dw.urllib.error.URLError("x")
     with pytest.raises(dw.OrchestratorUnreachable):
         dw.OrchestratorClient("http://o.invalid", "s", opener=opener).heartbeat("idle")
+
+
+# ---- S-9 spec tests: subprocess-level behaviour, tick flow, lock, restart ----
+import fcntl
+from unittest import mock
+
+PLAN_ARGS = {"project": "p", "sprint": "s1", "story_id": "S-1"}
+
+
+def ok_proc(**kw):
+    return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def test_tick_claims_only_when_d006_accepted(cfg):
+    c = FakeClient()
+    dw.tick(c, cfg)
+    assert [x for x in c.calls if x[0] == "claim"] == [] and c.calls == [("hb", "disabled: D-006 not confirmed")]
+    enable(cfg)
+    c = FakeClient()
+    dw.tick(c, cfg)
+    assert [x for x in c.calls if x[0] == "claim"] == [("claim",)]
+
+
+def test_refresh_proposal_shape_no_subprocess(cfg):
+    seed(cfg, STORIES, plans=["S-2"])
+    with mock.patch.object(dw.subprocess, "run") as sub:
+        r = dw.run_command({"id": 1, "verb": "refresh_proposal", "args": {"project": "p", "sprint": "s1"}}, cfg)
+    assert r["unplanned"] == [{"id": "S-1", "title": "a", "points": 2}]
+    assert r["planned"] == ["S-2"] and "S-3" not in json.dumps(r) and r["generated_at"]
+    sub.assert_not_called()
+
+
+def test_plan_exists_bytes_and_mtime_unchanged(cfg):
+    d = seed(cfg, STORIES, plans=["S-1"])
+    f = d / "S-1.plan.json"
+    before, mt = f.read_bytes(), f.stat().st_mtime_ns
+    with mock.patch.object(dw.subprocess, "run") as sub, pytest.raises(dw.CommandError) as e:
+        dw.run_command({"id": 1, "verb": "plan", "args": PLAN_ARGS}, cfg)
+    assert e.value.code == "plan_exists"
+    assert f.read_bytes() == before and f.stat().st_mtime_ns == mt
+    sub.assert_not_called()
+
+
+def test_double_select_second_plan_fails(cfg):
+    d = seed(cfg, STORIES)
+
+    def run(argv, timeout):
+        (d / "S-1.plan.json").write_text(json.dumps({"tasks": [1], "planned_by": "opus"}))
+        return ok_proc()
+    cmd = {"id": 1, "verb": "plan", "args": PLAN_ARGS}
+    assert dw.run_command(cmd, cfg, run=run)["tasks"] == 1
+    with pytest.raises(dw.CommandError) as e:
+        dw.run_command({**cmd, "id": 2}, cfg, run=run)
+    assert e.value.code == "plan_exists"
+
+
+def test_plan_subprocess_argv_not_shell(cfg):
+    d = seed(cfg, STORIES)
+
+    def fake(argv, **kw):
+        (d / "S-1.plan.json").write_text(json.dumps({"tasks": [1, 2], "planned_by": "opus"}))
+        return ok_proc()
+    with mock.patch.object(dw.subprocess, "run", side_effect=fake) as sub:
+        r = dw.run_command({"id": 1, "verb": "plan", "args": PLAN_ARGS}, cfg)
+    assert sub.call_args.args[0] == ["dis-agent", "plan", "-p", "p", "-s", "s1", "--story", "S-1"]
+    assert sub.call_args.kwargs.get("shell") is not True
+    assert r == {"tasks": 2, "planned_by": "opus"}
+
+
+def test_story_not_found_message(cfg):
+    seed(cfg, STORIES)
+    with pytest.raises(dw.CommandError) as e:
+        dw.run_command({"id": 1, "verb": "plan", "args": {**PLAN_ARGS, "story_id": "S-42"}}, cfg)
+    assert e.value.code == "story_not_found" and e.value.message == "story S-42 not found"
+
+
+def test_validate_and_step_done_argv_without_shell(cfg):
+    seed(cfg, STORIES)
+    with mock.patch.object(dw.subprocess, "run", return_value=ok_proc()) as sub:
+        dw.run_command({"id": 1, "verb": "validate", "args": PLAN_ARGS}, cfg)
+        dw.run_command({"id": 2, "verb": "step_done", "args": {**PLAN_ARGS, "step": "st1", "evidence": "tests green"}}, cfg)
+    v, s = sub.call_args_list
+    assert v.args[0] == ["dis-agent", "validate", "-p", "p", "-s", "s1", "--story", "S-1"]
+    assert s.args[0] == ["dis-agent", "step-done", "-p", "p", "-s", "s1", "--story", "S-1",
+                         "--step", "st1", "--evidence", "tests green"]
+    assert all(c.kwargs.get("shell") is not True for c in (v, s))
+
+
+@pytest.mark.parametrize("ev", [None, "", "   ", "\n\t"])
+def test_step_done_requires_evidence(cfg, ev):
+    with mock.patch.object(dw.subprocess, "run") as sub, pytest.raises(dw.CommandError) as e:
+        dw.run_command({"id": 1, "verb": "step_done", "args": {**PLAN_ARGS, "step": "st1", "evidence": ev}}, cfg)
+    assert e.value.code == "evidence_required"
+    sub.assert_not_called()
+
+
+def test_cap_reached_fails_once_no_retry(cfg):
+    enable(cfg)
+    seed(cfg, STORIES)
+    (cfg.data_dir / "desk_caps.json").write_text(json.dumps({"opus_calls_today": 3, "opus_cap_per_day": 3}))
+    c = FakeClient({"id": 9, "verb": "plan", "args": PLAN_ARGS})
+    with mock.patch.object(dw.subprocess, "run") as sub:
+        dw.tick(c, cfg)
+    sub.assert_not_called()
+    failed = [x for x in c.calls if x[0] == "failed"]
+    assert len(failed) == 1 and failed[0][1] == 9 and failed[0][2].startswith("cap_reached")
+    assert [x for x in c.calls if x[0] == "claim"] == [("claim",)]
+    assert not [x for x in c.calls if x[0] == "done"]
+
+
+def test_restart_marks_running_failed():
+    c = FakeClient(running=["c1"])
+    dw.on_start(c, None)
+    assert c.calls == [("failed", "c1", "worker restarted")]
+
+
+def test_crash_inside_command_posts_nothing(cfg):
+    enable(cfg)
+    c = FakeClient({"id": 5, "verb": "x", "args": {}})
+
+    class Crash(BaseException):
+        pass
+
+    def boom(cmd, cfg):
+        raise Crash()
+    with pytest.raises(Crash):
+        dw.tick(c, cfg, run=boom)
+    assert not [x for x in c.calls if x[0] in ("done", "failed")]
+
+
+def test_lock_held_by_other_fd_blocks_claim(cfg):
+    enable(cfg)
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    c = FakeClient({"id": 1, "verb": "x", "args": {}})
+    with open(cfg.data_dir / "desk_worker.lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        dw.tick(c, cfg, run=lambda *a: pytest.fail("must not run"))
+    assert not [x for x in c.calls if x[0] == "claim"]
+
+
+def test_orchestrator_unreachable_propagates_and_runs_nothing(cfg):
+    enable(cfg)
+
+    class Down(FakeClient):
+        def claim(self):
+            raise dw.OrchestratorUnreachable("URLError")
+    c = Down()
+    with mock.patch.object(dw.subprocess, "run") as sub, pytest.raises(dw.OrchestratorUnreachable):
+        dw.tick(c, cfg)  # by design tick propagates; main() backs off
+    sub.assert_not_called()
+    assert not [x for x in c.calls if x[0] in ("done", "failed")]
