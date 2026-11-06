@@ -52,6 +52,31 @@ RESUMABLE = {"claude"}
 WRAPPERS = {"content", "social"}
 
 
+_USAGE_SUMS = ("tokens_in", "tokens_out", "tokens_total", "tokens_cache_read", "tokens_cache_write", "cost_usd")
+
+
+def add_usage(result: dict, spent: list[dict]) -> dict:
+    """Fold the usage of earlier failed attempts into result["usage"].
+
+    A limit/unavailable failure can still have printed tokens (they were spent), and the task row
+    only sees the final result. Numbers are summed field by field and stay None when no attempt
+    reported them; agent/model of the final result are kept.
+    """
+    own = result.get("usage") if isinstance(result.get("usage"), dict) else None
+    parts = [u for u in spent if u is not own]     # the final attempt may already be in `spent`
+    if not parts:
+        return result
+    if own is not None:
+        parts.append(own)
+    merged = dict(result["usage"]) if isinstance(result.get("usage"), dict) else {}
+    for k in _USAGE_SUMS:
+        vals = [u[k] for u in parts if isinstance(u.get(k), (int, float)) and not isinstance(u.get(k), bool)]
+        if vals:
+            merged[k] = sum(vals)
+    result["usage"] = merged
+    return result
+
+
 def finish_result(result: dict, requested=None, route_note: str | None = None) -> dict:
     """Stamp the provenance keys every agent_run result carries.
 
@@ -149,6 +174,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
         usable, skipped = chain, []
 
     attempts: list[dict] = list(skipped)
+    spent: list[dict] = []     # usage printed by attempts that failed over (still spent)
     last: dict = {}
     queue = list(usable)
     while queue:
@@ -179,10 +205,13 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
             result.setdefault("agent", a)
             if attempts:
                 result["failover"] = attempts
+            add_usage(result, spent)
             return finish_result(result, requested, route_note)
         kind = fo.classify(result.get("error"), a, result.get("failure_kind"))
         if kind is None or not failover:
             break  # a real failure — don't repeat side effects on another provider
+        if isinstance(result.get("usage"), dict):
+            spent.append(result["usage"])
         entry = {"agent": a, "reason": kind, "error": (result.get("error") or "")[:300]}
         if kind == "limit":
             entry["until"] = fo.mark_limited(a, result.get("error") or "").isoformat()
@@ -197,6 +226,7 @@ async def run_agent(agent: str | None = None, prompt: str = "", model: str | Non
 
     last = dict(last or {"ok": False, "error": "no agent available"})
     last.setdefault("agent", primary)
+    add_usage(last, spent)
     if attempts:
         last["failover"] = attempts
         if all(x.get("reason") in ("limit", "unavailable") for x in attempts) and len(attempts) >= len(chain):

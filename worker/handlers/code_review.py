@@ -54,6 +54,8 @@ async def handle_code_review(task: Task) -> dict:
             "needs_human": True,
             "notes": f"{result.get('agent') or 'review'} code review failed: {result.get('error')}",
             "failover": result.get("failover"),
+            **({"usage": result["usage"]} if result.get("usage") else {}),
+            **({"agent": result["agent"]} if result.get("agent") else {}),
         }
     # `agent` stays the agent that actually did the review (proof of who ran it).
     result["handler"] = "code_review"

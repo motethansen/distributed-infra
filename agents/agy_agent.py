@@ -69,12 +69,25 @@ async def run(prompt: str, model: str = "", cwd: str | None = None, timeout: int
     text, usage, failed = parse_json_output(out)
 
     if proc.returncode != 0 or failed:
-        return {"error": err or text, "agent": "agy", "ok": False}
+        failed = {"error": err or text, "agent": "agy", "ok": False}
+        if usage:
+            failed["usage"] = usage   # printed tokens are spent even when the task failed
+        return failed
 
     result = {"agent": "agy", "model": model or "agy-default", "response": text, "ok": True}
     if usage:
         result["usage"] = usage
     return result
+
+
+def _count(v) -> int | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return int(v) if v >= 0 else None
+
+
+def _cost(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
 def parse_json_output(out: str) -> tuple[str, dict | None, bool]:
@@ -90,9 +103,11 @@ def parse_json_output(out: str) -> tuple[str, dict | None, bool]:
     u = d.get("usage") if isinstance(d.get("usage"), dict) else {}
     usage = None
     if u:
-        usage = {"tokens_in": int(u.get("input_tokens") or 0), "tokens_out": int(u.get("output_tokens") or 0)}
-        if u.get("total_tokens") is not None:
-            usage["tokens_total"] = int(u["total_tokens"])   # includes thinking tokens
+        usage = {k: v for k, v in (("tokens_in", _count(u.get("input_tokens"))),
+                                   ("tokens_out", _count(u.get("output_tokens"))),
+                                   ("tokens_total", _count(u.get("total_tokens"))),   # includes thinking tokens
+                                   ("cost_usd", _cost(u.get("cost_usd", d.get("cost_usd")))))   # only if agy prints one
+                 if v is not None} or None
     status = str(d.get("status") or "SUCCESS").upper()
     return text, usage, status not in ("SUCCESS", "OK", "COMPLETED")
 

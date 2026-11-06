@@ -25,5 +25,7 @@ async def handle_write_article(task: Task) -> dict:
         return {
             "needs_human": True,
             "notes": f"content_agent failed: {result.get('error')}",
+            **({"usage": result["usage"]} if result.get("usage") else {}),
+            **({"agent": result["agent"]} if result.get("agent") else {}),
         }
     return result
