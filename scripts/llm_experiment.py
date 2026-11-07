@@ -229,7 +229,11 @@ def verdict(summary, baseline_summary, repeats, name=None, unsupported=None):
         return "NOT SAFE"
     if summary.get("cost_unknown_count"):
         return "NOT SAFE"
-    base = baseline_summary["cost_usd"]["median"] if baseline_summary else None
+    # The baseline is the yardstick: if any baseline run printed no cost, its median is not known, so nothing can be
+    # called cheaper than it.
+    if baseline_summary is None or baseline_summary.get("cost_unknown_count"):
+        return "NOT SAFE"
+    base = baseline_summary["cost_usd"]["median"]
     cost = summary["cost_usd"]["median"]
     if base is None or cost is None or not cost < base:
         return "NOT SAFE"
@@ -237,8 +241,8 @@ def verdict(summary, baseline_summary, repeats, name=None, unsupported=None):
 
 
 VERDICT_RULE = ("SAFE requires all of: 3 of 3 acceptance passes; no tampering; the diff was generated for every run; "
-                "median cost strictly below the baseline (a run with no cost printed makes the comparison impossible, so it is "
-                "NOT SAFE); the reviewer did not request changes on any run. A run the "
+                "median cost strictly below the baseline (a run with no cost printed, in the variant or in the baseline, makes "
+                "the comparison impossible, so it is NOT SAFE); the reviewer did not request changes on any run. A run the "
                 "reviewer could not judge (`unavailable`, unparseable, or not run) does not block SAFE but is flagged "
                 "UNREVIEWED.")
 
