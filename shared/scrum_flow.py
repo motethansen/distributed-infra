@@ -475,7 +475,9 @@ def review_prompt(story: dict, author: str, material: str, validation: dict | No
     return (f"Independent review of work on story {story['id']}: {story['title']}. The author was {author}; you did not "
             "write it and must not edit anything. Check it against the acceptance criteria, run the tests if there is a "
             "branch or PR, and report findings ranked by consequence (wrong behaviour, missing test, security, style). "
-            f"Say what you could not verify.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
+            "Say what you could not verify. Do not approve from the author's own summary: if you cannot read the code or run "
+            "the tests, the review is INCOMPLETE and you say so. End with ONE final line, exactly one of: "
+            "`VERDICT: APPROVE`, `VERDICT: REQUEST_CHANGES`, `VERDICT: INCOMPLETE`.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
             f"Independent tester's verdict: {validation_summary(validation)}\n\n"
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 
@@ -726,6 +728,23 @@ def close_story(repo: Path, project: str, bid: str, who: str, day: str, evidence
                         f"{project}: {bid} closed after sprint review, confirmed by {who}", run=run)
 
 
+_VERDICT_LINE = re.compile(r"^\W*VERDICT\s*:\s*(APPROVE|REQUEST[_ ]CHANGES|INCOMPLETE)\b", re.I | re.M)
+
+
+def parse_review_verdict(text: str) -> str | None:
+    """APPROVE, REQUEST_CHANGES, INCOMPLETE, or None when the review states none. The last `VERDICT:` line wins; a
+    review written before that line existed is read from its own words, and anything unclear stays None (unknown)."""
+    found = _VERDICT_LINE.findall(text or "")
+    if found:
+        return found[-1].upper().replace(" ", "_")
+    low = (text or "").lower()
+    if "review incomplete" in low or "cannot approve" in low:
+        return "INCOMPLETE"
+    if "does not fully meet" in low or "request_changes" in low or "request changes" in low:
+        return "REQUEST_CHANGES"
+    return None
+
+
 def story_evidence(tasks: list[dict], project: str, sprint: str, story_id: str) -> dict:
     mine = [t for t in tasks if (t.get("payload") or {}).get("project") == project
             and str((t.get("payload") or {}).get("sprint")) == sprint and (t.get("payload") or {}).get("story") == story_id
@@ -741,7 +760,16 @@ def story_evidence(tasks: list[dict], project: str, sprint: str, story_id: str) 
     return {"validation": validation, "tasks": len(mine), "done": sum(1 for t in mine if t.get("status") == "done"),
             "stuck": [t["id"][:8] for t in mine if t.get("status") in ("failed", "needs_human")],
             "agents": agents, "pull_requests": prs, "reviewed": review is not None,
-            "review_excerpt": answer(review)[:700] if review else ""}
+            "review_excerpt": answer(review)[:700] if review else "",
+            # the whole review: the desk and `dis-agent close` must read all of it, not the excerpt
+            "review_full": answer(review) if review else "",
+            "review_verdict": parse_review_verdict(answer(review)) if review else None,
+            "review_agent": _agent_of(review) if review else None, "review_task": review["id"] if review else None,
+            "review_at": (review.get("created_at") or "") if review else None,
+            # work that finished after the review was queued: the review judged an older state
+            "review_stale": bool(review and any(
+                (t.get("created_at") or "") > (review.get("created_at") or "") and t is not review
+                and (t.get("payload") or {}).get("role") in (*DEV_ROLES, "tester") and t.get("status") == "done" for t in mine))}
 
 
 def cancel_story(repo: Path, project: str, bid: str, who: str, day: str, reason: str, run=subprocess.run) -> dict:
