@@ -58,7 +58,9 @@ BASELINE_NAME = "baseline"
 STATUSES = ("ok", "budget_exceeded", "invalid_failover", "error")
 EXCLUDED_STATUSES = ("invalid_failover", "error")
 SCOPE_NOTE = ("One dev_backend-style task only. dev_frontend and integrator roles were NOT tested; "
-              "this fixture may not represent dev_frontend work (the heaviest input consumer).")
+              "this fixture may not represent dev_frontend work (the heaviest input consumer). Each run uses a fresh "
+              "independent git repository built from `git archive` of the pinned commit, not a `git worktree` of the source "
+              "repo: a worktree would give the agent the full history, the other branches and the fix commit.")
 
 TOKEN_FIELDS = ("tokens_fresh_in", "cache_read", "cache_write", "tokens_out")
 METRIC_FIELDS = ("cost_usd", "wall_s", "turns") + TOKEN_FIELDS
@@ -160,14 +162,16 @@ def detect_unsupported(variants, help_text):
 class RunResult:
     variant: str
     repeat: int
-    tokens_fresh_in: int = 0
-    cache_read: int = 0
-    cache_write: int = 0
-    tokens_out: int = 0
-    cost_usd: float = 0.0
+    # None means the CLI did not print it (unknown), never 0: an unknown cost must not look cheaper than a real one.
+    tokens_fresh_in: "int | None" = None
+    cache_read: "int | None" = None
+    cache_write: "int | None" = None
+    tokens_out: "int | None" = None
+    cost_usd: "float | None" = None
     wall_s: float = 0.0
     turns: int = 0
     tests_passed: "bool | None" = None
+    tests_exit_code: "int | None" = None     # the acceptance pytest command's own exit code (0 pass, 1 fail, 2 interrupted, ...)
     reviewer_verdict: "str | None" = None
     status: str = "ok"
     error: "str | None" = None
@@ -178,7 +182,9 @@ class RunResult:
 
 
 def median_and_spread(values):
-    values = list(values)
+    values = [v for v in values if v is not None]
+    if not values:
+        return None, None, None
     return statistics.median(values), min(values), max(values)
 
 
@@ -194,6 +200,8 @@ def summarise_variant(runs):
         # budget_exceeded runs are in `valid` but never count as passes.
         "tests_passed_count": sum(1 for r in valid if r.status == "ok" and r.tests_passed is True),
         "tampered_count": sum(1 for r in valid if r.tampered),
+        # the CLI printed no cost for these runs: the cost comparison cannot be made, so the variant cannot be SAFE
+        "cost_unknown_count": sum(1 for r in valid if r.cost_usd is None),
         "diff_failed_count": sum(1 for r in valid if r.reviewer_verdict == "diff_failed"),
         "rejected_count": sum(1 for r in valid if (r.reviewer_verdict or "").upper() in REJECT_VERDICTS),
         # no review happened (reviewer unavailable, unparseable answer, or not run): shown as UNREVIEWED, does not block
@@ -219,6 +227,8 @@ def verdict(summary, baseline_summary, repeats, name=None, unsupported=None):
         return "NOT SAFE"
     if summary.get("tampered_count") or summary.get("diff_failed_count") or summary.get("rejected_count"):
         return "NOT SAFE"
+    if summary.get("cost_unknown_count"):
+        return "NOT SAFE"
     base = baseline_summary["cost_usd"]["median"] if baseline_summary else None
     cost = summary["cost_usd"]["median"]
     if base is None or cost is None or not cost < base:
@@ -227,7 +237,8 @@ def verdict(summary, baseline_summary, repeats, name=None, unsupported=None):
 
 
 VERDICT_RULE = ("SAFE requires all of: 3 of 3 acceptance passes; no tampering; the diff was generated for every run; "
-                "median cost strictly below the baseline; the reviewer did not request changes on any run. A run the "
+                "median cost strictly below the baseline (a run with no cost printed makes the comparison impossible, so it is "
+                "NOT SAFE); the reviewer did not request changes on any run. A run the "
                 "reviewer could not judge (`unavailable`, unparseable, or not run) does not block SAFE but is flagged "
                 "UNREVIEWED.")
 
@@ -245,9 +256,15 @@ def _clean_run(r):
 
 
 def build_report_dict(date, fixture, commit, repeats, runs, unsupported=None, max_budget_usd=2.0, prompt="<prompt>",
-                      cli="claude", reviewer=None, oracle=None):
+                      cli="claude", reviewer=None, oracle=None, variants=None):
+    """`variants` is the list that was selected for this experiment: a variant nobody selected is not reported (it would
+    show a command and a NOT SAFE verdict for zero runs). Without it: every non-optional variant, plus optional ones
+    that were unsupported or have runs."""
     unsupported = unsupported or {}
-    names = [n for n in VARIANTS if n not in unsupported or not VARIANTS[n]["optional"]]
+    if variants is not None:
+        names = [n for n in VARIANTS if n in variants]
+    else:
+        names = [n for n in VARIANTS if not VARIANTS[n]["optional"] or any(r.variant == n for r in runs)]
     by_variant = {n: [r for r in runs if r.variant == n] for n in names}
     summaries = {n: summarise_variant(by_variant[n]) for n in names if n not in unsupported}
     base = summaries.get(BASELINE_NAME)
@@ -286,13 +303,13 @@ def render_markdown(report):
     L += ["", "## Reviewer", "", f"- Role: {rv.get('role', 'reviewer')}; agent: {_fmt(rv.get('agent'))}; "
           f"model: {_fmt(rv.get('model'))}", f"- Command: `{_fmt(rv.get('command'))}`", f"- {rv.get('note', REVIEWER_NOTE)}"]
     L += ["", "## Runs", "",
-          "| variant | run | fresh in | cache read | cache write | out | cost_usd | wall time | turns | tests passed | tampered | reviewer verdict | status |",
-          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| variant | run | fresh in | cache read | cache write | out | cost_usd | wall time | turns | tests passed | tests exit code | tampered | reviewer verdict | status |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in report["runs"]:
         L.append("| " + " | ".join([
             r["variant"], str(r["repeat"]), _fmt(r["tokens_fresh_in"]), _fmt(r["cache_read"]),
             _fmt(r["cache_write"]), _fmt(r["tokens_out"]), _fmt(r["cost_usd"]), _fmt(r["wall_s"]),
-            _fmt(r["turns"]), _fmt(r["tests_passed"]), _fmt(r.get("tampered")), _fmt(r["reviewer_verdict"]),
+            _fmt(r["turns"]), _fmt(r["tests_passed"]), _fmt(r.get("tests_exit_code")), _fmt(r.get("tampered")), _fmt(r["reviewer_verdict"]),
             r["status"]]) + " |")
     L += ["", "## Median / min / max per variant", "",
           "| variant | valid | excluded | tests passed | cost_usd | wall_s | turns | fresh in | cache read | cache write | out | verdict |",
@@ -857,11 +874,12 @@ def _num_turns(out):
 
 
 def _apply_usage(res, usage):
-    res.tokens_fresh_in = usage.get("tokens_in") or 0
-    res.cache_read = usage.get("tokens_cache_read") or 0
-    res.cache_write = usage.get("tokens_cache_write") or 0
-    res.tokens_out = usage.get("tokens_out") or 0
-    res.cost_usd = usage.get("cost_usd") or 0.0
+    # keep None as None: the parser says "not printed", and a zero here would pass as the cheapest run
+    res.tokens_fresh_in = usage.get("tokens_in")
+    res.cache_read = usage.get("tokens_cache_read")
+    res.cache_write = usage.get("tokens_cache_write")
+    res.tokens_out = usage.get("tokens_out")
+    res.cost_usd = usage.get("cost_usd")
 
 
 # ── Interpreter-environment manifest ─────────────────────────────────────────
@@ -954,7 +972,8 @@ def run_one(fixture, variant, repeat, runner, workdir, venv_roots=None, venv_bef
         # ... and on the interpreter environment the agent left: checked before the tests and again after them, since
         # code under test could add a self-deleting .pth.
         venv_changed = manifest_changes(venv_before, venv_manifest(venv_roots))
-        passed = runner.run_tests(fixture.test_cmd, sb.path) == PYTEST_PASSED
+        res.tests_exit_code = runner.run_tests(fixture.test_cmd, sb.path)
+        passed = res.tests_exit_code == PYTEST_PASSED
         venv_changed = sorted(set(venv_changed) | set(manifest_changes(venv_before, venv_manifest(venv_roots))))
         changed = changed + venv_changed
         res.tampered, res.tampered_files = bool(changed), changed or None
@@ -973,10 +992,16 @@ def run_one(fixture, variant, repeat, runner, workdir, venv_roots=None, venv_bef
     return res
 
 
-def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str, venv_roots=None):
+def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str, venv_roots=None, auto_optional=False):
+    """`auto_optional`: also run the optional variants (medium effort) when the CLI accepts their flags."""
     freeze_test(fixture)    # refuse on a dirty / uncommitted oracle before anything else
     check_fixture_fails_before(fixture, runner)
-    unsupported = detect_unsupported(variant_names, runner.cli_help())
+    help_text = runner.cli_help()
+    variant_names = list(variant_names)
+    if auto_optional:
+        variant_names += [n for n, v in VARIANTS.items()
+                          if v["optional"] and n not in variant_names and not detect_unsupported([n], help_text)]
+    unsupported = detect_unsupported(variant_names, help_text)
     order = [n for n in variant_names if n == BASELINE_NAME] + [n for n in variant_names if n != BASELINE_NAME]
     venv_before = venv_manifest(venv_roots)
     runs = []
@@ -995,7 +1020,7 @@ def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str, 
         info["warning"] = "the reviewer differed between runs: " + ", ".join(f"{a}/{m}" for a, m in sorted(map(str, x) for x in seen))
     report = build_report_dict(date_str, fixture.name, fixture.pinned_commit, repeats, runs, unsupported=unsupported,
                                max_budget_usd=MAX_BUDGET_USD, prompt=fixture.prompt,
-                               cli=getattr(runner, "cli", "claude"), reviewer=info,
+                               cli=getattr(runner, "cli", "claude"), reviewer=info, variants=variant_names,
                                oracle={"test_file": fixture.test_file, "test_blob_sha1": fixture.test_blob_sha1,
                                        "test_sha256": fixture.test_sha256})
     # build_report_dict only lists unsupported *optional* variants; make the rest visible too.
@@ -1010,12 +1035,13 @@ def run_experiment(fixture, variant_names, repeats, runner, out_root, date_str, 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--task", required=True, help="fixture name under tests/fixtures/experiments, or a fixture dir")
-    ap.add_argument("--variants", default="baseline,lean,lean_low_effort")
+    ap.add_argument("--variants", default=None,
+                    help="comma list; default baseline,lean,lean_low_effort, plus lean_medium_effort when the CLI accepts --effort")
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--out-root", default=str(REPO_ROOT))
     ap.add_argument("--date", default=date.today().isoformat())
     a = ap.parse_args(argv)
-    names = [v.strip() for v in a.variants.split(",") if v.strip()]
+    names = [v.strip() for v in (a.variants or "baseline,lean,lean_low_effort").split(",") if v.strip()]
     bad = [v for v in names if v not in VARIANTS]
     if bad:
         ap.error(f"unknown variants: {', '.join(bad)} (known: {', '.join(VARIANTS)})")
@@ -1027,7 +1053,8 @@ def main(argv=None):
     print(f"WARNING: this spends real money: {len(names)} variants x {a.repeats} repeats, each capped at "
           f"${MAX_BUDGET_USD:g} (expected {EXPECTED_COST_DEFAULT_RUN} for the default run).", flush=True)
     try:
-        report, out_dir = run_experiment(fixture, names, a.repeats, SubprocessRunner(), a.out_root, a.date)
+        report, out_dir = run_experiment(fixture, names, a.repeats, SubprocessRunner(), a.out_root, a.date,
+                                       auto_optional=a.variants is None)
     except FixtureError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

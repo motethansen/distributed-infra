@@ -24,6 +24,7 @@
   dis-agent review                                the review queue: each waiting story with its sprint, PRs and the exact command to confirm it
   dis-agent accept -p PROJ --story ID --pr URL    confirm a story the fleet did not build (GitHub must show the PR merged), or --evidence "..."
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
+  dis-agent review -p PROJ -s SPR --story ID      the story's WHOLE review (verdict + every finding); --rerun --where <path> --machine M for a fresh one
   dis-agent validate -p PROJ -s SPR --story ID    run the independent tester (agy) on a story; --branch main when it is already merged
   dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
 
@@ -42,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -793,10 +795,58 @@ def cmd_accept(a) -> None:
             viz_repo(), a.project, n, a.story, f"✅ done {day}", day, closing=True))
 
 
+def _save_review(base: Path, sid: str, ev: dict) -> Path:
+    """Keep the whole review next to the plan, so nobody has to rebuild it from a 700-character excerpt."""
+    base.mkdir(parents=True, exist_ok=True)
+    p = base / f"review-{sid}.md"
+    p.write_text(f"# Review of {sid}\n\n- by: {ev['review_agent']}\n- at: {ev['review_at']}\n- task: {ev['review_task']}\n"
+                 f"- verdict: {ev['review_verdict'] or 'none stated'}\n- stale: {ev['review_stale']}\n\n{ev['review_full']}\n")
+    return p
+
+
+def _find_plan(project: str, sprint: str, story: str):
+    base = ROOT / "data" / "scrum" / project / sprint
+    for f in sorted(base.glob("*.plan.json")):
+        pl = json.loads(f.read_text())
+        if story in (pl.get("backlog_id"), pl["story"]["id"]):
+            return base, pl
+    sys.exit(f"no plan for {story} under {base}")
+
+
+def cmd_review_story(a) -> None:
+    """Print one story's whole review; with --rerun, queue a fresh one against the code as it is now."""
+    base, pl = _find_plan(a.project, a.sprint, a.story)
+    sid, c = pl["story"]["id"], sc.client()
+    if a.rerun:
+        if not a.where:
+            sys.exit("--rerun needs --where: say where the reviewer finds the code, for example a local worktree path on the "
+                     "machine it runs on (a reviewer cannot always reach GitHub) or a diff file. Without it the review would "
+                     "again judge the author's summary.")
+        v = next((json.loads(f.read_text()) for f in [base / f"validation-{sid}.json"] if f.exists()), None)
+        material = ("Where the code is (read it there; do not rely on any summary):\n" + a.where +
+                    "\n\nCheck every acceptance criterion against that code and run its tests. If you cannot read it or run them, "
+                    "the verdict is INCOMPLETE.")
+        t = c.queue(sf.tags(a.project, a.sprint, sid, "reviewer", False, None, None, a.machine, bool(a.machine),
+                            prompt=sf.review_prompt(pl["story"], "claude", material, v), timeout=1800, flow_key="review-rerun"),
+                    f"re-review {sid}")
+        print(f"reviewer queued ({t['id'][:8]}); this takes a few minutes ...")
+        done = c.wait([t["id"]], sleep=time.sleep)[t["id"]]
+        if done["status"] != "done":
+            sys.exit(f"the reviewer task ended {done['status']}: {done.get('notes') or ''}")
+    ev = sf.story_evidence(c._call("GET", "/tasks", params={"limit": 500}), a.project, a.sprint, sid)
+    if not ev["reviewed"]:
+        sys.exit(f"{a.story}: no review has run yet")
+    print(f"{pl.get('backlog_id') or sid} ({sid}) reviewed by {ev['review_agent']} at {str(ev['review_at'])[:16]}, "
+          f"verdict: {ev['review_verdict'] or 'none stated'}" + ("  [STALE]" if ev["review_stale"] else "") + "\n")
+    print(ev["review_full"] + f"\n\n(saved {_save_review(base, sid, ev)})")
+
+
 def cmd_review(a) -> None:
     if not a.project or not a.sprint:
         return cmd_review_queue(a)
     a.sprint = resolve_sprint(a.project, a.sprint)
+    if getattr(a, "story", None):
+        return cmd_review_story(a)
     c = sc.client()
     rows = c._call("GET", "/tasks", params={"limit": 500})
     board = c._call("GET", "/scrum/sprints")
@@ -864,10 +914,19 @@ def cmd_close(a) -> None:
         print("  validation: " + sf.validation_summary(v))
         for c in (v or {}).get("criteria", []):
             print(f"    {c['n']}. {c['status']:<10} {c['evidence'][:110]}")
-        if ev["review_excerpt"]:
-            print("  review says: " + ev["review_excerpt"].replace("\n", " ")[:400])
+        if ev["reviewed"]:
+            print(f"  review by {ev['review_agent'] or '?'} at {str(ev['review_at'])[:16]}, verdict: {ev['review_verdict'] or 'none stated'}"
+                  + ("  [STALE: work finished after this review was queued]" if ev["review_stale"] else ""))
+            saved = _save_review(base, sid, ev)
+            print("  ---- full review (also saved to " + str(saved) + ") ----")
+            print("\n".join("  | " + ln for ln in ev["review_full"].splitlines()))
+            print("  ---- end of review ----")
+        rv = ev["review_verdict"]
         problems = [m for m, bad in (("not every task is done", ev["done"] < ev["tasks"] or ev["tasks"] == 0), ("no review ran", not ev["reviewed"]),
-                                     ("validation did not pass: " + sf.validation_summary(v), not (v and v.get("passed") is True))) if bad]
+                                     ("validation did not pass: " + sf.validation_summary(v), not (v and v.get("passed") is True)),
+                                     (f"the review's verdict is {rv}; fix what it found and run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`",
+                                      rv in ("INCOMPLETE", "REQUEST_CHANGES")),
+                                     (f"the review is stale; run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`", ev["review_stale"])) if bad]
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
             continue
@@ -964,6 +1023,10 @@ def main() -> None:
     sm.add_argument("--consume", action="store_true", help="consume what was shown even when output is not a terminal (delivery is at-least-once)")
     rv = sub.add_parser("review"); rv.set_defaults(fn=cmd_review)
     rv.add_argument("-p", "--project"); rv.add_argument("-s", "--sprint")
+    rv.add_argument("--story", help="print this story's whole review (plan ID or backlog ID)")
+    rv.add_argument("--rerun", action="store_true", help="with --story: queue a fresh review (needs --where)")
+    rv.add_argument("--where", help="with --rerun: where the reviewer reads the code (local worktree path, diff file)")
+    rv.add_argument("--machine", help="with --rerun: run the reviewer on this machine (required when --where is a local path)")
     a = ap.parse_args()
     if not a.cmd:
         a = ap.parse_args(["chat"])

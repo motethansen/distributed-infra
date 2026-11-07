@@ -148,3 +148,48 @@ def test_report_states_the_safe_rule_under_the_verdict():
     assert md.index("## Median / min / max") < md.index("## Verdict rule") < md.index("## Scope")
     for phrase in ("3 of 3 acceptance passes", "no tampering", "diff was generated", "strictly below", "did not request changes"):
         assert phrase in md
+
+
+# ── Codex review of S-2 (2026-11-07), P1/P2 ──────────────────────────────────────────────────────────────────────
+def test_unknown_cost_is_not_zero_and_blocks_safe():
+    """P1: a run whose output had no cost must not look cheaper than the baseline."""
+    from agents.claude_agent import parse_json_output
+    _, usage, _ = parse_json_output("plain text, not JSON")
+    r = ex.RunResult(variant="lean", repeat=1)
+    ex._apply_usage(r, usage)
+    assert r.cost_usd is None and r.tokens_out is None
+    s = summ([run(reviewer_verdict="APPROVE"), run(reviewer_verdict="APPROVE"),
+              ex.RunResult("lean", 3, tests_passed=True, reviewer_verdict="APPROVE")])
+    assert s["cost_unknown_count"] == 1
+    assert ex.verdict(s, BASE, 3) == "NOT SAFE"
+    assert s["cost_usd"]["median"] == 1.0          # known costs only, so the median is not dragged to zero
+
+
+def test_all_costs_unknown_gives_no_median():
+    s = summ([ex.RunResult("lean", i, tests_passed=True) for i in (1, 2, 3)])
+    assert s["cost_usd"] == {"median": None, "min": None, "max": None}
+    assert ex.verdict(s, BASE, 3) == "NOT SAFE"
+
+
+def test_report_shows_pytest_exit_code(tmp_path):
+    """P2: the report carries the acceptance command's exit code, not just a boolean."""
+    runs = [run("baseline", i, 2.0, tests_exit_code=0) for i in (1, 2, 3)] + \
+           [run("lean", 1, 1.0, passed=False, tests_exit_code=2)]
+    rep = ex.build_report_dict("2026-11-07", "f", "abc", 3, runs)
+    assert [r["tests_exit_code"] for r in rep["runs"]] == [0, 0, 0, 2]
+    md = ex.render_markdown(rep)
+    assert "tests exit code" in md
+
+
+def test_only_selected_variants_are_reported():
+    """P2: an optional variant nobody selected is not listed with a command and a verdict for zero runs."""
+    runs = [run("baseline", i, 2.0) for i in (1, 2, 3)] + [run("lean", i, 1.0) for i in (1, 2, 3)]
+    rep = ex.build_report_dict("2026-11-07", "f", "abc", 3, runs, variants=["baseline", "lean"])
+    assert set(rep["commands"]) == {"baseline", "lean"} and set(rep["verdicts"]) == {"baseline", "lean"}
+    assert "lean_medium_effort" not in ex.render_markdown(rep)
+    rep = ex.build_report_dict("2026-11-07", "f", "abc", 3, runs)
+    assert "lean_medium_effort" not in rep["verdicts"]
+
+
+def test_scope_note_says_why_it_is_not_a_worktree():
+    assert "git worktree" in ex.SCOPE_NOTE and "git archive" in ex.SCOPE_NOTE
