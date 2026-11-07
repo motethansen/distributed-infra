@@ -477,7 +477,8 @@ def review_prompt(story: dict, author: str, material: str, validation: dict | No
             "branch or PR, and report findings ranked by consequence (wrong behaviour, missing test, security, style). "
             "Say what you could not verify. Do not approve from the author's own summary: if you cannot read the code or run "
             "the tests, the review is INCOMPLETE and you say so. End with ONE final line, exactly one of: "
-            "`VERDICT: APPROVE`, `VERDICT: REQUEST_CHANGES`, `VERDICT: INCOMPLETE`.\n\nAcceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
+            "`VERDICT: APPROVE`, `VERDICT: REQUEST_CHANGES`, `VERDICT: INCOMPLETE`.\n\n"
+            f"Acceptance criteria:\n{json.dumps(story.get('acceptance', []))}\n\n"
             f"Independent tester's verdict: {validation_summary(validation)}\n\n"
             f"Material to review (PR URL / returned code):\n{material[:12000]}")
 

@@ -48,3 +48,12 @@ def test_newest_finished_review_is_the_one_shown(monkeypatch):
             task("n", "reviewer", text="VERDICT: REQUEST_CHANGES", created="2026-11-07T12:00:00")]
     ev = sf.story_evidence(rows, "p", "2", "S-2")
     assert ev["review_verdict"] == "REQUEST_CHANGES" and ev["review_task"].startswith("n")
+
+
+def test_review_prompt_fills_in_the_acceptance_criteria_and_the_material():
+    """A literal `{json.dumps(...)}` once reached the reviewer because an f-string prefix was lost."""
+    p = sf.review_prompt({"id": "S-9", "title": "T", "acceptance": ["first criterion", "second criterion"]}, "claude",
+                         "WHERE-THE-CODE-IS", {"passed": True, "counts": {"pass": 2, "fail": 0, "unverified": 0}})
+    assert "first criterion" in p and "second criterion" in p
+    assert "WHERE-THE-CODE-IS" in p and "{json" not in p and "{material" not in p and "{validation" not in p
+    assert "S-9" in p and "{story" not in p
