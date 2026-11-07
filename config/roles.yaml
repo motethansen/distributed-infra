@@ -58,7 +58,9 @@ roles:
     agent: codex
     fallback: { agent: claude, model: sonnet }
 
-# Projects DeepSeek may receive prompts about. urbanlife is isolated and deliberately absent.
+# Projects DeepSeek may receive prompts about. urbanlife is isolated and deliberately absent. winedragons was removed
+# 2026-11-07 (Michael): its code now holds a food profile (health data), payments and the account-erasure engine, and
+# DeepSeek is a non-private provider; its backend tasks fall back to Claude Sonnet (private_fallback).
 deepseek_projects:
   - academictool
   - budgetapp
@@ -68,7 +70,6 @@ deepseek_projects:
   - simtrader
   - vantage
   - vizneo
-  - winedragons
 
 isolated_projects:
   - urbanlife
