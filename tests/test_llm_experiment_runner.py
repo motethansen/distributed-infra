@@ -293,3 +293,30 @@ def test_two_of_three_passes_is_not_safe():
 def test_all_pass_but_not_cheaper_is_not_safe():
     runs = _runs("baseline", [1.0] * 3, [True] * 3) + _runs("lean", [1.0] * 3, [True] * 3)
     assert ex.build_report_dict("d", "f", "abc", 3, runs)["verdicts"]["lean"] == "NOT SAFE"
+
+
+def test_run_one_records_the_pytest_exit_code(fx, tmp_path):
+    f = ex.load_fixture(fx[0])
+    r = ex.run_one(f, "lean", 1, Fake(tests=[2]), tmp_path / "w")
+    assert r.tests_exit_code == 2 and r.tests_passed is False
+    r = ex.run_one(f, "lean", 1, Fake(tests=[0]), tmp_path / "w")
+    assert r.tests_exit_code == 0 and r.tests_passed is True
+
+
+def test_run_one_unknown_cost_stays_unknown(fx, tmp_path):
+    f = ex.load_fixture(fx[0])
+    r = ex.run_one(f, "lean", 1, Fake(out="no json here", tests=[0]), tmp_path / "w")
+    assert r.status == "ok" and r.cost_usd is None and r.tokens_out is None
+
+
+def test_medium_effort_runs_when_the_cli_accepts_effort_and_is_auto(fx, tmp_path):
+    f = ex.load_fixture(fx[0])
+    fake = Fake(tests=[1, 0])
+    rep, _ = ex.run_experiment(f, ["baseline", "lean"], 1, fake, tmp_path / "o", "2026-11-07", auto_optional=True)
+    assert "lean_medium_effort" in rep["commands"]
+    assert any(r["variant"] == "lean_medium_effort" for r in rep["runs"])
+    rep, _ = ex.run_experiment(f, ["baseline", "lean"], 1, Fake(tests=[1, 0]), tmp_path / "o2", "2026-11-07")
+    assert "lean_medium_effort" not in rep["commands"]
+    rep, _ = ex.run_experiment(f, ["baseline", "lean"], 1, Fake(tests=[1, 0], help_text="--strict-mcp-config --disable-slash-commands"),
+                               tmp_path / "o3", "2026-11-07", auto_optional=True)
+    assert "lean_medium_effort" not in rep["commands"]
