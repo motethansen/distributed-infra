@@ -193,3 +193,12 @@ def test_only_selected_variants_are_reported():
 
 def test_scope_note_says_why_it_is_not_a_worktree():
     assert "git worktree" in ex.SCOPE_NOTE and "git archive" in ex.SCOPE_NOTE
+
+
+def test_unknown_baseline_cost_blocks_safe():
+    """Codex round 3, P1: baseline costs [2, unknown, unknown] must not be compared as if the median were known."""
+    base = summ([run("baseline", 1, 2.0), ex.RunResult("baseline", 2, tests_passed=True),
+                 ex.RunResult("baseline", 3, tests_passed=True)])
+    assert base["cost_unknown_count"] == 2
+    assert ex.verdict(three(), base, 3) == "NOT SAFE"
+    assert ex.verdict(three(), BASE, 3) == "SAFE"          # a fully known baseline still allows SAFE
