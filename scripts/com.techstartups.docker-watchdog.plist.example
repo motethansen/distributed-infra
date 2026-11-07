@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent: Docker engine watchdog (scripts/docker_watchdog.py) on the mac-mini.
+  Runs every 60 s. Checks the engine answers, starts expected containers that stopped,
+  tries `orbctl start` after 3 silent checks, and reports one status to Vantage.
+
+  This file holds NO secrets. VANTAGE_INGEST_KEY goes in the repo's .env (chmod 600, gitignored),
+  loaded by scripts/run-with-env.sh. VANTAGE_URL below is a placeholder: use your Vantage tailnet address.
+
+  Install (replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout):
+    cp scripts/com.techstartups.docker-watchdog.plist.example ~/Library/LaunchAgents/com.techstartups.docker-watchdog.plist
+    # edit the paths, VANTAGE_URL and WATCHDOG_CONTAINERS in the copy, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.docker-watchdog.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.techstartups.docker-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+    <string>--</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/.venv/bin/python</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/docker_watchdog.py</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USERNAME/.orbstack/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>WATCHDOG_CONTAINERS</key><string>rqlite,whatsapp-bridge-waha-1</string>
+    <key>WATCHDOG_COMPONENT</key><string>mm-docker-engine</string>
+    <key>VANTAGE_URL</key><string>http://100.64.0.1:8055</string>
+    <key>WATCHDOG_STATE</key><string>/Users/YOUR_USERNAME/.docker-watchdog.json</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+
+  <key>StandardOutPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/docker-watchdog.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/docker-watchdog.err</string>
+</dict>
+</plist>
