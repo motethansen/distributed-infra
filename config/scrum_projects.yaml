@@ -23,7 +23,8 @@ projects:
   simtrader:         { repo: "git@github.com:motethansen/simtrader.git",         dir: simtrader }
   budgetapp:         { repo: "git@github.com:motethansen/budgetapp.git",         dir: budgetapp }
   cheersfriends:     { repo: "git@github.com:motethansen/cheersfriends.git",     dir: cheersfriends_cc, note: "backend/ and webfrontend/ are dead code; read the sprint file first" }
-  winedragons:      { repo: "git@github.com:motethansen/winedragons_asia.git",  dir: winedragons_asia }
+  winedragons:      { repo: "git@github.com:motethansen/winedragons_asia.git",  dir: winedragons_asia,
+                      note: "WineDragons rules, every agent: read CLAUDE.md first. Never work in the main clone: `git worktree add ~/wt-<story> -b <branch> origin/main`, so two stories on one machine never share a working tree. Never `git add -A`: name each path. Commit and push after each green step; tests first. Functions run Python 3.9; Flutter only 3.44.8 (check `flutter --version`; the thinkpad builds the app). Never merge, deploy, run a migration, run doctl or print `.env` values. The food profile (health data), payments and the account-erasure code are sensitive: never in logs, prompts or fixtures. Test fixtures must not contain password-like literals (build them from parts) or GitGuardian fails the PR. A throwaway Postgres uses a port nobody has (55480 plus a random number below 30) and its own /tmp/<story>-pg: check pg_isready first and delete only your own. Thailand: no alcohol content (CLAUDE.md rule 9)" }
   academictool:      { repo: "git@github.com:motethansen/academictool.git", dir: academictool }
   vizneo:            { repo: "git@gitlab.com:vizneo/vizneowebsite.git", dir: vizneowebsite, note: "GitLab, deployed as a Cloudflare Worker by hand; verify the remote before cloning" }
   urbanlife:         { repo: "git@github.com:motethansen/urbanlife_works.git",   dir: urbanlife_works, note: "isolated: separate repo, deployed by hand" }
