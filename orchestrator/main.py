@@ -513,6 +513,11 @@ async def scrum_response_create(raw: dict = Body(...), x_secret_key: str = Heade
         raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different response")
     if body.action == "confirm" and scrum_responses.classify_suggestion(body.suggestion_text) == "team":
         row = {**row, "applies": await _queue_team_story(body, row)}
+    if body.action == "comment" and os.getenv("SCRUM_SUGGESTIONS", "1") != "0":
+        task = asyncio.get_running_loop().create_task(_regenerate_after_comment(x_secret_key))
+        _BG.add(task)
+        task.add_done_callback(_BG.discard)
+        row = {**row, "applies": "suggestion_updating"}
     return row
 
 
@@ -620,6 +625,32 @@ async def scrum_response_consume(response_id: int, x_secret_key: str = Header(de
     if outcome == "already_consumed":
         raise HTTPException(status_code=409, detail="Response already consumed")
     return {"id": response_id, "status": "consumed"}
+
+
+async def _attach_owner_comments(digest: dict) -> None:
+    """Put the owner's NEWEST comment on each board item as `owner_comment: {id, text, at}`. The suggestion for the item is made from
+    it (shared/scrum_suggest.evidence_hash), so what he writes on the page changes what the Scrum Master suggests (DI-066)."""
+    newest: dict[str, dict] = {}
+    for r in await db.list_scrum_responses(status=None, project=None, latest=False):       # newest first
+        if r.get("action") == "comment" and (r.get("comment") or "").strip() and r.get("item_key") not in newest:
+            newest[r["item_key"]] = r
+    for _sec, e in scrum_suggest._entries(digest):
+        r = newest.get(e["item_key"])
+        if r:
+            e["owner_comment"] = {"id": r["id"], "text": scrum_responses.clean(r["comment"], scrum_suggest.OWNER_COMMENT_MAX),
+                                  "at": r.get("created_at")}
+
+
+_BG: set = set()
+
+
+async def _regenerate_after_comment(secret: str) -> None:
+    """A comment was just recorded: rebuild the board now, which generates the changed suggestion in the background (the model call is
+    bounded by scrum_suggest.CALL_TIMEOUT_SECS). Never raises."""
+    try:
+        await scrum_sprints(secret)
+    except Exception as exc:
+        log.warning("suggestion refresh after a comment failed: %s", type(exc).__name__)
 
 
 def _scrum_projects_cfg() -> dict:
@@ -738,10 +769,15 @@ async def scrum_sprints(x_secret_key: str = Header(default="")):
     except Exception:                                    # the digest is advice; it must never break the board
         opus = None
     digest = scrum_digest.build(projects, opus=opus)
+    try:
+        await _attach_owner_comments(digest)                          # DI-066: the owner's newest comment is part of the suggestion
+    except Exception as exc:
+        log.warning("owner comments not attached to the board: %s", type(exc).__name__)
     if os.getenv("SCRUM_SUGGESTIONS", "1") != "0":
         try:                                                           # advice only: never delays or fails the board
             unresolved: set[str] = set()                          # lookups that did not finish in time are not "missing"
             await scrum_suggest.attach_cached(digest, db, unresolved=unresolved)
+            await scrum_suggest.attach_previous(digest, db)           # a comment's new suggestion is generating: show the old one, marked updating
             scrum_suggest.refresh_async(digest, db, _suggest_call, skip=unresolved)    # missing ones: background
         except Exception as exc:
             log.warning("scrum suggestions skipped: %s", exc)
