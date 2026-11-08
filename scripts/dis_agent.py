@@ -24,7 +24,7 @@
   dis-agent review                                the review queue: each waiting story with its sprint, PRs and the exact command to confirm it
   dis-agent accept -p PROJ --story ID --pr URL    confirm a story the fleet did not build (GitHub must show the PR merged), or --evidence "..."
   dis-agent review -p PROJ -s SPR                 sprint review: what ran, validation, PRs to look at, what is stuck
-  dis-agent review -p PROJ -s SPR --story ID      the story's WHOLE review (verdict + every finding); --rerun --where <path> --machine M for a fresh one
+  dis-agent review -p PROJ -s SPR --story ID      the story's WHOLE review (verdict + every finding); --rerun --where <path> --machine M [--as AGENT] for a fresh one (AGENT hands it over when the default reviewer stalls)
   dis-agent validate -p PROJ -s SPR --story ID    run the independent tester (agy) on a story; --branch main when it is already merged
   dis-agent close  -p PROJ -s SPR [--story ID]    close finished stories in the backlog — only after you confirm
 
@@ -866,7 +866,7 @@ def cmd_review_story(a) -> None:
         material = ("Where the code is (read it there; do not rely on any summary):\n" + a.where +
                     "\n\nCheck every acceptance criterion against that code and run its tests. If you cannot read it or run them, "
                     "the verdict is INCOMPLETE.")
-        t = c.queue(sf.tags(a.project, a.sprint, sid, "reviewer", False, None, None, a.machine, bool(a.machine),
+        t = c.queue(sf.tags(a.project, a.sprint, sid, "reviewer", False, getattr(a, "as_agent", None), None, a.machine, bool(a.machine),
                             prompt=sf.review_prompt(pl["story"], "claude", material, v), timeout=1800, flow_key="review-rerun"),
                     f"re-review {sid}")
         print(f"reviewer queued ({t['id'][:8]}); this takes a few minutes ...")
@@ -879,6 +879,10 @@ def cmd_review_story(a) -> None:
     print(f"{pl.get('backlog_id') or sid} ({sid}) reviewed by {ev['review_agent']} at {str(ev['review_at'])[:16]}, "
           f"verdict: {ev['review_verdict'] or 'none stated'}" + ("  [STALE]" if ev["review_stale"] else "") + "\n")
     print(ev["review_full"] + f"\n\n(saved {_save_review(base, sid, ev)})")
+    why = sf.review_stall_reason(ev["review_full"]) if ev["review_verdict"] in (None, "INCOMPLETE") else None
+    if why:
+        print(f"\nWhy this review stalled: {why}.\nHand it to another agent that can run the tests:\n"
+              f"  dis-agent review -p {a.project} -s {a.sprint} --story {a.story} --rerun --where <path to the code> --as claude   (or --as agy)")
 
 
 def cmd_review(a) -> None:
@@ -966,7 +970,7 @@ def cmd_close(a) -> None:
                                      ("validation did not pass: " + sf.validation_summary(v), not (v and v.get("passed") is True)),
                                      (f"the review's verdict is {rv}; fix what it found and run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`",
                                       rv in ("INCOMPLETE", "REQUEST_CHANGES")),
-                                     (f"the review is stale; run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`", ev["review_stale"])) if bad]
+                                     (f"the review is stale; run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>` (add `--as claude` or `--as agy` if the reviewer cannot run the tests)", ev["review_stale"])) if bad]
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
             continue
@@ -1070,6 +1074,7 @@ def main() -> None:
     rv.add_argument("--rerun", action="store_true", help="with --story: queue a fresh review (needs --where)")
     rv.add_argument("--where", help="with --rerun: where the reviewer reads the code (local worktree path, diff file)")
     rv.add_argument("--machine", help="with --rerun: run the reviewer on this machine (required when --where is a local path)")
+    rv.add_argument("--as", dest="as_agent", choices=["claude", "codex", "agy", "deepseek"], help="with --rerun: hand the review to this agent instead of the role's default (when Codex stalls)")
     a = ap.parse_args()
     if not a.cmd:
         a = ap.parse_args(["chat"])
