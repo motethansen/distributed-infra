@@ -282,3 +282,38 @@ def consume_one(client: Any, response_id: int, user: str, emit=None, board: Any 
     ok, msg = consume(client, response_id, user)
     emit(msg if ok or msg == "already consumed" else f"(could not consume response {response_id}: {msg})")
     return ok
+
+
+# ── what a confirm means (DI-064 stage 4) ─────────────────────────────────────
+
+_TEAM = re.compile(r"\b(the\s+(?:mobile\s+)?team\s+(?:should|to|can)|ask\s+the\s+team|have\s+the\s+team|hand\s+(?:that|it|this)\s+to\s+the\s+(?:mobile\s+)?team|"
+                   r"get\s+the\s+team\s+to|team\s+should)\b", re.I)
+_TEAM_LEAD = re.compile(r"^\s*(?:product owner|michael|the product owner|the owner|owner)\b\W", re.I)
+
+
+def classify_suggestion(text: str | None) -> str:
+    """What confirming a suggestion means. "team": it asks the TEAM to do something, so the confirm becomes a queued backlog story.
+    "owner": the owner has something to check or decide first ("open the deployed form, then move it to done"): a confirm is only
+    recorded, and acceptance is the separate Accept button. A suggestion addressed to the owner is "owner" even if it mentions the team."""
+    t = clean(text or "", 2000)
+    if not t:
+        return "owner"
+    lead = _TEAM_LEAD.match(t)
+    m = _TEAM.search(t)
+    if not m:
+        return "owner"
+    if lead and m.start() > 60:      # "Product owner: ... then ask the team to ..." stays the owner's step first
+        return "owner"
+    return "team"
+
+
+def team_story_title(text: str, item_id: str | None = None, limit: int = 140) -> str:
+    """A backlog title from a team-addressed suggestion: the action, without the "The team should" lead-in."""
+    t = clean(text, 2000)
+    t = re.sub(r"^(?:product owner|michael)\W+", "", t, flags=re.I)
+    t = re.sub(r"^.*?\b(?:the\s+(?:mobile\s+)?team\s+(?:should|to|can)|ask\s+the\s+team\s+to|have\s+the\s+team|team\s+should)\s+", "", t, count=1, flags=re.I) or t
+    t = t.rstrip(". ")
+    t = t[:1].upper() + t[1:]
+    if len(t) > limit:
+        t = t[: limit - 1].rsplit(" ", 1)[0] + "…"
+    return (f"{item_id}: " if item_id else "") + t

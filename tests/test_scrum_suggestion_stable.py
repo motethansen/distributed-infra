@@ -287,7 +287,7 @@ async def test_fallback_rows_are_marked_stale_with_verified_at_and_fresh_rows_ar
     store = cls(rows_for(d1))
     await ss.attach_cached(d1, store)
     for e in all_entries(d1):
-        assert set(e["suggestion"]) == {"id", "text", "generated_at", "model"}
+        assert set(e["suggestion"]) == {"id", "text", "generated_at", "model", "kind"}
     store.mode = "raise"
     d2 = digest()
     await ss.attach_cached(d2, store)

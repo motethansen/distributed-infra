@@ -20,8 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from agents import roles as scrum_roles
 from orchestrator.llm_choices import build_llm_choices
-from shared import scrum, scrum_digest, scrum_suggest, tracking
-from shared.desk_allowlist import ALLOWED_TIERS_THIS_SPRINT
+from shared import scrum, scrum_accept, scrum_digest, scrum_responses, scrum_suggest, tracking
+from shared.desk_allowlist import ALLOWED_TIERS_THIS_SPRINT, is_valid_id
 from shared.desk_errors import DeskConflict, DeskPaused, DeskRateLimited
 from shared.desk_intent import CommandIntent, intent_missing, intent_verdict
 from shared.models import ClaimRequest, Task, TaskCreate, TaskStatus, TaskType, TaskUpdate
@@ -508,9 +508,28 @@ async def scrum_response_create(raw: dict = Body(...), x_secret_key: str = Heade
         return await _scrum_command_create(raw, idempotency_key)
     body = _validate_body(ScrumResponseIn, raw)
     try:
-        return await db.insert_scrum_response(body.model_dump(), idempotency_key)
+        row = await db.insert_scrum_response(body.model_dump(), idempotency_key)
     except ValueError:
         raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different response")
+    if body.action == "confirm" and scrum_responses.classify_suggestion(body.suggestion_text) == "team":
+        row = {**row, "applies": await _queue_team_story(body, row)}
+    return row
+
+
+async def _queue_team_story(body: ScrumResponseIn, row: dict) -> str:
+    """A confirm on a suggestion that asks the TEAM to do something becomes a story in the project's backlog (the desk worker writes it).
+    The queue key is the response id, so a replay or a double click queues one story. Failure never loses the recorded confirm."""
+    try:
+        await db.insert_command({"kind": "command", "verb": "queue_story", "project": body.project, "sprint": "-",
+                                 "story_id": body.item_id if body.item_id and is_valid_id(body.item_id) else None,
+                                 "plan_digest": str(row["id"]), "evidence": (body.suggestion_text or "")[:1500],
+                                 "actor": body.actor, "tier": "T1"}, f"queue_story:{row['id']}", None)
+        return "queued_for_team"
+    except (ValueError, DeskRateLimited):
+        return "queued_for_team"       # replay of the same confirm: already queued
+    except Exception as exc:         # the confirm is recorded either way
+        log.warning("queue_story not queued for response %s: %s", row.get("id"), type(exc).__name__)
+        return "not_queued"
 
 
 async def _scrum_command_create(raw: dict, idempotency_key: str | None):
@@ -601,6 +620,70 @@ async def scrum_response_consume(response_id: int, x_secret_key: str = Header(de
     if outcome == "already_consumed":
         raise HTTPException(status_code=409, detail="Response already consumed")
     return {"id": response_id, "status": "consumed"}
+
+
+def _scrum_projects_cfg() -> dict:
+    try:
+        with open(Path(__file__).resolve().parent.parent / "config" / "scrum_projects.yaml") as f:
+            return (yaml.safe_load(f) or {}).get("projects") or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+
+
+async def _accept_preview(project: str, story: str, x_secret_key: str) -> dict:
+    _SCRUM_CACHE["ts"] = 0.0           # an Accept is judged on the board as it is now, not 30 s ago
+    board = await scrum_sprints(x_secret_key)
+    return await asyncio.to_thread(scrum_accept.accept_preview, board, project, story, _scrum_projects_cfg())
+
+
+@app.get("/scrum/accept-preview", dependencies=[Depends(_require_secret_key)])
+async def scrum_accept_preview(project: str, story: str, x_secret_key: str = Header(default="")):
+    """What accepting this story would change, and what blocks it, before anything changes. Read-only; asks GitHub about each PR."""
+    if not (is_valid_id(project) and is_valid_id(story)):
+        raise HTTPException(status_code=422, detail="project and story must be ids")
+    return await _accept_preview(project, story, x_secret_key)
+
+
+class AcceptIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project: str
+    story: str
+    digest: str = Field(min_length=8, max_length=64)
+    actor: str
+
+    @field_validator("project", "story", "actor")
+    @classmethod
+    def _ids(cls, v: str) -> str:
+        if not is_valid_id(v):
+            raise ValueError("must match the id pattern")
+        return v
+
+
+@app.post("/scrum/accept", status_code=201, dependencies=[Depends(_require_secret_key)])
+async def scrum_accept_create(raw: dict = Body(...), x_secret_key: str = Header(default=""),
+                              idempotency_key: str | None = Header(default=None)):
+    """Queue an accept for the desk worker. The digest must be that of a FRESH preview: a story that changed since the owner looked is
+    refused (409 with the new preview), and so is one with a PR that is not merged (409 with what is missing). Nothing is merged here."""
+    body = _validate_body(AcceptIn, raw)
+    if not idempotency_key:
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
+    p = await _accept_preview(body.project, body.story, x_secret_key)
+    if not p.get("ok"):
+        raise HTTPException(status_code=409, detail={"error": "blocked", "preview": p})
+    if p["digest"] != body.digest:
+        raise HTTPException(status_code=409, detail={"error": "changed", "preview": p})
+    sprint = str(p.get("sprint") or "-")
+    fields = {"kind": "command", "verb": "accept_confirmed", "project": body.project, "sprint": sprint if is_valid_id(sprint) else "-",
+              "story_id": body.story, "plan_digest": p["digest"], "evidence": " ".join(x["url"] for x in p["prs"])[:1500],
+              "actor": body.actor, "tier": "T2"}
+    try:
+        row = await db.insert_command(fields, idempotency_key, COMMAND_RATE_LIMIT_PER_HOUR)
+    except DeskRateLimited:
+        raise HTTPException(status_code=429, detail="Too many commands from this actor in the last hour")
+    except ValueError:
+        raise HTTPException(status_code=409, detail="That Idempotency-Key was already used for a different command")
+    log.info("desk accept queued id=%s story=%s actor=%s", row["id"], body.story, body.actor)
+    return {"id": row["id"], "status": "queued", "story": body.story, "digest": p["digest"]}
 
 
 async def _suggest_call(prompt: str) -> str | None:

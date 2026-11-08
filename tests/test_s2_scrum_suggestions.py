@@ -211,7 +211,7 @@ async def test_c1_sprints_digest_entries_carry_stable_item_key_and_suggestion_or
         assert isinstance(entry.get("item_key"), str) and entry["item_key"]
         sug = entry["suggestion"]
         assert isinstance(sug, dict)
-        assert set(sug.keys()) == {"id", "text", "generated_at", "model"}
+        assert set(sug.keys()) == {"id", "text", "generated_at", "model", "kind"}
         assert isinstance(sug["id"], str) and sug["id"]
         assert isinstance(sug["text"], str) and sug["text"]
         assert isinstance(sug["generated_at"], str) and sug["generated_at"]
