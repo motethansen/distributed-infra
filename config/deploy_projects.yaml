@@ -1,0 +1,9 @@
+# DI-068: which code belongs to which application, for the deploy audit (scripts/deploy_audit.py).
+# Paths are relative to ~/Projects/github on every machine. Nothing secret and no namespace ids here: the namespace is read from the
+# project's own DO_FUNCTIONS_ACCESS_KEY (in its .env.deploy), which is scoped to exactly one namespace.
+ignore_packages: [sample]          # DigitalOcean's default sample package, in every namespace
+projects:
+  winedragons:   {dir: Vizneo/winedragons_asia,  project_yml: .do/functions/project.yml}
+  cheersfriends: {dir: Vizneo/cheersfriends_cc,  project_yml: functions/project.yml}
+  academictool:  {dir: academictool,             project_yml: serverless/project.yml}
+  urbanlife:     {dir: Vizneo/urbanlife_works,   project_yml: project.yml}
