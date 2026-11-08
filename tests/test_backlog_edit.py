@@ -148,3 +148,65 @@ def test_closed_mark_is_only_used_in_the_helper_module():
     users = [str(p.relative_to(root)) for d in ("shared", "scripts") for p in (root / d).rglob("*.py")
              if "CLOSED_MARK" in p.read_text(encoding="utf-8")]
     assert users == ["shared/backlog_edit.py"]
+
+
+# --- DI-072: the accept path (dis-agent accept) on tmp fixtures, and the helper edge cases -----------------------
+
+def _accept(tmp_path, monkeypatch, status, *, evidence=None, pr=None):
+    import argparse
+    import importlib.util
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("dis_agent_di072", root / "scripts" / "dis_agent.py")
+    da = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(da)
+    (tmp_path / "proj").mkdir()
+    backlog = tmp_path / "proj" / "product-backlog.md"
+    backlog.write_text(_row(status), encoding="utf-8")
+    monkeypatch.setenv("VIZNEO_REPO", str(tmp_path))
+    monkeypatch.setattr(da.sf, "_git", lambda repo, *a, run=None: __import__("subprocess").CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(da.sf, "verify_pr_merged", lambda url: {"merged_at": "2026-10-30", "title": "t"})
+    monkeypatch.setattr(da, "_refresh_board", lambda: None)
+    da.cmd_accept(argparse.Namespace(project="proj", story="WD-1", pr=pr, evidence=evidence, yes=True))
+    return backlog.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("status", [WD_279, WD_291])
+def test_accept_with_evidence_takes_a_row_that_only_mentions_a_mark_in_its_note(tmp_path, monkeypatch, status):
+    out = _accept(tmp_path, monkeypatch, status, evidence="I ran the check and it passes")
+    assert "| WD-1 | Story | High | ✅ done " in out and "I ran the check and it passes" in out
+
+
+@pytest.mark.parametrize("status", [WD_279, WD_291])
+def test_accept_with_pr_takes_a_row_that_only_mentions_a_mark_in_its_note(tmp_path, monkeypatch, status):
+    pr = "https://github.com/o/p/pull/9"
+    out = _accept(tmp_path, monkeypatch, status, pr=pr)
+    assert "| WD-1 | Story | High | ✅ done " in out and f"{pr} merged 2026-10-30" in out
+
+
+@pytest.mark.parametrize("mark", ["✅", "⛔", "🟢", "❌"])
+@pytest.mark.parametrize("vs", ["", "️"])
+def test_accept_refuses_a_row_that_already_starts_closed(tmp_path, monkeypatch, mark, vs):
+    with pytest.raises(SystemExit) as e:
+        _accept(tmp_path, monkeypatch, f"{mark}{vs} done — " + "long note " * 20, evidence="x")
+    assert "not accepted" in str(e.value) or "in review" in str(e.value)
+
+
+@pytest.mark.parametrize("cell,status,closed", [
+    ("✅ done", "✅ done", True),                                  # no separator: the whole trimmed cell
+    ("   ✅ done", "✅ done", True),                               # leading spaces
+    ("   🔍 in review — `✅ done` in the note", "🔍 in review", False),
+    ("🔍 in review — see `⛔`", "🔍 in review", False),
+    ("planned", "planned", False),
+    ("in_review", "in_review", False),
+    ("", "", False),
+])
+def test_leading_status_and_is_closed_status_edge_cases(cell, status, closed):
+    assert be.leading_status(cell) == status
+    assert be.is_closed_status(cell) is closed and be.is_closed_text(cell) is closed
+
+
+def test_closed_mark_appears_in_no_other_py_file_of_shared_or_scripts():
+    root = Path(__file__).resolve().parent.parent
+    users = sorted(str(p.relative_to(root)) for d in ("shared", "scripts") for p in (root / d).rglob("*.py")
+                   if "CLOSED_MARK" in p.read_text(encoding="utf-8"))
+    assert users == ["shared/backlog_edit.py"]
