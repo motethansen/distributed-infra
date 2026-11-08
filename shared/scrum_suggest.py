@@ -39,8 +39,14 @@ Rules:
 Item: {item_key}
 Section: {section}
 Facts: {evidence}
-{hint}
+{owner}{hint}
 Reply with the sentence only."""
+
+OWNER_PROMPT = """The product owner commented on this item. These are his own words: follow what he asks (a decision, a correction, a
+preference, an answer to a question) and do not repeat the comment back. Update the suggestion so it takes the comment into account.
+Owner's comment: {comment}
+"""
+OWNER_COMMENT_MAX = 600
 
 
 _HUMAN = re.compile(r"human[- ]only|human step|\b(?:console|dashboard)\b", re.I)
@@ -57,8 +63,29 @@ def hint(entry: dict) -> str:
     return "\n".join(out) + ("\n" if out else "")
 
 
-def evidence_hash(entry: dict) -> str:
+def owner_comment(entry: dict) -> str:
+    """The owner's newest comment on the item ("" when none), on one line and bounded. The orchestrator puts it on the entry as
+    `owner_comment: {id, text, at}`; a comment is part of what a suggestion is made from (it changes the hash), so a new comment
+    produces a new suggestion with a new id and an older confirm of the previous one is stale."""
+    c = entry.get("owner_comment")
+    text = c.get("text") if isinstance(c, dict) else None
+    return " ".join(str(text or "").split())[:OWNER_COMMENT_MAX]
+
+
+def base_hash(entry: dict) -> str:
+    """The hash the suggestion had before any comment (what an item without a comment still uses)."""
     return hashlib.sha256(evidence_text(entry).encode()).hexdigest()[:16]
+
+
+def evidence_hash(entry: dict) -> str:
+    c = owner_comment(entry)
+    return hashlib.sha256((evidence_text(entry) + ("|owner:" + c if c else "")).encode()).hexdigest()[:16]
+
+
+def prompt_for(section: str, entry: dict) -> str:
+    c = owner_comment(entry)
+    return PROMPT.format(item_key=entry["item_key"], section=section, evidence=evidence_text(entry), hint=hint(entry),
+                         owner=OWNER_PROMPT.format(comment=c) if c else "")
 
 
 def suggestion_id(item_key: str, ev_hash: str) -> str:
@@ -246,7 +273,7 @@ async def generate_missing(items: list[tuple[str, dict]], store: Any, call: Call
     async def one(sec: str, e: dict, key: tuple[str, str]) -> int:
         try:
             async with sem:
-                raw = await asyncio.wait_for(call(PROMPT.format(item_key=e["item_key"], section=sec, evidence=evidence_text(e), hint=hint(e))), timeout or CALL_TIMEOUT_SECS)
+                raw = await asyncio.wait_for(call(prompt_for(sec, e)), timeout or CALL_TIMEOUT_SECS)
             text = clean(raw)
             if not text:
                 return 0
@@ -273,7 +300,8 @@ def refresh_async(digest: dict[str, Any], store: Any, call: Callable[[str], Awai
     """Generate suggestions for entries whose `suggestion` is None in a background task; returns at once and never raises.
     Entries are copied, so the digest already handed to the caller is not touched. Call after attach_cached."""
     try:
-        missing = [(sec, dict(e)) for sec, e in _entries(digest) if e.get("suggestion") is None and e["item_key"] not in skip]
+        missing = [(sec, dict(e)) for sec, e in _entries(digest)
+                   if (e.get("suggestion") is None or (e["suggestion"] or {}).get("updating")) and e["item_key"] not in skip]
         if not missing:
             return
         task = asyncio.get_running_loop().create_task(generate_missing(missing, store, call))
@@ -281,3 +309,20 @@ def refresh_async(digest: dict[str, Any], store: Any, call: Callable[[str], Awai
         task.add_done_callback(_TASKS.discard)
     except Exception as exc:
         log.warning("scrum suggestion refresh not started: %s", exc)
+
+
+async def attach_previous(digest: dict[str, Any], store: Any, timeout: float = 2.0) -> int:
+    """After attach_cached: an entry with an owner comment whose NEW suggestion is not generated yet keeps showing the previous one,
+    marked `updating: True`, so the board never goes blank while the model works. Returns how many were filled."""
+    n = 0
+    for _, e in _entries(digest):
+        if e.get("suggestion") is not None or not owner_comment(e):
+            continue
+        try:
+            row = await asyncio.wait_for(store.get_scrum_suggestion(e["item_key"], base_hash(e)), timeout)
+        except Exception:
+            continue
+        if row:
+            e["suggestion"] = {**_public(row), "updating": True}
+            n += 1
+    return n
