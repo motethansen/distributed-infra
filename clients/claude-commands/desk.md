@@ -1,7 +1,7 @@
 ---
 description: What can I ask the desk? Examples of questions and what each one does
 allowed-tools: Bash(dis-agent:*)
-model: haiku
+model: sonnet
 ---
 Introduce the desk in at most 10 lines, friendly and plain. Say that I can just talk: ask about any project, a story, what is blocked and why, what the agents did, what it cost, or what to do next, and you will answer from the live board and suggest the exact command when one helps. Give these example questions to copy:
 

@@ -1,7 +1,7 @@
 ---
 description: Start a sprint for a project, step by step — or resume the proposal you were reviewing
 allowed-tools: Bash(dis-agent:*)
-model: haiku
+model: sonnet
 ---
 You are walking the human product owner through starting a sprint. The first word of $ARGUMENTS is the project; the rest (if any) is what the sprint should deliver. Go one step at a time and wait for his answer between steps.
 

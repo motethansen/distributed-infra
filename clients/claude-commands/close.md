@@ -1,7 +1,7 @@
 ---
 description: Close a finished story after you have seen its validation and review — only when you ask
 allowed-tools: Bash(dis-agent:*)
-model: haiku
+model: sonnet
 ---
 $ARGUMENTS is `<project> <sprint> <story>`; the sprint can be the label (S-roles) or the number the board shows (1), and the story is the backlog ID (DI-056) or the plan's ID (S-1). The human is asking you to close it, so:
 
