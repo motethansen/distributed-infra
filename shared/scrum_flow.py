@@ -729,6 +729,25 @@ def close_story(repo: Path, project: str, bid: str, who: str, day: str, evidence
                         f"{project}: {bid} closed after sprint review, confirmed by {who}", run=run)
 
 
+_STALLS = (
+    (re.compile(r"temporary[- ]file|no writable temp|read-only sandbox|read only sandbox|sandbox", re.I),
+     "the reviewer's sandbox is read-only with no writable temp directory, so it could not start the test run"),
+    (re.compile(r"could not (?:reach|reproduce|fetch)|unable to (?:reach|fetch)|remote pr|github", re.I),
+     "the reviewer could not reach GitHub, so it could not read the pull request"),
+    (re.compile(r"usage limit|quota|rate limit|out of usage", re.I), "the reviewer's usage allowance is used up"),
+    (re.compile(r"timed? ?out|timeout", re.I), "the reviewer ran out of time"),
+)
+
+
+def review_stall_reason(text: str | None) -> str | None:
+    """Why a review could not finish, in a sentence, read from what the reviewer itself wrote (None when it gives no such reason)."""
+    t = text or ""
+    for pat, why in _STALLS:
+        if pat.search(t):
+            return why
+    return None
+
+
 _VERDICT_LINE = re.compile(r"^\W*VERDICT\s*:\s*(APPROVE|REQUEST[_ ]CHANGES|INCOMPLETE)\b", re.I | re.M)
 
 

@@ -57,3 +57,22 @@ def test_review_prompt_fills_in_the_acceptance_criteria_and_the_material():
     assert "first criterion" in p and "second criterion" in p
     assert "WHERE-THE-CODE-IS" in p and "{json" not in p and "{material" not in p and "{validation" not in p
     assert "S-9" in p and "{story" not in p
+
+
+# ---- DI-067: say why a review stalled, and let it be handed to another agent ------------------------------------------------
+
+def test_a_stall_is_explained_from_what_the_reviewer_wrote():
+    from shared import scrum_flow as sf
+    assert "temp" in sf.review_stall_reason("pytest could not start under the read-only sandbox because temporary-file creation is blocked")
+    assert "GitHub" in sf.review_stall_reason("I could not verify the remote PR head")
+    assert "usage" in sf.review_stall_reason("the agent is out of usage")
+    assert sf.review_stall_reason("All criteria met; verdict APPROVE") is None
+    assert sf.review_stall_reason(None) is None
+
+
+def test_review_accepts_an_agent_to_hand_over_to():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("dis_agent_x", "scripts/dis_agent.py")
+    src = open("scripts/dis_agent.py").read()
+    assert '"--as", dest="as_agent"' in src and 'getattr(a, "as_agent", None)' in src
+    assert "Why this review stalled" in src
