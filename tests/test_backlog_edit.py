@@ -107,3 +107,44 @@ def test_a_story_never_lands_in_the_closed_table_even_when_it_comes_first():
     new, sid = be.add_story(text, "fresh")
     lines = new.split("\n")
     assert lines.index(next(l for l in lines if l.startswith(f"| {sid}"))) > lines.index("## Items")
+
+
+# --- DI-072: "already closed" is decided from the leading status only ---------------------------------------------
+
+def _row(status: str) -> str:
+    return ("| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n"
+            f"| WD-1 | Story | High | {status} | |\n")
+
+
+WD_279 = "🔍 in review — built; reviewer asked to rerun the check, `✅ done` on the first one"
+WD_291 = "🔍 in review — ✅ criteria met except the last one"
+
+
+def test_leading_status_is_the_text_before_the_first_separator_trimmed():
+    assert be.leading_status("  ✅ done — note — more ") == "✅ done"
+    assert be.leading_status("🔵 planned") == "🔵 planned"
+    assert be.is_closed_status("✅ done 2026-08-01 — x") and not be.is_closed_status(WD_279)
+
+
+@pytest.mark.parametrize("status", [WD_279, WD_291])
+@pytest.mark.parametrize("evidence", ["checked the response", "https://github.com/o/p/pull/9 merged 2026-10-30"])
+def test_rows_that_only_mention_a_closed_mark_in_the_note_are_accepted(status, evidence):
+    new = be.set_status(_row(status), "WD-1", "✅ done 2026-11-08", evidence, closing=True)
+    assert "| WD-1 | Story | High | ✅ done 2026-11-08 |" in new and evidence in new
+
+
+@pytest.mark.parametrize("mark", ["✅", "⛔", "🟢", "❌"])
+@pytest.mark.parametrize("vs", ["", "️"])
+def test_rows_that_really_start_closed_are_refused_with_only_the_leading_status(mark, vs):
+    status = f"{mark}{vs} done — " + "a long note about how it went. " * 10
+    with pytest.raises(be.BacklogError, match="already closed") as e:
+        be.set_status(_row(status), "WD-1", "✅ done 2026-11-08", "x", closing=True)
+    msg = str(e.value)
+    assert f"already closed: {mark}{vs} done" in msg and " — " not in msg and len(msg) < 120
+
+
+def test_closed_mark_is_only_used_in_the_helper_module():
+    root = Path(__file__).resolve().parent.parent
+    users = [str(p.relative_to(root)) for d in ("shared", "scripts") for p in (root / d).rglob("*.py")
+             if "CLOSED_MARK" in p.read_text(encoding="utf-8")]
+    assert users == ["shared/backlog_edit.py"]
