@@ -293,7 +293,7 @@ def test_queue_story_adds_one_planned_row_and_is_idempotent_per_response(tmp_pat
     repo = tmp_path / "viz"
     (repo / "demo").mkdir(parents=True)
     (repo / "demo" / "product-backlog.md").write_text(BACKLOG)
-    for c in (["init", "-q"], ["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "i"]):
+    for c in (["init", "-q"], ["config", "user.name", "t"], ["config", "user.email", "t@t"], ["add", "-A"], ["commit", "-q", "-m", "i"]):
         subprocess.run(["git", "-C", str(repo), *c], check=True, capture_output=True)
     monkeypatch.setenv("VIZNEO_REPO", str(repo))
     monkeypatch.setattr(da, "_report", lambda *a, **k: None)
