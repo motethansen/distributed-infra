@@ -78,7 +78,10 @@ def clean(text: str | None) -> str | None:
 
 
 def _public(row: dict) -> dict:
-    return {k: row[k] for k in ("id", "text", "generated_at", "model")}
+    from shared.scrum_responses import classify_suggestion
+    out = {k: row[k] for k in ("id", "text", "generated_at", "model")}
+    out["kind"] = classify_suggestion(row.get("text"))      # "team": confirming it queues a backlog story; "owner": it only records
+    return out
 
 
 _SECTIONS = (("review", "review_queue"), ("decision", "decisions"), ("adjustment", "adjustments"))

@@ -27,6 +27,11 @@ ALLOWLIST: dict[str, dict[str, Any]] = {
     "close": {"tier": "T3", "required": ()},
 }
 
+# Verbs only the orchestrator itself may queue, never the page: `accept_confirmed` is queued by POST /scrum/accept after the
+# preview digest matched and every PR was seen merged; `queue_story` by recording a confirm on a "the team should ..." suggestion.
+# They are deliberately NOT in ALLOWLIST, so POST /scrum/responses answers 422 "Unknown verb" for them.
+INTERNAL_VERBS = {"accept_confirmed": ("story_id", "plan_digest"), "queue_story": ("evidence",)}
+
 ID_PATTERN = r"^[A-Za-z0-9._-]{1,64}$"
 _ID_RE = re.compile(ID_PATTERN)
 ALLOWED_TIERS_THIS_SPRINT = {"T1"}
@@ -64,3 +69,7 @@ def missing_required(verb: Any, fields: Mapping[str, Any]) -> list[str]:
         if value is None or (isinstance(value, str) and not value.strip()):
             missing.append(name)
     return missing
+
+
+def is_internal(verb: Any) -> bool:
+    return isinstance(verb, str) and verb in INTERNAL_VERBS

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from shared.desk_allowlist import ALLOWLIST, check_verb, is_valid_id  # noqa: E402
+from shared.desk_allowlist import ALLOWLIST, INTERNAL_VERBS, check_verb, is_internal, is_valid_id  # noqa: E402
 
 
 LIST_PATH = "/scrum/desk/commands?status={status}"
@@ -139,6 +139,23 @@ class OrchestratorClient:
 
     def failed(self, cmd_id: int, error: str) -> None:
         self._call("POST", RESULT_PATH.format(id=int(cmd_id)), {"status": "failed", "summary": error[:SUMMARY_MAX]})
+
+    def consume_item_responses(self, project: str, story: str | None, ids: tuple[int, ...] = ()) -> int:
+        """Mark applied the owner's recorded confirms for one board item (or the given ids). Best effort: returns how many."""
+        n = 0
+        try:
+            rows = self._call("GET", f"/scrum/responses?status=pending&project={project}") or []
+            want = set(ids)
+            for r in rows if isinstance(rows, list) else []:
+                if r.get("id") in want or (story and r.get("item_key") == f"{project}:{story}" and r.get("action") == "confirm"):
+                    try:
+                        self._call("POST", CLAIM_PATH.format(id=int(r["id"])))
+                        n += 1
+                    except ApiError:
+                        pass
+        except (ApiError, OrchestratorUnreachable):
+            pass
+        return n
 
     def heartbeat(self, state: str) -> None:
         self._call("POST", HEARTBEAT_PATH, {"worker_name": ACTOR, "state": state})
@@ -307,6 +324,8 @@ def run_command(cmd: dict, cfg: Config, run: Callable[..., Any] = _run_argv,
 
     Raises CommandError on failure. The verb is re-checked against shared.desk_allowlist: only T1 runs."""
     verb = cmd.get("verb")
+    if is_internal(verb):
+        return _run_internal(cmd, cfg, run)
     try:
         verdict, _tier = check_verb(verb)
     except ValueError:
@@ -359,6 +378,50 @@ def run_command(cmd: dict, cfg: Config, run: Callable[..., Any] = _run_argv,
         return {"ok": True, "output": _tail(p.stdout)}
 
 
+_PR_URL = re.compile(r"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/\d+$")
+
+
+def _run_internal(cmd: dict, cfg: Config, run: Callable[..., Any]) -> dict:
+    """The two verbs only the orchestrator queues (see desk_allowlist.INTERNAL_VERBS). `accept_confirmed` runs `dis-agent accept --yes`,
+    which asks GitHub again and refuses a PR that is not merged or a story that is not in review; `queue_story` adds a planned row."""
+    verb, project = cmd["verb"], _ident(cmd, "project")
+    with worker_lock(cfg.data_dir):
+        if verb == "accept_confirmed":
+            story = _ident(cmd, "story_id")
+            urls = [u for u in str(cmd.get("evidence") or "").split() if _PR_URL.match(u)]
+            if not urls:
+                raise CommandError("no_pr", "no merged PR to confirm with GitHub")
+            argv = _dis_agent_argv(cfg, "accept", "-p", project, "--story", story, "--pr", urls[0], "--yes")
+            if len(urls) > 1:
+                argv.append("--evidence=also merged: " + " ".join(urls[1:]))
+            p = run(argv, 300)
+            if p.returncode != 0:
+                raise CommandError("accept_failed", _tail(p.stderr or p.stdout))
+            return {"ok": True, "story": story, "output": _tail(p.stdout), "confirms_applied": _applied(cmd, project, story)}
+        # queue_story
+        text = str(cmd.get("evidence") or "").strip()
+        if not text:
+            raise CommandError("evidence_required", "no suggestion text")
+        argv = _dis_agent_argv(cfg, "queue-story", "-p", project, f"--text={text[:1500]}")
+        if is_valid_id(cmd.get("story_id")):
+            argv += ["--from", cmd["story_id"]]
+        resp = str(cmd.get("plan_digest") or "")
+        if resp.isdigit():
+            argv += ["--response", resp]
+        p = run(argv, 300)
+        if p.returncode != 0:
+            raise CommandError("queue_story_failed", _tail(p.stderr or p.stdout))
+        return {"ok": True, "output": _tail(p.stdout), "confirms_applied": _applied(cmd, project, None, (int(resp),) if resp.isdigit() else ())}
+
+
+def _applied(cmd: dict, project: str, story: str | None, ids: tuple[int, ...] = ()) -> int:
+    hook = _APPLIED_HOOK.get("fn")
+    return hook(project, story, ids) if hook else 0
+
+
+_APPLIED_HOOK: dict = {}
+
+
 def _lock_free(data_dir: Path) -> bool:
     try:
         with worker_lock(data_dir):
@@ -389,7 +452,7 @@ def tick(client: OrchestratorClient, cfg: Config, run: Callable[..., dict] = run
     if not _lock_free(cfg.data_dir):
         return
     for cmd in client.list_commands("queued"):
-        if check_verb_ok(cmd.get("verb")) and not _claim_and_run(client, cfg, cmd, run):
+        if (check_verb_ok(cmd.get("verb")) or is_internal(cmd.get("verb"))) and not _claim_and_run(client, cfg, cmd, run):
             return   # paused, or a command ran: one command per tick
 
 
@@ -430,6 +493,7 @@ def main() -> None:
     if not cfg.orchestrator_url or not cfg.secret:
         sys.exit("desk_worker: ORCHESTRATOR_URL and DESK_SECRET must be set")
     client = OrchestratorClient(cfg.orchestrator_url, cfg.secret)
+    _APPLIED_HOOK["fn"] = getattr(client, "consume_item_responses", None)
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())

@@ -171,6 +171,93 @@ def review_items(board: dict, plans: list[dict], cfg_projects: dict, project: st
         else:
             cmd = f'dis-agent accept -p {pn} --story {sid} --evidence "what you verified"'
             how = "not built by the fleet and no PR is named: say what you verified (a response, a test, a screen)"
-        out.append({"project": pn, "id": sid, "title": r["title"], "sprint": sprint, "evidence": r.get("evidence", ""), "prs": prs,
+        out.append({"item_key": r.get("item_key") or f"{pn}:{sid}", "project": pn, "id": sid, "title": r["title"], "sprint": sprint, "evidence": r.get("evidence", ""), "prs": prs,
                     "fleet": bool(pl), "command": cmd, "how": how})
     return out
+
+
+# ── what is waiting on the owner: recorded confirms first, then what is ready to accept (DI-064 stage 4) ──
+
+def pending_confirms(rows: list[dict], board: dict, cfg_projects: dict, plans: list[dict] | None = None) -> dict:
+    """The owner's recorded-but-not-applied answers, sorted by what each one means.
+    accept: a confirm on a review item (the owner's check, then Accept); team: a confirm that asks the team to do something and has not
+    been queued yet; other: a confirm on a decision/adjustment; comments: the owner's own words, which only a person can act on.
+    Stale confirms (an older suggestion) are listed apart, never treated as the owner's answer."""
+    from shared import scrum_flow, scrum_responses as sr
+    cur = sr.current_suggestions(board.get("digest") or {})
+    review = {it["item_key"]: it for it in review_items(board, plans or [], cfg_projects)}
+    eff = sr.effective(rows, cur)
+    out = {"accept": [], "team": [], "other": [], "comments": [], "stale": [], "resolved": []}
+    state = {}
+    for pr_ in board.get("projects", []):
+        for sid, st in _statuses(pr_).items():
+            state[f"{pr_['project']}:{sid}"] = st
+    for r in rows:
+        k = r["item_key"]
+        if sr.is_stale(r, cur):
+            out["stale"].append({"item_key": k, "id": r["id"]})
+            continue
+        if r["action"] == "comment":
+            out["comments"].append({"item_key": k, "response": r["id"], "text": sr.clean(r.get("comment"), 160)})
+            continue
+        if eff.get(k) is not r:
+            continue
+        text = sr.clean(r.get("suggestion_text"), 2000)
+        project, _, item = k.partition(":")
+        entry = {"item_key": k, "project": project, "id": item, "response": r["id"], "text": sr.clean(text, 150)}
+        if state.get(k) in ("done", "cancelled", "superseded"):
+            out["resolved"].append({"item_key": k, "id": r["id"]})      # the story closed since: nothing left to apply
+        elif sr.classify_suggestion(text) == "team":
+            q = scrum_flow_quote(text)
+            entry["command"] = f'dis-agent queue-story -p {project} --from {item} --response {r["id"]} --text {q}'
+            out["team"].append(entry)
+        elif k in review:
+            it = review[k]
+            entry.update(title=it["title"], prs=it["prs"], fleet=it["fleet"], command=it["command"] + (" --yes" if not it["fleet"] else ""))
+            out["accept"].append(entry)
+        else:
+            out["other"].append(entry)
+    return out
+
+
+def scrum_flow_quote(text: str) -> str:
+    import shlex
+    return shlex.quote(text[:1500])
+
+
+def ready_to_accept(board: dict, cfg_projects: dict, plans: list[dict], skip_keys: set[str], project: str | None = None, limit: int = 8) -> list[dict]:
+    """Review items with a PR named in their evidence that the owner has not confirmed on the board."""
+    return [it for it in review_items(board, plans, cfg_projects, project)
+            if f"{it['project']}:{it['id']}" not in skip_keys and (it["prs"] or it["fleet"])][:limit]
+
+
+def render_pending(p: dict, ready: list[dict] | None = None) -> str:
+    n = sum(len(p[k]) for k in ("accept", "team", "other", "comments"))
+    if not n and not ready and not p.get("resolved"):
+        return ""
+    L = ["WAITING ON YOU FIRST", ""]
+    if n:
+        L.append(f"You have {n} answer{'s' if n != 1 else ''} recorded on the board that no one has applied. A Confirm on the board records your answer; "
+                 "it does not accept a story. These are what each one needs:")
+    if p["accept"]:
+        L += ["", f"  Accept-type ({len(p['accept'])}): you confirmed, and each one is yours to check, then accept (Vantage: the Accept button; chat: say \"accept <ID>\"):"]
+        for e in p["accept"]:
+            L.append(f"    {e['id']} ({e['project']}) {e.get('title','')[:60]}" + (f"  PRs: {', '.join(x.rsplit('/', 1)[-1] for x in e['prs'])}" if e.get("prs") else "  (no PR named: say what you verified)"))
+            L.append(f"      {e['command']}")
+    if p["team"]:
+        L += ["", f"  Team work ({len(p['team'])}): you confirmed a suggestion that asks the team to do something; it becomes a planned story:"]
+        for e in p["team"]:
+            L += [f"    {e['id']} ({e['project']}): {e['text']}", f"      {e['command']}"]
+    if p["other"]:
+        L += ["", f"  Decisions ({len(p['other'])}): recorded; tell me what to do about each:"] + [f"    {e['item_key']}: {e['text']}" for e in p["other"]]
+    if p["comments"]:
+        L += ["", f"  Your comments ({len(p['comments'])}): only a person can act on a comment; tell me what you want done:"] + [f"    {e['item_key']}: {e['text']}" for e in p["comments"]]
+    if p["stale"]:
+        L += ["", f"  {len(p['stale'])} confirm(s) were for an older suggestion and do not count; ask again on the board."]
+    if p.get("resolved"):
+        L += ["", f"  {len(p['resolved'])} more confirm(s) are on stories that are already closed: nothing to do ({', '.join(e['item_key'].split(':')[-1] for e in p['resolved'][:12])})."]
+    if ready:
+        L += ["", f"  Ready to accept, not yet confirmed by you ({len(ready)} shown): finished and merged, waiting for your sign-off:"]
+        for it in ready:
+            L.append(f"    {it['id']} ({it['project']}) {it['title'][:70]}")
+    return "\n".join(L) + "\n\n"

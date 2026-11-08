@@ -74,7 +74,7 @@ async def test_first_load_serves_null_and_generates_in_the_background_then_cache
     assert call.calls == n
     d2 = await load(digest(), store, call)
     s = d2["review_queue"][0]["suggestion"]
-    assert set(s) == {"id", "text", "generated_at", "model"} and s["model"] == "sonnet" and all(e["suggestion"] for e in all_entries(d2))
+    assert set(s) == {"id", "text", "generated_at", "model", "kind"} and s["model"] == "sonnet" and all(e["suggestion"] for e in all_entries(d2))
     d3 = await load(digest(), store, call)
     assert call.calls == n and d3["review_queue"][0]["suggestion"] == s
 

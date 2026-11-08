@@ -669,10 +669,24 @@ def cmd_next(a) -> None:
     for g in sorted((ROOT / "data" / "scrum").glob("*/grooming/groom-*.json")):
         groomed[g.parent.parent.name] = g.stem.removeprefix("groom-")
     sugs = scrum_next.suggest(board, _local_plans(), groomed, a.project, a.limit, proposals=_local_proposals(), steps=_local_human_steps())
+    waiting, ready = "", None
+    try:                                         # the owner's recorded answers come first; never fatal
+        from shared import scrum_responses
+        rows, _bad, err = scrum_responses.fetch_pending(sc.client())
+        if not err:
+            plans, cfgp = _local_plans(), (projects_cfg().get("projects") or {})
+            pend = scrum_next.pending_confirms(rows, board, cfgp, plans)
+            if a.project:
+                pend = {k: [e for e in v if str(e.get("item_key", "")).startswith(a.project + ":")] for k, v in pend.items()}
+            skip = {e["item_key"] for k in ("accept", "team", "other") for e in pend[k]}
+            ready = scrum_next.ready_to_accept(board, cfgp, plans, skip, a.project)
+            waiting = scrum_next.render_pending(pend, ready)
+    except (Exception, SystemExit):
+        waiting = ""
     if a.json:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
-    print(scrum_next.render(sugs))
+    print(waiting + scrum_next.render(sugs))
     _print_responses(board, not getattr(a, "no_consume", False), getattr(a, "consume", None) is True)
 
 
@@ -793,6 +807,32 @@ def cmd_accept(a) -> None:
     if n:
         _sprint_step(f"sprint-{n:02d}.md: {a.story} done, burndown updated", lambda: sf.sprint_mark(
             viz_repo(), a.project, n, a.story, f"✅ done {day}", day, closing=True))
+
+
+def cmd_queue_story(a) -> None:
+    """A confirm on a "the team should ..." suggestion becomes a planned story. Idempotent per response (--response N): a second
+    run with the same N adds nothing."""
+    from shared import backlog_edit, scrum_responses
+    who = os.environ.get("USER", "human")
+    day = datetime.now(timezone.utc).date().isoformat()
+    text = (a.text or "").strip()
+    if not text:
+        sys.exit("queue-story needs --text (the suggestion the owner confirmed)")
+    marker = f"(response #{a.response})" if a.response else None
+    path = viz_repo() / a.project / "product-backlog.md"
+    if marker and path.exists() and marker in path.read_text(encoding="utf-8"):
+        print(f"  already queued: {marker} is in {a.project}/product-backlog.md, nothing added")
+        return
+    title = scrum_responses.team_story_title(text, a.source)
+    ev = (f"queued from {who}'s confirm of {a.source or 'a board suggestion'} on {day} {marker or ''}: "
+          f"{scrum_responses.clean(text, 500)}").replace("  ", " ")
+    try:
+        r = sf.edit_backlog(viz_repo(), a.project, lambda t: backlog_edit.add_story(t, title, evidence=ev),
+                            f"{a.project}: story queued for the team from {who}'s confirm of {a.source or 'a board suggestion'} (dis-agent)")
+    except sf.PlanError as e:
+        sys.exit(f"not queued: {e}")
+    print(f"  queued {r['result']}: {title}")
+    _report(f"{r['result']} queued for the team", r)
 
 
 def _save_review(base: Path, sid: str, ev: dict) -> Path:
@@ -1010,6 +1050,9 @@ def main() -> None:
     ac.add_argument("-p", "--project", required=True); ac.add_argument("--story", required=True)
     ac.add_argument("--pr", help="URL of a pull request that must be MERGED (checked with GitHub)")
     ac.add_argument("--evidence", help="what you verified, when there is no PR"); ac.add_argument("--yes", action="store_true")
+    qs = sub.add_parser("queue-story", help="register a team-addressed board suggestion as a planned story"); qs.set_defaults(fn=cmd_queue_story)
+    qs.add_argument("-p", "--project", required=True); qs.add_argument("--text", required=True)
+    qs.add_argument("--from", dest="source", help="the board item the owner confirmed, e.g. WD-283"); qs.add_argument("--response", type=int)
     cn = sub.add_parser("cancel"); cn.set_defaults(fn=cmd_cancel)
     cn.add_argument("-p", "--project", required=True); cn.add_argument("--story", required=True)
     cn.add_argument("--reason", required=True); cn.add_argument("--yes", action="store_true")

@@ -44,9 +44,16 @@ def test_worker_only_spawns_dis_agent_verbs_as_argv():
     src = WORKER.read_text()
     assert "shell=True" not in src and "os.system" not in src and "Popen" not in src
     verbs = set(re.findall(r'_dis_agent_argv\(cfg, "([a-z-]+)"', src))
-    assert verbs == {"plan", "validate", "done"}
-    # none of those is a verb that talks to the Product Owner (po, groom) or to a human gate
-    assert not verbs & {"po", "groom", "planning", "approve", "go", "close", "cancel", "accept", "chat", "ask"}
+    assert verbs == {"plan", "validate", "done", "accept", "queue-story"}
+    # none of those talks to the Product Owner (po, groom) or opens another human gate
+    assert not verbs & {"po", "groom", "planning", "approve", "go", "close", "cancel", "chat", "ask"}
+    # DI-064 stage 4: `accept` and `queue-story` exist ONLY inside _run_internal, which runs the two verbs that only the orchestrator can queue
+    # (accept_confirmed: after the owner's click on a fresh preview digest; queue_story: after a confirm on a suggestion addressed to the team).
+    # The public allowlist still has no way to reach them, and the accept is still `--yes` on a github.com pull-request URL only.
+    internal = re.search(r"^def _run_internal\(.*?(?=^def )", src, re.S | re.M).group(0)
+    for v in ("accept", "queue-story"):
+        assert src.count(f'_dis_agent_argv(cfg, "{v}"') == 1 and f'_dis_agent_argv(cfg, "{v}"' in internal
+    assert '"--yes"' in internal and "_PR_URL.match" in internal
 
 
 def test_worker_verbs_are_t1_and_not_t2_t3():
