@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent: disk janitor HEARTBEAT on the mac-mini. Every 60 s it reports the disk status to Vantage and does nothing else (Vantage marks a component stale after 150 s; the 30-minute janitor alone would go stale). Install it together with com.techstartups.disk-janitor.plist.example.
+
+  This file holds NO secrets. VANTAGE_INGEST_KEY goes in the repo's .env (chmod 600, gitignored),
+  loaded by scripts/run-with-env.sh. VANTAGE_URL below is a placeholder: use your Vantage tailnet address.
+
+  Install (replace /Users/YOUR_USERNAME/Projects/distributed-infra with your checkout):
+    cp scripts/com.techstartups.disk-janitor-heartbeat.plist.example ~/Library/LaunchAgents/com.techstartups.disk-janitor-heartbeat.plist
+    # edit the paths and VANTAGE_URL in the copy, then:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.disk-janitor-heartbeat.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.techstartups.disk-janitor-heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/run-with-env.sh</string>
+    <string>--</string>
+    <string>/usr/bin/python3</string>
+    <string>/Users/YOUR_USERNAME/Projects/distributed-infra/scripts/disk_janitor.py</string>
+    <string>heartbeat</string>
+  </array>
+
+  <key>WorkingDirectory</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOUR_USERNAME/.orbstack/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>JANITOR_COMPONENT</key><string>mm-disk</string>
+    <key>VANTAGE_URL</key><string>http://100.64.0.1:8055</string>
+  </dict>
+
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  
+  <key>StandardOutPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/disk-janitor-heartbeat.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USERNAME/Projects/distributed-infra/logs/disk-janitor-heartbeat.err</string>
+</dict>
+</plist>

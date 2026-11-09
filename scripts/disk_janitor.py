@@ -14,6 +14,7 @@ One script, three jobs, run every 30 minutes by launchd (mac) or a systemd user 
 Usage:
   disk_janitor.py [run]           monitor + clean, and recommend once a day  (the scheduled tick)
   disk_janitor.py monitor         just the disk numbers
+  disk_janitor.py heartbeat       monitor + push to Vantage only (run every minute so it never goes stale)
   disk_janitor.py clean [--dry-run]
   disk_janitor.py recommend       fresh scan, prints the Markdown report, writes the files
   add --json for machine-readable output, --dry-run to delete nothing, --verbose to list every item.
@@ -1038,15 +1039,43 @@ def tick(dry: bool, force_recommend: bool = False, with_recommend: bool = True) 
     return report
 
 
+def heartbeat() -> dict:
+    """Cheap once-a-minute report: disk numbers only, no cleaning and no scanning. Vantage treats a
+    component as stale after 150 s, so the 30-minute tick alone would leave it 'unknown' most of the time.
+    The last cleanup's problems (from report.json) are carried along so a failing cleanup stays visible."""
+    mon = monitor()
+    status, errors, cleanup = mon["status"], list(mon["errors"]), "up"
+    try:
+        with open(os.path.join(state_dir(), "report.json")) as f:
+            last = json.load(f).get("cleanup", {})
+        if last.get("errors"):
+            cleanup = "degraded"
+            errors.append(f"cleanup: {len(last['errors'])} problem(s), first: {last['errors'][0][:120]}")
+            if status == "up":
+                status = "degraded"
+    except (OSError, ValueError):
+        pass
+    url = os.environ.get("VANTAGE_URL", "")
+    if url:
+        push_vantage(url, os.environ.get("VANTAGE_INGEST_KEY", ""),
+                     os.environ.get("JANITOR_COMPONENT", f"{host_name()}-disk"), status, errors,
+                     {"disk": mon["status"], "cleanup": cleanup})
+    return {"status": status, "errors": errors, "mounts": mon["mounts"]}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     dry = "--dry-run" in args
     as_json = "--json" in args
     cmds = [a for a in args if not a.startswith("--")]
     cmd = cmds[0] if cmds else "run"
-    if cmd not in ("run", "monitor", "clean", "recommend"):
+    if cmd not in ("run", "monitor", "clean", "recommend", "heartbeat"):
         print(__doc__)
         return 2
+    if cmd == "heartbeat":                           # no lock: it must still report while a long scan runs
+        out = heartbeat()
+        print(f"{time.strftime('%F %T')} heartbeat {out['status']}", flush=True)
+        return 0
     lock = lock_or_exit()                            # noqa: F841 (held for the life of the process)
     if cmd == "monitor":
         out = monitor()

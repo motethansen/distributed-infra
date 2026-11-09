@@ -1,0 +1,11 @@
+# systemd USER timer for disk-janitor-heartbeat.service: every minute.
+[Unit]
+Description=Disk janitor heartbeat every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
