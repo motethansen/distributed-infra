@@ -962,9 +962,13 @@ def log_line(msg: str, echo: bool = True) -> None:
         pass
 
 
-def push_vantage(url: str, key: str, component: str, status: str, errors: list[str], checks: dict) -> bool:
-    body = json.dumps({"component": component, "status": status, "errors": errors[:20],
-                       "checks": checks, "ts": int(time.time())}).encode()
+def push_vantage(url: str, key: str, component: str, status: str, errors: list[str], checks: dict,
+                 details: Optional[dict] = None) -> bool:
+    payload = {"component": component, "status": status, "errors": errors[:20],
+               "checks": checks, "ts": int(time.time())}
+    if details:
+        payload["details"] = details
+    body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
     if key:
         headers["x-vantage-key"] = key
@@ -987,6 +991,40 @@ def lock_or_exit():
     except OSError:
         sys.exit(0)                                  # another run is in progress
     return f
+
+
+DETAIL_ROWS = 25
+
+
+def details_for(mon: dict, cleanup: Optional[dict], recs: Optional[dict], limit: int = DETAIL_ROWS) -> dict:
+    """Ordered label -> value rows for the Vantage inspector: the disk numbers, then the biggest
+    cleanup/uninstall candidates, each flagged SAFE (rebuilds itself), REVIEW (check first) or KEEP
+    (has work in it). The full commands stay in recommendations.md on the machine."""
+    d: dict = {}
+    for m in mon.get("mounts", []):
+        d[f"disk {m['path']}"] = f"{m['pct']}% used · {fmt(m['free'])} free · {m['status']}"
+    if cleanup:
+        d["last cleanup"] = f"freed {fmt(cleanup.get('freed', 0))} · {len(cleanup.get('removed', []))} item(s)"
+    if recs:
+        items = [(sec, r) for sec, rs in recs.get("sections", {}).items() for r in rs]
+        d["SAFE to delete, total"] = fmt(sum(r["bytes"] or 0 for _, r in items if r["confidence"] == "safe"))
+        d["list written"] = time.strftime("%F %H:%M", time.localtime(recs.get("ts", 0)))
+        items.sort(key=lambda x: -(x[1]["bytes"] or 0))
+        for sec, r in items[:limit]:
+            label, n = r["title"], 2
+            while label in d:                                # titles can repeat across sections
+                label, n = f"{r['title']} ({n})", n + 1
+            d[label] = " · ".join([r["confidence"].upper(), fmt(r["bytes"]), sec] + (["needs sudo"] if r["sudo"] else []))
+    return d
+
+
+def load_report() -> dict:
+    try:
+        with open(os.path.join(state_dir(), "report.json")) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def tick(dry: bool, force_recommend: bool = False, with_recommend: bool = True) -> dict:
@@ -1035,7 +1073,8 @@ def tick(dry: bool, force_recommend: bool = False, with_recommend: bool = True) 
     if url and not dry:
         push_vantage(url, os.environ.get("VANTAGE_INGEST_KEY", ""),
                      os.environ.get("JANITOR_COMPONENT", f"{host_name()}-disk"), status, errors,
-                     {"disk": after["status"], "cleanup": "degraded" if cl.errors else "up"})
+                     {"disk": after["status"], "cleanup": "degraded" if cl.errors else "up"},
+                     details_for(after, cleaned, recs))
     return report
 
 
@@ -1045,21 +1084,18 @@ def heartbeat() -> dict:
     The last cleanup's problems (from report.json) are carried along so a failing cleanup stays visible."""
     mon = monitor()
     status, errors, cleanup = mon["status"], list(mon["errors"]), "up"
-    try:
-        with open(os.path.join(state_dir(), "report.json")) as f:
-            last = json.load(f).get("cleanup", {})
-        if last.get("errors"):
-            cleanup = "degraded"
-            errors.append(f"cleanup: {len(last['errors'])} problem(s), first: {last['errors'][0][:120]}")
-            if status == "up":
-                status = "degraded"
-    except (OSError, ValueError):
-        pass
+    last = load_report()
+    if last.get("cleanup", {}).get("errors"):
+        cleanup = "degraded"
+        errors.append(f"cleanup: {len(last['cleanup']['errors'])} problem(s), first: {last['cleanup']['errors'][0][:120]}")
+        if status == "up":
+            status = "degraded"
     url = os.environ.get("VANTAGE_URL", "")
     if url:
         push_vantage(url, os.environ.get("VANTAGE_INGEST_KEY", ""),
                      os.environ.get("JANITOR_COMPONENT", f"{host_name()}-disk"), status, errors,
-                     {"disk": mon["status"], "cleanup": cleanup})
+                     {"disk": mon["status"], "cleanup": cleanup},
+                     details_for(mon, last.get("cleanup"), last.get("recommendations")))
     return {"status": status, "errors": errors, "mounts": mon["mounts"]}
 
 
@@ -1106,6 +1142,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         recs = recommend()
         md = render_markdown(host_name(), monitor(), recs, None)
         write_json(os.path.join(state_dir(), "recommendations.json"), recs)
+        prev = load_report()
+        prev.update({"host": host_name(), "recommendations": recs})     # so Vantage shows the fresh list at once
+        write_json(os.path.join(state_dir(), "report.json"), prev)
         with open(os.path.join(state_dir(), "recommendations.md"), "w") as f:
             f.write(md)
         print(json.dumps(recs, indent=1) if as_json else md)
