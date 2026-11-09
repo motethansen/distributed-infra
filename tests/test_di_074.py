@@ -51,8 +51,9 @@ def test_criterion_3_backlog_edit_byte_identical_and_only_test_files_changed():
             capture_output=True,
             text=True,
         ).stdout.splitlines()
-        allowed = {"tests/test_di_072.py", "tests/test_di_074.py"}
-        assert set(changed_files) <= allowed, f"Unexpected files changed since {COMMIT_BEFORE_FIX}: {changed_files}"
+        # Not asserting that ONLY these two test files changed since the fix: that holds on the day the story
+        # merges and fails on every later PR whose checkout has full history (any new file shows up in the diff).
+        # What the story promises is the line above: shared/backlog_edit.py is byte-identical.
         assert "tests/test_di_072.py" in changed_files
     else:
         assert diff_backlog_edit is not None
