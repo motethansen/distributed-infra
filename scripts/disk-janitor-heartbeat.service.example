@@ -1,0 +1,13 @@
+# systemd USER unit: disk janitor HEARTBEAT on the thinkpad. Run every minute by disk-janitor-heartbeat.timer.
+# Reports the disk status to Vantage and does nothing else: Vantage marks a component stale after 150 s,
+# so the 30-minute janitor alone would show as unknown most of the time. Install next to disk-janitor.service.
+[Unit]
+Description=Disk janitor heartbeat: report disk status to Vantage
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/distributed-infra
+Environment=JANITOR_COMPONENT=tp-disk
+Environment=VANTAGE_URL=http://100.64.0.1:8055
+ExecStart=%h/Projects/distributed-infra/scripts/run-with-env.sh -- /usr/bin/python3 %h/Projects/distributed-infra/scripts/disk_janitor.py heartbeat
+TimeoutStartSec=60

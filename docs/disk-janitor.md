@@ -8,6 +8,7 @@
 | `monitor` | Disk numbers and a status: `up`, `degraded` (85% used or under 50 GB free) or `critical` (92% or under 20 GB). On the thinkpad `/tmp` is RAM, so only its percentage counts. | No |
 | `clean` | Removes a short list of idle, self-regenerating files (below). `--dry-run` shows what it would do. | Yes, only that list |
 | `recommend` | Writes `~/.local/state/disk-janitor/recommendations.md`: what to clean up or uninstall, each with its size, a `safe` / `review` / `keep` label and the exact command. | Never |
+| `heartbeat` | Disk numbers pushed to Vantage, nothing else. Runs every minute because Vantage marks a component stale after 150 s. | No |
 | `run` | The scheduled tick: monitor, clean, push one status to Vantage, refresh the recommendations once a day. | Same as `clean` |
 
 ## What `clean` removes on its own
@@ -42,7 +43,7 @@ See the header of `com.techstartups.disk-janitor.plist.example` (mac-mini, launc
     python3 scripts/disk_janitor.py clean --dry-run
     python3 scripts/disk_janitor.py recommend
 
-Vantage components: `mm-disk` and `tp-disk` (set with `JANITOR_COMPONENT`).
+Install the heartbeat units too (`*heartbeat*.example`): they keep the Vantage components `mm-disk` and `tp-disk` (set with `JANITOR_COMPONENT`) from going stale between the 30-minute runs.
 
 ## Why it replaces `tmp-cleanup.sh`
 

@@ -504,3 +504,39 @@ def test_build_tooling_is_never_suggested_for_removal():
 
 def test_cache_advice_uses_the_tools_own_command_for_the_big_ones():
     assert "brew cleanup" in dj.CACHE_COMMANDS["Homebrew"] and "pip cache purge" in dj.CACHE_COMMANDS["pip"]
+
+
+def test_heartbeat_reports_without_cleaning_or_scanning(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("VANTAGE_URL", "http://vantage.test")
+    monkeypatch.setenv("JANITOR_COMPONENT", "tp-disk")
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], "mounts": []})
+    monkeypatch.setattr(dj, "clean", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not clean")))
+    monkeypatch.setattr(dj, "recommend", lambda: (_ for _ in ()).throw(AssertionError("must not scan")))
+    pushed = []
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((comp, st, errs, checks)) or True)
+    dj.heartbeat()
+    assert pushed == [("tp-disk", "up", [], {"disk": "up", "cleanup": "up"})]
+
+
+def test_heartbeat_keeps_a_failing_cleanup_visible(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("VANTAGE_URL", "http://vantage.test")
+    (tmp_path / "report.json").write_text(json.dumps({"cleanup": {"errors": ["pip-cache: /x: Permission denied"]}}))
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], "mounts": []})
+    pushed = []
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((st, errs, checks)) or True)
+    dj.heartbeat()
+    st, errs, checks = pushed[0]
+    assert st == "degraded" and "Permission denied" in errs[0] and checks["cleanup"] == "degraded"
+
+
+def test_heartbeat_runs_while_another_run_holds_the_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("VANTAGE_URL", raising=False)
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], "mounts": []})
+    holder = dj.lock_or_exit()                       # a long scan is running
+    try:
+        assert dj.main(["heartbeat"]) == 0
+    finally:
+        holder.close()
