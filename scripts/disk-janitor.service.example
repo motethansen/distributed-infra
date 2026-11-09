@@ -1,0 +1,22 @@
+# systemd USER unit: disk janitor (scripts/disk_janitor.py) on the thinkpad. Run by disk-janitor.timer.
+# Measures the disk, deletes a short list of idle regenerable files, reports one status to Vantage,
+# and once a day rewrites ~/.local/state/disk-janitor/recommendations.md. It never deletes anything
+# on that list. Holds NO secrets: VANTAGE_INGEST_KEY comes from the repo's .env via run-with-env.sh.
+#
+# Install (replace the paths with your checkout):
+#   cp scripts/disk-janitor.service.example ~/.config/systemd/user/disk-janitor.service
+#   cp scripts/disk-janitor.timer.example   ~/.config/systemd/user/disk-janitor.timer
+#   systemctl --user daemon-reload && systemctl --user enable --now disk-janitor.timer
+# Dry run first:  python3 scripts/disk_janitor.py clean --dry-run
+[Unit]
+Description=Disk janitor: monitor disk, clean idle files, list cleanup recommendations
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/distributed-infra
+Environment=JANITOR_COMPONENT=tp-disk
+Environment=VANTAGE_URL=http://100.64.0.1:8055
+ExecStart=%h/Projects/distributed-infra/scripts/run-with-env.sh -- /usr/bin/python3 %h/Projects/distributed-infra/scripts/disk_janitor.py run
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=20min
