@@ -370,7 +370,7 @@ def test_tick_writes_report_and_pushes_to_vantage_only_for_real_runs(tmp_path, m
     monkeypatch.setattr(dj, "recommend", lambda: {"ts": 1, "errors": [], "sections": {"X": [
         {"id": "i", "title": "t", "bytes": 3 * dj.GB, "detail": "d", "action": "a", "sudo": False, "confidence": "safe"}]}})
     pushed = []
-    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((comp, st, errs)) or True)
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks, details=None: pushed.append((comp, st, errs)) or True)
 
     dj.tick(dry=False)
     state = tmp_path / "state"
@@ -393,7 +393,7 @@ def test_cleanup_problems_make_the_report_degraded_but_not_down(tmp_path, monkey
     monkeypatch.setattr(dj, "clean", lambda dry, *a, **k: dj.CleanResult(errors=["pip-cache: /x: Permission denied"]))
     monkeypatch.setattr(dj, "recommend", lambda: {"ts": 1, "errors": [], "sections": {}})
     pushed = []
-    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((st, errs, checks)) or True)
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks, details=None: pushed.append((st, errs, checks)) or True)
     dj.tick(dry=False)
     status, errs, checks = pushed[0]
     assert status == "degraded" and "Permission denied" in errs[0] and checks["cleanup"] == "degraded"
@@ -514,7 +514,7 @@ def test_heartbeat_reports_without_cleaning_or_scanning(tmp_path, monkeypatch):
     monkeypatch.setattr(dj, "clean", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not clean")))
     monkeypatch.setattr(dj, "recommend", lambda: (_ for _ in ()).throw(AssertionError("must not scan")))
     pushed = []
-    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((comp, st, errs, checks)) or True)
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks, details=None: pushed.append((comp, st, errs, checks)) or True)
     dj.heartbeat()
     assert pushed == [("tp-disk", "up", [], {"disk": "up", "cleanup": "up"})]
 
@@ -525,7 +525,7 @@ def test_heartbeat_keeps_a_failing_cleanup_visible(tmp_path, monkeypatch):
     (tmp_path / "report.json").write_text(json.dumps({"cleanup": {"errors": ["pip-cache: /x: Permission denied"]}}))
     monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], "mounts": []})
     pushed = []
-    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks: pushed.append((st, errs, checks)) or True)
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks, details=None: pushed.append((st, errs, checks)) or True)
     dj.heartbeat()
     st, errs, checks = pushed[0]
     assert st == "degraded" and "Permission denied" in errs[0] and checks["cleanup"] == "degraded"
@@ -540,3 +540,75 @@ def test_heartbeat_runs_while_another_run_holds_the_lock(tmp_path, monkeypatch):
         assert dj.main(["heartbeat"]) == 0
     finally:
         holder.close()
+
+
+RECS = {"ts": 1_790_000_000, "errors": [], "sections": {
+    "Developer caches": [
+        {"id": "h", "title": "~/.gradle/caches", "bytes": 9 * dj.GB, "detail": "d", "action": "a", "sudo": False, "confidence": "safe"},
+        {"id": "h", "title": "~/.android/avd", "bytes": 14 * dj.GB, "detail": "d", "action": "a", "sudo": False, "confidence": "review"}],
+    "System (needs sudo)": [
+        {"id": "j", "title": "systemd journal", "bytes": 4 * dj.GB, "detail": "d", "action": "a", "sudo": True, "confidence": "safe"}]}}
+MON = {"mounts": [{"path": "/", "label": "root", "total": 100 * dj.GB, "used": 80 * dj.GB, "free": 20 * dj.GB,
+                   "pct": 80.0, "status": "up"}]}
+
+
+def test_vantage_details_flag_each_item_and_rank_by_size():
+    d = dj.details_for(MON, {"freed": dj.GB, "removed": [1, 2]}, RECS)
+    rows = list(d)
+    assert d["disk /"].startswith("80.0% used") and d["last cleanup"] == "freed 1.0 GB · 2 item(s)"
+    assert d["SAFE to delete, total"] == "13.0 GB"                     # review items are not counted
+    items = [k for k in rows if k.startswith(("~", "systemd"))]
+    assert items == ["~/.android/avd", "~/.gradle/caches", "systemd journal"]     # biggest first
+    assert d["~/.android/avd"] == "REVIEW · 14.0 GB · Developer caches"
+    assert d["systemd journal"] == "SAFE · 4.0 GB · System (needs sudo) · needs sudo"
+
+
+def test_vantage_details_cap_the_row_count_and_keep_repeated_titles_apart():
+    many = {"ts": 1, "errors": [], "sections": {"A": [
+        {"id": "i", "title": f"item{i}", "bytes": i, "detail": "", "action": "", "sudo": False, "confidence": "safe"} for i in range(60)],
+        "B": [{"id": "i", "title": "item59", "bytes": 5, "detail": "", "action": "", "sudo": False, "confidence": "keep"}]}}
+    d = dj.details_for(MON, None, many, limit=25)
+    assert sum(1 for k in d if k.startswith("item")) == 25
+    twin = dj.details_for(MON, None, {"ts": 1, "errors": [], "sections": {"A": [
+        {"id": "i", "title": "same", "bytes": 3, "detail": "", "action": "", "sudo": False, "confidence": "safe"},
+        {"id": "i", "title": "same", "bytes": 2, "detail": "", "action": "", "sudo": False, "confidence": "keep"}]}})
+    assert twin["same"].startswith("SAFE") and twin["same (2)"].startswith("KEEP")
+
+
+def test_heartbeat_and_tick_send_the_list_to_vantage(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("VANTAGE_URL", "http://vantage.test")
+    (tmp_path / "report.json").write_text(json.dumps({"cleanup": {"freed": 0, "removed": []}, "recommendations": RECS}))
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], **MON})
+    pushed = []
+    monkeypatch.setattr(dj, "push_vantage", lambda url, key, comp, st, errs, checks, details=None: pushed.append(details) or True)
+    dj.heartbeat()
+    assert pushed[0]["~/.gradle/caches"].startswith("SAFE")
+    monkeypatch.setattr(dj, "clean", lambda dry, *a, **k: dj.CleanResult())
+    monkeypatch.setattr(dj, "recommend", lambda: RECS)                # the stored list is old: tick would rescan
+    dj.tick(dry=False)
+    assert pushed[1]["~/.android/avd"].startswith("REVIEW")
+
+
+def test_recommend_command_refreshes_the_list_vantage_shows(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(dj, "recommend", lambda: RECS)
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], **MON})
+    (tmp_path / "report.json").write_text(json.dumps({"cleanup": {"freed": 7, "removed": []}}))
+    assert dj.main(["recommend"]) == 0
+    saved = json.loads((tmp_path / "report.json").read_text())
+    assert saved["recommendations"]["ts"] == 1_790_000_000 and saved["cleanup"]["freed"] == 7   # cleanup info kept
+
+
+def test_push_includes_details_only_when_given(monkeypatch):
+    sent = []
+
+    class R:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(dj.urllib.request, "urlopen", lambda req, timeout: sent.append(json.loads(req.data)) or R())
+    dj.push_vantage("http://v", "", "c", "up", [], {})
+    dj.push_vantage("http://v", "", "c", "up", [], {}, {"a": "b"})
+    assert "details" not in sent[0] and sent[1]["details"] == {"a": "b"}
