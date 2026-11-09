@@ -74,15 +74,26 @@ def status_of(text: str, story_id: str) -> str:
     return cells[_col(header, "status")]
 
 
+def leading_status(cell: str) -> str:
+    """The status proper: the text before the first ' — ' (the note separator), trimmed."""
+    return cell.split(" — ", 1)[0].strip()
+
+
+def is_closed_status(cell: str) -> bool:
+    """True only when the leading status starts with a closed marker (a U+FE0F after it is fine);
+    a marker in the note ("... `✅ done` on the first one") does not count."""
+    return leading_status(cell).startswith(CLOSED_MARK)
+
+
 def is_closed_text(status: str) -> bool:
-    return any(m in status for m in CLOSED_MARK)
+    return is_closed_status(status)
 
 
 def set_status(text: str, story_id: str, status: str, evidence: str | None = None, *, closing: bool = False) -> str:
     n, cells, header = find(text, story_id)
     sc, ec = _col(header, "status"), _col(header, "evidence")
     if is_closed_text(cells[sc]):
-        raise BacklogError(f"{story_id} is already closed ({cells[sc]!r}); reopen it by hand if that is intended")
+        raise BacklogError(f"{story_id} is already closed: {leading_status(cells[sc])}; reopen it by hand if that is intended")
     if is_closed_text(status) and not closing:
         raise BacklogError("closing needs closing=True: it is the human's decision at a sprint review")
     cells[sc] = status
