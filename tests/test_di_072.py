@@ -214,12 +214,13 @@ def _changed_paths():
             "could not resolve a base to diff against; tried "
             + ", ".join(BASE_REFS_TRIED) + " (" + "; ".join(tried) + ")"
         )
-    merge_base = subprocess.run(
-        ["git", "-C", str(ROOT), "merge-base", base, "HEAD"],
-        check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
-    ).stdout.strip()
+    # A shallow checkout of a PR merge commit shares no history with the fetched
+    # main, so merge-base can fail; HEAD is then main plus the PR, and diffing
+    # against the base directly yields exactly the PR's changes.
+    merge_base = _git(subprocess.run, "merge-base", base, "HEAD")
+    start = merge_base.stdout.strip() if _ok(merge_base) else base
     return subprocess.run(
-        ["git", "-C", str(ROOT), "diff", "--name-only", merge_base, "HEAD"],
+        ["git", "-C", str(ROOT), "diff", "--name-only", start, "HEAD"],
         check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
     ).stdout.splitlines()
 
