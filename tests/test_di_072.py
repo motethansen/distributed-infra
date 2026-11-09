@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 
@@ -154,11 +155,77 @@ def test_criterion_5_refusal_message_contains_only_leading_status_no_note_and_un
 
 # --- Criterion 6: no backlog row edited by hand and nothing under data/ touched ---
 
-def test_criterion_6_nothing_under_data_or_backlogs_touched():
-    diff_Origin = subprocess.run(
-        ["git", "-C", str(ROOT), "diff", "--name-only", "origin/main..HEAD"],
-        check=True, capture_output=True, text=True,
+GIT_TIMEOUT = 60
+
+BASE_REFS_TRIED = (
+    "origin/main",
+    "fetch of origin main (FETCH_HEAD)",
+    "HEAD^1 (merge parent)",
+)
+
+
+def _git(run, *args):
+    """Run git in ROOT; True/False for success, output in .stdout. Never raises, never hangs."""
+    try:
+        return run(
+            ["git", "-C", str(ROOT), *args],
+            capture_output=True, text=True, timeout=GIT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _ok(result):
+    return result is not None and result.returncode == 0
+
+
+def _resolve_base(run=subprocess.run, env=os.environ):
+    """Return (base_ref, tried). base_ref is None when nothing resolves.
+
+    Independent of branch names: CI checks out a detached HEAD with no origin/main.
+    The fetch comes before the merge-parent fallback because a shallow checkout may lack HEAD^1.
+    """
+    tried = []
+    if _ok(_git(run, "rev-parse", "--verify", "origin/main")):
+        return "origin/main", tried
+    tried.append("origin/main: not found")
+
+    if _ok(_git(run, "fetch", "--no-tags", "--depth=50", "origin", "main")):
+        return "FETCH_HEAD", tried
+    tried.append("fetch --depth=50 origin main: failed or timed out")
+
+    parents = _git(run, "rev-list", "--parents", "-n1", "HEAD")
+    if _ok(parents) and len(parents.stdout.split()) == 3:
+        return "HEAD^1", tried
+    tried.append("HEAD^1: HEAD is not a two-parent merge commit")
+    return None, tried
+
+
+def _unresolved(message, env=os.environ):
+    if env.get("GITHUB_ACTIONS") == "true":
+        pytest.fail(message)
+    pytest.skip(message)
+
+
+def _changed_paths():
+    base, tried = _resolve_base()
+    if base is None:
+        _unresolved(
+            "could not resolve a base to diff against; tried "
+            + ", ".join(BASE_REFS_TRIED) + " (" + "; ".join(tried) + ")"
+        )
+    merge_base = subprocess.run(
+        ["git", "-C", str(ROOT), "merge-base", base, "HEAD"],
+        check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
+    ).stdout.strip()
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "diff", "--name-only", merge_base, "HEAD"],
+        check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
     ).stdout.splitlines()
+
+
+def test_criterion_6_nothing_under_data_or_backlogs_touched():
+    diff_Origin = _changed_paths()
     status_lines = subprocess.run(
         ["git", "-C", str(ROOT), "status", "--porcelain"],
         check=True, capture_output=True, text=True,
@@ -172,3 +239,61 @@ def test_criterion_6_nothing_under_data_or_backlogs_touched():
         path = line[3:]
         assert not path.startswith("data/"), f"data/ file dirty in worktree: {path}"
         assert not path.endswith("product-backlog.md"), f"backlog file dirty in worktree: {path}"
+
+
+# --- _resolve_base / _unresolved, with git faked ---
+
+def _fake_run(outcomes):
+    """outcomes maps a git subcommand to a returncode, an exception, or (returncode, stdout)."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        sub = cmd[3]
+        calls.append(sub)
+        out = outcomes.get(sub, 1)
+        if isinstance(out, Exception):
+            raise out
+        rc, stdout = out if isinstance(out, tuple) else (out, "")
+        return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr="")
+
+    run.calls = calls
+    return run
+
+
+TWO_PARENTS = (0, "aaa bbb ccc\n")
+ONE_PARENT = (0, "aaa bbb\n")
+
+
+def test_resolve_base_prefers_origin_main():
+    run = _fake_run({"rev-parse": 0})
+    assert _resolve_base(run) == ("origin/main", [])
+    assert run.calls == ["rev-parse"]
+
+
+def test_resolve_base_fetches_when_origin_main_missing():
+    run = _fake_run({"rev-parse": 1, "fetch": 0})
+    assert _resolve_base(run)[0] == "FETCH_HEAD"
+
+
+@pytest.mark.parametrize("fetch", [1, subprocess.TimeoutExpired("git", 60), OSError("no git")])
+def test_resolve_base_falls_back_to_merge_parent_after_fetch_fails(fetch):
+    run = _fake_run({"rev-parse": 1, "fetch": fetch, "rev-list": TWO_PARENTS})
+    assert _resolve_base(run)[0] == "HEAD^1"
+    assert run.calls.index("fetch") < run.calls.index("rev-list")
+
+
+def test_resolve_base_none_when_nothing_resolves():
+    run = _fake_run({"rev-parse": 1, "fetch": 1, "rev-list": ONE_PARENT})
+    base, tried = _resolve_base(run)
+    assert base is None
+    assert len(tried) == 3
+
+
+def test_unresolved_skips_locally():
+    with pytest.raises(pytest.skip.Exception, match="origin/main"):
+        _unresolved("tried origin/main", env={})
+
+
+def test_unresolved_fails_in_github_actions():
+    with pytest.raises(pytest.fail.Exception, match="origin/main"):
+        _unresolved("tried origin/main", env={"GITHUB_ACTIONS": "true"})
