@@ -144,3 +144,51 @@ No, the DI-020 `~` problem did not occur for `integrate:t1`.
 - The task payload has **no `cwd` key** (`run_plan` was called with `cwd=None`, so `tags()` at `scrum_flow.py:304-305` omits it). `agent_run.py:36` passes `cwd=None`, and `claude_agent.py:107` yields `work_dir = None`, so the claude CLI ran in the worker's own working directory (mac-mini worker), not in a `~`-prefixed path.
 - Even if a `~` cwd had been sent, the DI-020 fix is present: `agents/claude_agent.py:107` expands it with `os.path.expanduser`, and `worker/handlers/common.py:87` does the same for scripts (fix commit e9e23f8).
 - A related observation, not a DI-020 bug: the integrator's prompt (15505 chars) tells the agent to find or clone the repo itself with `find ~/Projects ...`, because no cwd is set. That is the intended design, so the agent was in the worker's default directory when it started and relied on its own `find`/clone. I cannot tell from the records how much of the 1800 s went on that; the result has no response text.
+
+## S-8: empty done
+
+Question: S-8 `integrate:t2` (`5fb668eb-5e95-44d7-9241-7490e913d861`) finished `done` at 04:09:32, but nothing was applied: no commit, no push, no PR. Read-only; measured with a throwaway python command against the saved `GET /tasks/{id}` record of S-8 t2 (`01a8f701-…`, `/tmp/di076_s8_t2_result.txt`, byte-identical to `result.response`) and the integrator's own record (`payload.prompt`, `result.response`).
+
+### How the integrator result becomes `done`
+
+- `integrate_prompt()` (`shared/scrum_flow.py:405-413`) builds the prompt. Each DeepSeek answer is cut with `text[:12000]` (`:406`) with no marker, no warning and no check on the length. The prompt tells the integrator to "Apply ALL of it" (`:408`).
+- The integrator is queued and awaited by `run()` (`shared/scrum_flow.py:539-549`). It raises `PlanError` only when `done["status"] != "done"` (`:547`). `done` here is the status the worker set for the Claude task, i.e. "the claude CLI exited without error and returned text". Nothing checks that a commit, branch, push or PR exists afterwards.
+- The caller (`:577-583`) then does `pr_material.append(answer(d))` and `authors.add(...)`. `answer()` (`:290-292`) is just `result.response`. So an integrator reply that says "I applied nothing" is stored as PR material and the wave continues.
+- `agents/deepseek_agent.py` does not help on the input side. The text-only check (`:253`, `:265`, `_split` `:66-83`) only fires for printed tool-call markup. A well-formed reply of any length passes. There is no length cap and no `finish_reason` check, so a reply that is merely long or cut by the model is returned `ok: true`.
+
+### Measured facts: DeepSeek S-8 t2 answer
+
+| Fact | Value |
+|---|---|
+| Length | 19135 characters (19159 bytes) |
+| `FILE:` blocks | 7 (all at line start; 8 fences in total, 7 labelled `FILE:`, the eighth is the closing-note/other fence) |
+| Tool-call imitation detected | **No.** `_split(text)` = `(imitation=False, real_code=True)`; `looks_like_tool_call` = False; `_is_text_only_failure` = False. No retry was made. |
+| Over the 12000-character cut-off | **Yes.** 7135 characters (37%) were dropped. |
+
+Actual format: the code is in `FILE: path` lines each followed by a plain fenced block (` ```ts ` / ` ```js `), exactly what `SYSTEM_PROMPT` (`agents/deepseek_agent.py:32-38`) asks for. It is preceded by a prose preamble (1498 chars) saying the class-code direct join does not exist and only the invite path is delivered. Block start offsets: `scripts/migrate-at-258-course-join-route-trust.ts` 1498, `join-errors.js` 3887, `student-invites.js` 5303, `rate-limit.js` 10173, `course-links.js` 11074, `join-routes.js` 13350, `scripts/migrate-at-258-join-attempts.ts` 15553.
+
+Effect of the cut-off at char 12000: it falls inside `course-links.js` (block 11074-13345), inside a template literal in `removeCodeLink`. The integrator therefore got 5 of the 7 files, the fifth cut mid-statement; `join-routes.js` and `migrate-at-258-join-attempts.ts` never reached it. The integrator prompt (14872 chars) ends `…async removeCodeLink({ courseId, teacherId, accountId }) {\n await this.assertTeaches(courseId, teacherId);\n\n    con`. (The edge of the code section differs by a few characters from 12000 because of the `--- task … ---` header line.)
+
+### What integrate:t2 reported and did
+
+Task record: agent claude / sonnet, mac-mini, status `done`, notes `integrate S-8`, started 04:07:40, finished 04:09:32 (112 s), `tokens_out` 9036, `payload.cwd` absent, `payload.timeout` 1800. Its `result.response` opens:
+
+> "I haven't applied any of the returned code, so there's no commit, push or PR yet. It can't be applied as written, and the class-code part needs a decision from you first."
+
+It closes:
+
+> "I created a local worktree at `~/wt/academictool-S-8` on branch `dis/academictool-4-S-8`, cut from `origin/main`. It has no commits and nothing is pushed. I left your existing clone alone because it has 31 uncommitted changes on the S-1 branch. Tell me how to handle the class code, or whether to ship the invite part first."
+
+Its reasons, quoted in short: the code is **"Truncated: `course-links.js` ends mid-statement at `con`, and the reply cuts off there"** (this is the 12000 cut-off, but the integrator blamed the author, not the pipeline); the migration duplicates columns that exist; `student-invites.js` would overwrite a 268-line real file; the code assumes APIs (`db.one/db.tx`, `redeemInviteTx`, `course_teachers`) that the repo does not have; and the class-code path was left out. Several of those objections are about DeepSeek guessing the repo layout ("I can't inspect the existing repo", same behaviour as in S-7), so the truncation was not the only reason for refusing.
+
+### Could it report `done` with nothing applied?
+
+Yes, and it did. The task is `done` because the CLI finished normally, while the content is a request for a decision. `run()` (`shared/scrum_flow.py:547`) treats that as success, and the only trace is the prose in `result.response`, which flows into `pr_material` (`:583`). Nothing in the flow distinguishes "applied and pushed" from "decided not to apply". There is no `needs_human` here: that status is set only when the claude result carries `needs_human` (`worker/poller.py:170-173`), which this reply did not.
+
+Working directory (DI-020 `~`): not the cause here. The task has no `cwd`, so it ran in the worker default. It also did not work in `~`: it located the existing academictool clone and made a worktree at `~/wt/academictool-S-8`. Nothing was written to a wrong directory. The worktree has no commits, so the "nothing applied" state is real, not hidden in another directory.
+
+### Implications for fixes (for S-2)
+
+1. Fail loudly instead of silently truncating: in `integrate_prompt()` reject, or pass a marker for, an answer over the limit, and do not cut inside a `FILE:` block. Better: split by `FILE:` block and send whole blocks only.
+2. Detect an incomplete reply at the source: record `finish_reason` in `deepseek_agent.run` and treat `length` as failure. (This reply was 5109 completion tokens, so it was probably not cut by the model.)
+3. After the integrator task, verify the outcome (branch has a new commit, or a PR URL is in the reply) before the wave continues; map "applied nothing" to `needs_human`.
