@@ -92,3 +92,55 @@ I haven't applied any of the returned code, so there's no commit, push or PR yet
 **What's real in the repo (on `main` at 1604f144)**
 - `StudentLinkService.linkProved` (`student-li
 ```
+
+## S-7: which timer ended the run
+
+**Verdict: the task itself was ended by the worker-side agent timeout (certain). Which timer ended the *run* (the dispatcher process) is `unknown`: the dispatcher's `Client.wait` deadline expired about 4.4 s before the worker's agent timeout, so it very probably raised first, but no run log or stored `PlanError` text is in the records.**
+
+### The two timers in code
+
+| Timer | Where | Default / value used | Starts at | Message |
+|---|---|---|---|---|
+| Dispatcher `Client.wait` | `shared/scrum_flow.py:274` (`timeout: float = 1800`), deadline set at `:276`, checked and raised at `:284-285` | 1800 s; `run()` (`:539-545`) and `batch()` (`:551-566`) call `c.wait(...)` without a timeout, so the default applies | When `wait()` is entered, i.e. right after `c.queue()` returns, so at queue time rather than run start | `PlanError("timed out waiting for: <task ids>")` (`:285`) |
+| Worker agent timeout | `agents/claude_agent.py:34` (`CLAUDE_AGENT_TIMEOUT_SECS`, default 1800), `:107-117` (`asyncio.wait_for(proc.communicate(), timeout=effective_timeout)`), message at `:120`; `agents/agy_agent.py:32,62-65` is the same for agy | The task payload `timeout` (the flow sends `timeout=1800` at `scrum_flow.py:541` and `:556`) is passed `agent_run.py:38` -> `agents/runner.py:130` -> `claude_agent.run(timeout=...)`, so 1800 s | When the claude CLI subprocess starts, i.e. at claim/start time | `{"error": "claude CLI timed out after 1800s"}`; `worker/handlers/agent_run.py` turns that into `needs_human` with notes `"claude agent failed: claude CLI timed out after 1800s"` |
+
+`worker/poller.py` has no task-level timeout (only HTTP timeouts of 3-30 s). `run_plan` also does not cancel the queued task when `wait()` times out.
+
+The two `PlanError` texts are raised in different places:
+- `"timed out waiting for: ..."`: `scrum_flow.py:285`, from `Client.wait`. It means the task was still non-terminal when the dispatcher's 1800 s expired.
+- `"task <key> ended <status>: <notes> — stopped; fix and re-run"`: `scrum_flow.py:547` (`run()`) and `:564` (`batch()`). It means the task reached a terminal status (`done`/`failed`/`needs_human`) that is not `done`. For this run it would read `task integrate:t1 ended needs_human: claude agent failed: claude CLI timed out after 1800s — stopped; fix and re-run`.
+
+The integrator is queued through `run("integrator", ...)` at `scrum_flow.py:581-582`, inside the wave loop (after the parallel `batch()` of text-only DeepSeek tasks).
+
+### Evidence: S-7 `integrate:t1` (`7ef9b913-6c5f-444f-823c-fc2ec93d012d`)
+
+Read-only `GET /tasks/{id}` on the mac-mini orchestrator:
+
+| Field | Value |
+|---|---|
+| payload `timeout` | `1800` |
+| `created_at` (queued) | 2026-11-10T03:16:18.605891 |
+| `started_at` | 2026-11-10T03:16:22.974528 |
+| `finished_at` | 2026-11-10T03:46:23.238126 |
+| status | `needs_human` |
+| notes | `claude agent failed: claude CLI timed out after 1800s` |
+| result | no `response`; keys `failover`, `answered_by`=None, `failover`=[], `requested`, `agent` |
+
+Arithmetic:
+- started to finished = 1800.26 s. This matches the worker agent timeout (1800 s plus a fraction of a second to kill the CLI). It is not a coincidence of the dispatcher, which never writes task status.
+- queued to finished = 1804.63 s. The dispatcher's deadline (`wait()` entered at or just after `created_at`, plus 1800 s) was therefore about 03:46:18.6, which is roughly 4.4 s before `finished_at`. The queue wait of 4.37 s (queued 03:16:18.6, started 03:16:22.97) is exactly why the dispatcher's timer, which starts at queue time, expires before the worker's, which starts at run start.
+- The notes text names the worker-side message (`agents/claude_agent.py:120`), so the worker agent timeout is what put the task into `needs_human`.
+
+### What this does and does not establish
+
+- Certain: the task died from the worker-side agent timeout (`claude CLI timed out after 1800s`), not from anything the dispatcher did.
+- Probable but not provable: because both timers were 1800 s and the dispatcher's started about 4.4 s earlier, a dispatcher polling every 3 s (`poll=3`, `scrum_flow.py:274`) would have seen the task still `in_progress` after its deadline and raised `PlanError("timed out waiting for: 7ef9b913-...")` at `:285` before the task became `needs_human`. If no poll fell inside that 4.4 s window the dispatcher instead saw `needs_human` and raised the `ended needs_human: claude agent failed...` message at `:547`.
+- Missing: the dispatcher's own output (the `say()` lines and the final `PlanError`) for this run is not in the task records, and I did not find it stored anywhere. The orchestrator only holds task rows. So which `PlanError` text the run produced is **unknown**.
+- Consequence for S-2: the two timers must produce distinguishable messages and should not race. The dispatcher's `"timed out waiting for:"` message carries no timer name, elapsed time, or task status, and the worker's `needs_human` carries no hint of the dispatcher's timer. S-2 should (a) make the dispatcher message say it is the dispatcher wait and include the task's last known status and elapsed time since queue, (b) include the queue-to-start delay, and (c) set the dispatcher wait comfortably above the task timeout (for example task timeout + queue grace) so the worker's own error is the one reported, and the dispatcher cancels or marks the task when it does give up.
+
+### Finding: integrator working directory (DI-020 `~` issue) for `integrate:t1`
+
+No, the DI-020 `~` problem did not occur for `integrate:t1`.
+- The task payload has **no `cwd` key** (`run_plan` was called with `cwd=None`, so `tags()` at `scrum_flow.py:304-305` omits it). `agent_run.py:36` passes `cwd=None`, and `claude_agent.py:107` yields `work_dir = None`, so the claude CLI ran in the worker's own working directory (mac-mini worker), not in a `~`-prefixed path.
+- Even if a `~` cwd had been sent, the DI-020 fix is present: `agents/claude_agent.py:107` expands it with `os.path.expanduser`, and `worker/handlers/common.py:87` does the same for scripts (fix commit e9e23f8).
+- A related observation, not a DI-020 bug: the integrator's prompt (15505 chars) tells the agent to find or clone the repo itself with `find ~/Projects ...`, because no cwd is set. That is the intended design, so the agent was in the worker's default directory when it started and relied on its own `find`/clone. I cannot tell from the records how much of the 1800 s went on that; the result has no response text.
