@@ -161,11 +161,11 @@ Question: S-8 `integrate:t2` (`5fb668eb-5e95-44d7-9241-7490e913d861`) finished `
 | Fact | Value |
 |---|---|
 | Length | 19135 characters (19159 bytes) |
-| `FILE:` blocks | 7 (all at line start; 8 fences in total, 7 labelled `FILE:`, the eighth is the closing-note/other fence) |
+| `FILE:` blocks | 7 (all at line start; 8 fences in total: 7 labelled `FILE:`, the eighth an unlabelled `json` example inside the trailing API-contract prose at offset 18400) |
 | Tool-call imitation detected | **No.** `_split(text)` = `(imitation=False, real_code=True)`; `looks_like_tool_call` = False; `_is_text_only_failure` = False. No retry was made. |
 | Over the 12000-character cut-off | **Yes.** 7135 characters (37%) were dropped. |
 
-Actual format: the code is in `FILE: path` lines each followed by a plain fenced block (` ```ts ` / ` ```js `), exactly what `SYSTEM_PROMPT` (`agents/deepseek_agent.py:32-38`) asks for. It is preceded by a prose preamble (1498 chars) saying the class-code direct join does not exist and only the invite path is delivered. Block start offsets: `scripts/migrate-at-258-course-join-route-trust.ts` 1498, `join-errors.js` 3887, `student-invites.js` 5303, `rate-limit.js` 10173, `course-links.js` 11074, `join-routes.js` 13350, `scripts/migrate-at-258-join-attempts.ts` 15553.
+Actual format: the code is in `FILE: path` lines each followed by a plain fenced block (` ```ts ` / ` ```js `), exactly what `SYSTEM_PROMPT` (`agents/deepseek_agent.py:32-38`) asks for. It starts with a prose preamble (1498 chars) saying the class-code direct join does not exist and only the invite path is delivered. The last file block ends at offset 16907; after it comes API-contract prose (no more code to apply except that example). Block start offsets: `scripts/migrate-at-258-course-join-route-trust.ts` 1498, `join-errors.js` 3887, `student-invites.js` 5303, `rate-limit.js` 10173, `course-links.js` 11074, `join-routes.js` 13350, `scripts/migrate-at-258-join-attempts.ts` 15553.
 
 Effect of the cut-off at char 12000: it falls inside `course-links.js` (block 11074-13345), inside a template literal in `removeCodeLink`. The integrator therefore got 5 of the 7 files, the fifth cut mid-statement; `join-routes.js` and `migrate-at-258-join-attempts.ts` never reached it. The integrator prompt (14872 chars) ends `…async removeCodeLink({ courseId, teacherId, accountId }) {\n await this.assertTeaches(courseId, teacherId);\n\n    con`. (The edge of the code section differs by a few characters from 12000 because of the `--- task … ---` header line.)
 
