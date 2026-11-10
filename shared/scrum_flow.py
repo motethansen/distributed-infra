@@ -14,6 +14,7 @@ DeepSeek answers are text only, so a deepseek dev task is followed by an `integr
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -27,10 +28,46 @@ DEV_ROLES = {"dev_frontend", "dev_backend"}
 PLANNABLE = {"analyst", "dev_frontend", "dev_backend"}        # roles the Scrum Master may assign
 MAX_TASKS = 10
 CARRY_CHARS = 4000                                             # of each dependency's result handed on
+CODE_CHARS = 12000                                             # longest DeepSeek answer the integrator is given
+INTEGRATE_TIMEOUT_SECS = int(os.environ.get("INTEGRATE_TIMEOUT_SECS") or 900)   # default; see integrate_timeout()
+_FILE_BLOCK = re.compile(r"^[ \t]*FILE:[ \t]*\S", re.M)         # the marker sm_prompt asks dev_backend to put before each file
 
 
 class PlanError(ValueError):
     """The model's output is not a plan we are willing to run."""
+
+
+class WaitTimeout(PlanError):
+    """FleetClient.wait gave up before the tasks reached a terminal state."""
+
+
+def integrate_timeout() -> int:
+    """Seconds the integrator task may run; read from INTEGRATE_TIMEOUT_SECS at call time so it can be changed per run."""
+    try:
+        n = int(os.environ.get("INTEGRATE_TIMEOUT_SECS") or INTEGRATE_TIMEOUT_SECS)
+    except ValueError:
+        n = INTEGRATE_TIMEOUT_SECS
+    return n if n > 0 else INTEGRATE_TIMEOUT_SECS
+
+
+def remote_head_sha(remote: str, branch: str, run=subprocess.run) -> str | None:
+    """SHA of refs/heads/<branch> on the remote, None when the branch is not there. Raises on network/auth failure."""
+    r = run(["git", "ls-remote", remote, f"refs/heads/{branch}"], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise RuntimeError(f"git ls-remote {remote} failed: {(r.stderr or r.stdout or '').strip()[:300] or r.returncode}")
+    for line in (r.stdout or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref.strip() == f"refs/heads/{branch}" and sha.strip():
+            return sha.strip()
+    return None
+
+
+def check_code(t: dict, text: str) -> None:
+    """A DeepSeek answer must carry code (a `FILE:` block) and fit the integrator prompt whole; never cut silently."""
+    if not _FILE_BLOCK.search(text or ""):
+        raise PlanError(f"deepseek task {t['key']} returned no code")
+    if len(text) > CODE_CHARS:
+        raise PlanError(f"deepseek task {t['key']} answer is {len(text)} chars, over the {CODE_CHARS} cut-off")
 
 
 # ── prompts ──────────────────────────────────────────────────────────────────
@@ -282,7 +319,7 @@ class FleetClient:
                     left.discard(tid)
             if left:
                 if time.monotonic() > end:
-                    raise PlanError("timed out waiting for: " + ", ".join(sorted(left)))
+                    raise WaitTimeout("timed out waiting for: " + ", ".join(sorted(left)))
                 sleep(poll)
         return out
 
@@ -403,7 +440,9 @@ def commit_rule(branch: str) -> str:
 
 
 def integrate_prompt(story: dict, code: list[tuple[dict, str]]) -> str:
-    parts = "\n\n".join(f"--- task {t['key']}: {t['title']} ---\n{text[:12000]}" for t, text in code)
+    for t, text in code:
+        check_code(t, text)
+    parts = "\n\n".join(f"--- task {t['key']}: {t['title']} ---\n{text}" for t, text in code)
     return (f"Story {story['id']}: {story['title']}\n\nAnother agent (DeepSeek) returned the code below as text, one block per "
             "task, in order. Apply ALL of it to the story branch (create the files at the FILE: paths, adapting imports to the "
             "repo's conventions), run the tests, fix only what is needed to make the story's acceptance criteria hold, "
@@ -516,14 +555,17 @@ def _text_only(role: str, project: str, prompt: str) -> bool:
 
 def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list[dict], *, go: bool,
              approved: bool = False, cwd: str | None = None, sleep=time.sleep, say=print,
-             project_cfg: dict | None = None) -> list[dict]:
+             project_cfg: dict | None = None, remote_head: Callable[[str, str], str | None] = remote_head_sha) -> list[dict]:
     """Run the plan wave by wave; stop at the first failed task. Returns a log of
     {key, role, task_id, status, agent}. With go=False nothing is queued.
 
     One branch per story (see story_branch). Tasks that only return text (DeepSeek, analyst) run in parallel;
     after each wave ONE integrator applies all the DeepSeek code of that wave to the branch; tasks that
     edit files run one at a time so they never race on the branch. After the last wave ONE reviewer
-    checks the whole story, pinned off Codex's family when Codex wrote any of it."""
+    checks the whole story, pinned off Codex's family when Codex wrote any of it.
+
+    The remote branch is the proof the integrator worked: `remote_head(remote, branch)` is read before it is queued and
+    after it reports done, and the step fails unless the head moved."""
     branch = story_branch(project, sprint, story)
     layers = waves(tasks)
     if not go:
@@ -570,6 +612,68 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
             out[t["key"]] = done
         return out
 
+    def integrate(code: list[tuple[dict, str]], wave: dict[str, dict]) -> dict:
+        """Queue the ONE integrator for this wave and check on the remote that it pushed something."""
+        keys = "+".join(t["key"] for t, _ in code)
+        key = "integrate:" + keys
+
+        def fail(task_id, agent, msg: str) -> PlanError:
+            log.append({"key": key, "role": "integrator", "task_id": task_id, "status": "failed", "agent": agent})
+            say(f"{key} [integrator] failed: {msg}")
+            return PlanError(msg)
+
+        for t, text in code:             # nothing is queued, and the remote is not read, for code we cannot hand over
+            try:
+                check_code(t, text)
+            except PlanError as e:
+                log.append({"key": t["key"], "role": t["role"], "task_id": wave[t["key"]].get("id"),
+                            "status": "failed", "agent": _agent_of(wave[t["key"]])})
+                say(f"{t['key']} [{t['role']}] failed: {e}")
+                raise
+        remote = (project_cfg or {}).get("repo")
+        if not remote:
+            raise PlanError(f"cannot verify the integrator's push: no remote URL for {project} (project config has no repo)")
+        try:
+            before = remote_head(remote, branch)
+        except Exception as e:           # noqa: BLE001 - any network/auth failure
+            raise fail(None, None, f"could not verify integrator push: {e}")
+        timeout = integrate_timeout()
+        pre = repo_preamble(project, project_cfg, branch)
+        r = c.queue(tags(project, sprint, story["id"], "integrator", approved, None, cwd, None, False,
+                         prompt=pre + integrate_prompt(story, code), timeout=timeout, flow_key=key),
+                    f"integrate {story['id']}")
+        say(f"queued {key} [integrator] -> {r['id'][:8]}")
+        timed_out = False
+        try:
+            d = c.wait([r["id"]], timeout=timeout + 120, sleep=sleep)[r["id"]]
+        except WaitTimeout:
+            timed_out, d = True, {}
+            try:
+                d = c.get(r["id"])
+            except PlanError:
+                pass
+        ran = _agent_of(d)
+        where = f"{ran or '?'}@{d.get('assigned_to') or d.get('machine') or '?'}"
+        if not timed_out and d.get("status") != "done" and re.search(r"timed? ?out|timeout", str(d.get("notes") or ""), re.I):
+            timed_out = True
+        if not timed_out and d.get("status") != "done":
+            log.append({"key": key, "role": "integrator", "task_id": r["id"], "status": d.get("status"), "agent": ran})
+            raise PlanError(f"task {key} ended {d.get('status')}: {d.get('notes') or ''} — stopped; fix and re-run")
+        try:
+            after = remote_head(remote, branch)
+        except Exception as e:           # noqa: BLE001
+            raise fail(r["id"], ran, f"could not verify integrator push: {e}")
+        moved = after is not None and after != before
+        if timed_out:
+            raise fail(r["id"], ran, f"{key} timed out after {timeout} s on {where}; "
+                       + (f"a commit reached {branch}" if moved else f"no commit on {branch}")
+                       + f" — re-run with --rerun --as {ran or 'claude'} (the timeout is set by INTEGRATE_TIMEOUT_SECS)")
+        log.append({"key": key, "role": "integrator", "task_id": r["id"], "status": "done" if moved else "failed", "agent": ran})
+        say(f"{key} [integrator] {'done' if moved else 'failed'} on {ran or '?'}")
+        if not moved:
+            raise PlanError(f"{key} applied nothing to {branch} (agent {ran or '?'})")
+        return d
+
     for layer in layers:
         parallel = [t for t in layer if _text_only(t["role"], project, t["prompt"])]
         serial = [t for t in layer if t not in parallel]
@@ -577,9 +681,7 @@ def dispatch(c: FleetClient, project: str, sprint: str, story: dict, tasks: list
         code = [(t, answer(done[t["key"]])) for t in parallel if t["role"] == "dev_backend"
                 and _agent_of(done[t["key"]]) == "deepseek"]
         if code:
-            pre = repo_preamble(project, project_cfg, branch)
-            d = run("integrator", pre + integrate_prompt(story, code), "integrate:" + "+".join(t["key"] for t, _ in code),
-                    f"integrate {story['id']}")
+            d = integrate(code, done)
             pr_material.append(answer(d))
             if _agent_of(d):
                 authors.add(_agent_of(d))
