@@ -1,0 +1,19 @@
+# systemd USER unit: nightly AI usage graph + redacted transcript archive (scripts/ai_usage_graph.py nightly).
+# Install on the thinkpad:
+#   cp scripts/ai-usage.service.example ~/.config/systemd/user/ai-usage.service
+#   cp scripts/ai-usage.timer.example   ~/.config/systemd/user/ai-usage.timer
+#   systemctl --user daemon-reload && systemctl --user enable --now ai-usage.timer
+# Holds no secrets: VANTAGE_INGEST_KEY from the repo .env via run-with-env.sh; Wasabi key from
+# ~/.config/mh-backup/wasabi.env.
+[Unit]
+Description=AI usage graph + transcript archive to Wasabi (scripts/ai_usage_graph.py nightly)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Projects/distributed-infra
+Environment=AI_COMPONENT=tp-ai-usage
+Environment=VANTAGE_URL=http://100.76.214.54:8055
+ExecStart=%h/Projects/distributed-infra/scripts/run-with-env.sh -- /usr/bin/python3 %h/Projects/distributed-infra/scripts/ai_usage_graph.py nightly
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
