@@ -110,6 +110,10 @@ def set_status(text: str, story_id: str, status: str, evidence: str | None = Non
 def prefix_of(text: str) -> str:
     c = Counter(m.group(1) for line in text.split("\n") if line.startswith("|") for m in [_ID.search(line.split("|")[1] if "|" in line else "")] if m)
     if not c:
+        # A brand-new backlog has no rows yet: it names its prefix in a comment, `<!-- id-prefix: NA -->`.
+        m = re.search(r"<!--\s*id-prefix:\s*([A-Z]{2,6})\s*-->", text)
+        if m:
+            return m.group(1)
         raise BacklogError("no story IDs found to take a prefix from")
     return c.most_common(1)[0][0]
 

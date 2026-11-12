@@ -85,3 +85,19 @@ def test_status_listing_sees_the_n_agents_backlog(repo):
     projects = scrum.load(repo)["projects"]
     p = next(x for x in projects if x["project"] == "n-agents")
     assert p["stories"] == 2
+
+
+def test_empty_backlog_takes_its_prefix_from_the_comment():
+    from shared import backlog_edit
+    text = ("# x\n\n<!-- id-prefix: NA -->\n\n| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n")
+    new, sid = backlog_edit.add_story(text, "first story")
+    assert sid == "NA-001"
+    assert "| NA-001 | first story |" in new
+    assert backlog_edit.next_id(new) == "NA-002"
+
+
+def test_empty_backlog_without_a_prefix_comment_still_refuses():
+    import pytest
+    from shared import backlog_edit
+    with pytest.raises(backlog_edit.BacklogError):
+        backlog_edit.next_id("| ID | Story | Priority | Status | Evidence |\n|---|---|---|---|---|\n")
