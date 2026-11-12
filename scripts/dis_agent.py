@@ -433,11 +433,17 @@ def cmd_go(a) -> None:
         if plan.get("sprint_number"):
             _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in progress", lambda: sf.sprint_mark(
                 viz_repo(), plan["project"], plan["sprint_number"], bid, "🏃 in progress", datetime.now(timezone.utc).date().isoformat()))
-    log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], sf.story_for_plan(plan), tasks, go=ok,
-                      approved=a.approved, cwd=a.cwd,
-                      # A story may build in another project's repo (Vantage stories that change the orchestrator):
-                      # `repo_project` in the plan names that project so the agents are told the right clone.
-                      project_cfg=(cfg["projects"] or {}).get(plan.get("repo_project") or plan["project"]))
+    try:
+        log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], sf.story_for_plan(plan), tasks, go=ok,
+                          approved=a.approved, cwd=a.cwd,
+                          # A story may build in another project's repo (Vantage stories that change the orchestrator):
+                          # `repo_project` in the plan names that project so the agents are told the right clone.
+                          project_cfg=(cfg["projects"] or {}).get(plan.get("repo_project") or plan["project"]))
+    except Exception as e:      # noqa: BLE001 - classified below from the tasks' real state, not from the exception type
+        if not ok:
+            raise
+        _go_after_failure(a, path, plan, tasks, bid, e)
+        return
     if ok:
         out = path.with_suffix(".run.json")
         out.write_text(json.dumps(log, indent=2))
@@ -456,7 +462,59 @@ def cmd_go(a) -> None:
         print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
-_BADGE = {"in_progress": "🏃 in progress", "in_review": "🔍 in review", "blocked": "🚧 blocked", "planned": "🔵 planned",
+def _one_line(e: BaseException, n: int = 200) -> str:
+    return " ".join(f"{type(e).__name__}: {e}".split())[:n]
+
+
+def _go_after_failure(a, path: Path, plan: dict, tasks: list[dict], bid: str | None, err: BaseException) -> None:
+    """dispatch raised. Decide from the fleet's real task rows (not the exception type) whether every plan task
+    finished. If so the story goes to 'in review' (validation/review did not complete); else it stays 'in progress'."""
+    keys = [t["key"] for t in tasks]
+    try:
+        rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+    except Exception as e2:     # noqa: BLE001
+        print(f"\ngo stopped: {_one_line(err)}\ncould not check the fleet ({_one_line(e2)}): {bid or plan['story']['id']} stays "
+              f"'in progress'. Check the fleet, then `dis-agent go {path}` (redoes t1.. from the first task).")
+        sys.exit(1)
+    sid = plan["story"]["id"]
+    mine = [t for t in rows if (t.get("payload") or {}).get("project") == plan["project"]
+            and str((t.get("payload") or {}).get("sprint")) == str(plan["sprint"]) and (t.get("payload") or {}).get("story") == sid]
+    latest: dict[str, dict] = {}
+    for t in sorted(mine, key=lambda t: t.get("created_at") or ""):      # stable: later rows win
+        k = (t.get("payload") or {}).get("flow_key")
+        if k in keys:
+            latest[k] = t
+    open_keys = [k for k in keys if (latest.get(k) or {}).get("status") != "done"]
+    if open_keys:
+        print(f"\ngo stopped: {_one_line(err)}\n{bid or sid} stays 'in progress'. Development task(s) not done: {', '.join(open_keys)}.\n"
+              f"Re-run `dis-agent go {path}` — it redoes t1.. from the first task, so finished tasks run again.")
+        sys.exit(1)
+    try:
+        prs = ", ".join(sf.story_evidence(rows, plan["project"], plan["sprint"], sid)["pull_requests"]) or "none found"
+    except Exception:       # noqa: BLE001 - the evidence reader must not stop the row reaching review
+        prs = "unknown (could not read the task results)"
+    note = ("work finished; PRs " + prs
+            + "; validation: not run: " + _one_line(err) + "; awaiting sprint review")
+    out = path.with_suffix(".run.json")
+    try:
+        out.write_text(json.dumps([{"key": k, "role": (latest[k].get("payload") or {}).get("role"), "task_id": latest[k]["id"],
+                                    "status": "done", "agent": latest[k].get("agent")} for k in keys], indent=2))
+    except OSError as e3:
+        print(f"  run log NOT written: {e3}")
+    if bid:
+        try:
+            _report(f"{bid} in review", sf.mark_story(viz_repo(), plan["project"], bid, "🔍 in review", note))
+        except sf.PlanError as e4:
+            print(f"  backlog NOT updated: {e4}")
+        if plan.get("sprint_number"):
+            _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in review", lambda: sf.sprint_mark(
+                viz_repo(), plan["project"], plan["sprint_number"], bid, "🔍 in review", datetime.now(timezone.utc).date().isoformat()))
+    print(f"\ngo stopped after all {len(keys)} development task(s) finished: {_one_line(err)}\n{bid or sid} set to 'in review' "
+          f"with validation not run — validate and review it by hand before closing. Exiting non-zero so you notice.")
+    sys.exit(1)
+
+
+_BADGE = {"in_progress":"🏃 in progress", "in_review": "🔍 in review", "blocked": "🚧 blocked", "planned": "🔵 planned",
           "done": "✅ done", "superseded": "⛔ superseded", "cancelled": "❌ cancelled"}
 
 
@@ -686,6 +744,8 @@ def cmd_next(a) -> None:
     if a.json:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
+    stuck = _stuck_result(a.project)
+    sugs = scrum_next.add_stuck(sugs, stuck, a.limit)
     print(waiting + scrum_next.render(sugs))
     _print_responses(board, not getattr(a, "no_consume", False), getattr(a, "consume", None) is True)
 
@@ -756,11 +816,34 @@ def cmd_scrum(a) -> None:
     print(f"(saved {d / (b['digest']['as_of'] + '.md')})\nReview what is waiting:  dis-agent review")
 
 
+def _stuck_result(project: str | None) -> dict:
+    """Stories 'in progress' for more than 24 h with no fleet task running or queued (DI-080). Never fatal: an unreachable fleet
+    or an unreadable backlog is reported as 'could not check the fleet', never as 'nothing stuck'."""
+    from shared import scrum, stuck_stories
+    try:
+        names = [project] if project else sorted((projects_cfg().get("projects") or {}))
+        rows = []
+        for pn in names:
+            f = viz_repo() / pn / "product-backlog.md"
+            if f.exists():
+                rows += [{**r, "project": pn} for r in scrum.backlog_rows(f.read_text(encoding="utf-8")) if r["status"] == "in_progress"]
+        try:
+            tasks = sc.client()._call("GET", "/tasks", params={"limit": 500})
+        except (Exception, SystemExit):
+            return stuck_stories.stuck_in_progress(rows, None, datetime.now(timezone.utc), fleet_reachable=False)
+        return stuck_stories.stuck_in_progress(rows, tasks, datetime.now(timezone.utc), stuck_stories.git_age_fn(viz_repo()), _local_plans())
+    except Exception:                                   # noqa: BLE001
+        return {"fleet_checked": False, "could_not_check_fleet": True, "stuck": []}
+
+
 def cmd_review_queue(a) -> None:
-    from shared import scrum_next
+    from shared import scrum_next, stuck_stories
     items = scrum_next.review_items(_board(), _local_plans(), (projects_cfg().get("projects") or {}), a.project)
+    stuck_text = stuck_stories.render(_stuck_result(a.project))
     if not items:
         print("Nothing is waiting for your review.")
+        if stuck_text:
+            print("\n" + stuck_text)
         return
     print(f"{len(items)} stories wait for your sprint review:\n")
     for r in items:
@@ -770,8 +853,27 @@ def cmd_review_queue(a) -> None:
         if r["prs"]:
             print(f"      PRs:      {', '.join(r['prs'])}")
         print(f"      confirm:  {r['command']}")
+    if stuck_text:
+        print("\n" + stuck_text)
     print("\nA story the fleet built has validation and review evidence (`/close` shows it). Any other story is confirmed with `dis-agent accept`,\n"
           "which closes it only on your say-so and, when you give a PR, only after GitHub confirms it is merged. Cancel one with `dis-agent cancel`.")
+
+
+def _warn_running_fleet_task(project: str, story_ids: set[str]) -> None:
+    """Best effort: warn when a fleet task for the story is still running or queued (accepting does not cancel it)."""
+    try:
+        rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+    except Exception as e:                                   # the fleet may be down; that is exactly when this flag is used
+        print(f"  could not check the fleet for running tasks ({type(e).__name__}); continuing")
+        return
+    live = [t for t in rows if t.get("status") in ("running", "queued", "pending", "claimed")
+            and (t.get("payload") or {}).get("project") == project and (t.get("payload") or {}).get("story") in story_ids]
+    if live:
+        print(f"  WARNING: {len(live)} fleet task(s) for this story still running or queued: "
+              + ", ".join(f"{str(t.get('id'))[:8]} ({t.get('status')})" for t in live) + "; accepting does not stop them")
+
+
+FROM_IP_HELP = "owner states the work is finished although the run never reached review; needs --pr or --evidence"
 
 
 def cmd_accept(a) -> None:
@@ -780,6 +882,7 @@ def cmd_accept(a) -> None:
     day = datetime.now(timezone.utc).date().isoformat()
     if not a.pr and not (a.evidence or "").strip():
         sys.exit("accepting needs evidence: --pr <url of a MERGED pull request> or --evidence \"what you verified\"")
+    fip = bool(getattr(a, "from_in_progress", False))
     parts = []
     if a.pr:
         try:
@@ -790,6 +893,8 @@ def cmd_accept(a) -> None:
         print(f"  GitHub confirms: {a.pr} is merged ({m['merged_at']}): {m['title'][:80]}")
     if (a.evidence or "").strip():
         parts.append(a.evidence.strip())
+    if fip:
+        _warn_running_fleet_task(a.project, {a.story})
     if a.yes:
         ok = True
     elif sys.stdin.isatty():
@@ -800,7 +905,7 @@ def cmd_accept(a) -> None:
         print("left in review")
         return
     try:
-        _report(f"{a.story} ACCEPTED", sf.close_story(viz_repo(), a.project, a.story, who, day, "; ".join(parts)))
+        _report(f"{a.story} ACCEPTED", sf.close_story(viz_repo(), a.project, a.story, who, day, "; ".join(parts), from_in_progress=fip))
     except sf.PlanError as e:
         sys.exit(f"not accepted: {e}")
     n = sf.find_sprint_of(viz_repo(), a.project, a.story)
@@ -945,6 +1050,23 @@ def cmd_close(a) -> None:
         sys.exit(f"no registered stories under {base}; approve a plan first")
     rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
     who = os.environ.get("USER", "human")
+    fip = bool(getattr(a, "from_in_progress", False))
+    fip_ev = ""
+    if fip:
+        if not getattr(a, "pr", None) and not (getattr(a, "evidence", None) or "").strip():
+            sys.exit("--from-in-progress needs evidence: --pr <url of a MERGED pull request> or --evidence \"what you verified\"")
+        parts = []
+        if a.pr:
+            try:
+                m = sf.verify_pr_merged(a.pr)
+            except sf.PlanError as e:
+                sys.exit(f"not closed: {e}")
+            parts.append(f"{a.pr} merged {m['merged_at']}")
+            print(f"  GitHub confirms: {a.pr} is merged ({m['merged_at']}): {m['title'][:80]}")
+        if (a.evidence or "").strip():
+            parts.append(a.evidence.strip())
+        fip_ev = "; ".join(parts)
+        _warn_running_fleet_task(a.project, set(want))
     for sid in want:
         pl = plans.get(sid)
         if not pl:
@@ -971,6 +1093,8 @@ def cmd_close(a) -> None:
                                      (f"the review's verdict is {rv}; fix what it found and run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`",
                                       rv in ("INCOMPLETE", "REQUEST_CHANGES")),
                                      (f"the review is stale; run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>` (add `--as claude` or `--as agy` if the reviewer cannot run the tests)", ev["review_stale"])) if bad]
+        if fip:
+            problems = []                                    # the owner states the work is finished; the review gates do not apply
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
             continue
@@ -987,7 +1111,8 @@ def cmd_close(a) -> None:
         if ok:
             try:
                 r = sf.close_story(viz_repo(), a.project, bid, who, datetime.now(timezone.utc).date().isoformat(),
-                                   "PRs " + (", ".join(ev["pull_requests"]) or "none"))
+                                   fip_ev if fip else "PRs " + (", ".join(ev["pull_requests"]) or "none"),
+                                   from_in_progress=fip)
                 _report(f"{bid} CLOSED", r)
                 day = datetime.now(timezone.utc).date().isoformat()
                 if pl.get("sprint_number"):
@@ -1029,6 +1154,9 @@ def main() -> None:
     cl.add_argument("-p", "--project", required=True); cl.add_argument("-s", "--sprint", required=True)
     cl.add_argument("--story", action="append"); cl.add_argument("--yes", action="store_true", help="you have read the review and confirm")
     cl.add_argument("--force", action="store_true")
+    cl.add_argument("--from-in-progress", action="store_true", help=FROM_IP_HELP)
+    cl.add_argument("--pr", help="with --from-in-progress: URL of a pull request that must be MERGED (checked with GitHub)")
+    cl.add_argument("--evidence", help="with --from-in-progress: what you verified, when there is no PR")
     cl.add_argument("--check", action="store_true", help="show the evidence and whether it would close; never closes and never prompts")
     vl = sub.add_parser("validate", parents=[common]); vl.set_defaults(fn=cmd_validate)
     vl.add_argument("-p", "--project", required=True); vl.add_argument("-s", "--sprint", required=True)
@@ -1054,6 +1182,7 @@ def main() -> None:
     ac.add_argument("-p", "--project", required=True); ac.add_argument("--story", required=True)
     ac.add_argument("--pr", help="URL of a pull request that must be MERGED (checked with GitHub)")
     ac.add_argument("--evidence", help="what you verified, when there is no PR"); ac.add_argument("--yes", action="store_true")
+    ac.add_argument("--from-in-progress", action="store_true", help=FROM_IP_HELP)
     qs = sub.add_parser("queue-story", help="register a team-addressed board suggestion as a planned story"); qs.set_defaults(fn=cmd_queue_story)
     qs.add_argument("-p", "--project", required=True); qs.add_argument("--text", required=True)
     qs.add_argument("--from", dest="source", help="the board item the owner confirmed, e.g. WD-283"); qs.add_argument("--response", type=int)
