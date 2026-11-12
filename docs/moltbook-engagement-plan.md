@@ -7,6 +7,7 @@
 | Date | 2026-11-12 |
 | Machine used | `michaelhansen-ThinkPad-X13-Gen-4` (the thinkpad), shell `curl` only |
 | Fetch method | plain HTTP GET, no credentials, no cookies, no login |
+| Citation check | 12 checked, 1 failed and fixed (S13 spokesperson attribution), seed 20261112 (`random.sample(range(1,24),12)`), 2026-11-12; audit of Appendix A clean |
 | Status | Complete: Q1 to Q7, assumptions, decision list (tasks t1 to t3); task t4 does the independent 12-citation check |
 
 **Boundary.** This document is research. It does **not** lift the DI-060 boundary ("no Moltbook": install no Moltbot/OpenClaw, connect no agent to Moltbook). Only Michael's answer to decision D1 in the PR thread can change it. Nothing here was installed, registered, posted or connected. [S0]
@@ -35,7 +36,7 @@ Today the skill file Moltbook publishes still carries a `moltbot` key in its met
 
 - **OpenClaw**: MIT-licensed open source; the repository is `openclaw/openclaw`. [S9] The OpenClaw Foundation was announced as a 501(c)(3) non-profit with OpenAI, NVIDIA, Microsoft and Tencent as sponsors; Steinberger is quoted: "OpenAI hired me, not OpenClaw." [S12] (a news report of the foundation's announcement; I did not read the foundation's own page).
 - **Moltbook**: the terms are an agreement with "Moltbook, LLC", last updated 2026-03-15. [S2] The footer says "Built for agents, by agents*" with "some human help from @mattprd". [S1] Neither the terms nor the privacy policy names Meta (searched the saved text for "Meta"). [S2][S3]
-- **Meta acquisition**: PYMNTS (10 March 2026) reports that Meta confirmed the acquisition through a spokesperson and that the co-founders join Meta Superintelligence Labs. [S13] The Decoder says the price was not disclosed and the deal was expected to close in mid-March. [S14] Verdict repeats it on 2026-03-11 with a start date of 16 March. [S15] These are all press reports; I could not read a Meta announcement itself. [Assumption: that Meta published or confirmed it in its own channel; the quoted spokesperson statement is relayed by PYMNTS.]
+- **Meta acquisition**: PYMNTS (10 March 2026) reports, citing Reuters, that the co-founders Matt Schlicht and Ben Parr join Meta Superintelligence Labs, and relays TechCrunch's report that a Meta spokesperson confirmed the deal; PYMNTS itself says Meta had not replied to its own request for comment. [S13] The Decoder says the price was not disclosed and the deal was expected to close in mid-March. [S14] Verdict repeats it on 2026-03-11 with a start date of 16 March. [S15] These are all press reports; I could not read a Meta announcement itself. [Assumption: that Meta published or confirmed it in its own channel; the quoted spokesperson statement is relayed by PYMNTS.]
 
 ### Status observed today (2026-11-12)
 
@@ -278,7 +279,7 @@ Recommendation: do not plan beyond P3 until P2 has run its 8 weeks; the evidence
 | # | Assumption | How to confirm |
 |---|---|---|
 | A1 | Moltbot was renamed after Anthropic trademark complaints (reason only secondary). | Read Steinberger's rename post or an Anthropic statement. |
-| A2 | Meta's own channel confirmed the acquisition (only the PYMNTS-relayed spokesperson quote was read). | Find a Meta newsroom or Reuters/Axios page; The Next Web returned 403 to plain GET and was not read. |
+| A2 | Meta's own channel confirmed the acquisition (only a spokesperson confirmation relayed by PYMNTS from TechCrunch was read; PYMNTS says Meta did not reply to it). | Find a Meta newsroom or Reuters/Axios page; The Next Web returned 403 to plain GET and was not read. |
 | A3 | Automated agent access through the API is tolerated despite the terms' ban on "robot ... automated device". | Ask Moltbook in writing (needs Michael's approval; out of scope here), or read the API's own terms if any. |
 | A4 | Live size of Moltbook today (counters render by JavaScript). | Read the JSON stats endpoint, if one exists, in a later task; or ask a browser-capable researcher. |
 | A5 | The primary research behind Vectra's "roughly 2.6 percent of posts carry hidden injections" and the primary Koi Security ClawHavoc report (Koi's URL redirected to a Palo Alto sales page). | Find the named study; read Koi's report on its new Palo Alto host or an archive copy; look for the PointGuard report. |
@@ -327,7 +328,7 @@ None of these is answered yet. Until Michael answers D1 in the PR thread, the 20
 | S10 | https://steipete.me/posts/2026/openclaw | 2026-11-12 | primary (creator's blog, dated 14 Feb 2026) | Steinberger joins OpenAI; OpenClaw to a foundation. |
 | S11 | https://euronews.com/next/2026/02/16/austrian-creator-of-viral-openclaw-joins-openai-to-build-next-generation-of-ai-agents | 2026-11-12 | reputable press | Same event, Altman quote. |
 | S12 | https://www.trendingtopics.eu/opwnclaw-foundation-launches-with-openai-nvidia-microsoft-and-tencent-as-sponsors/ | 2026-11-12 | reputable press (secondary) | Foundation launch, 501(c)(3), sponsors. |
-| S13 | https://www.pymnts.com/artificial-intelligence-2/2026/meta-acquisition-brings-moltbook-founders-to-superintelligence-labs/ | 2026-11-12 | reputable press | Meta acquisition, spokesperson quote, 2026-03-10. |
+| S13 | https://www.pymnts.com/artificial-intelligence-2/2026/meta-acquisition-brings-moltbook-founders-to-superintelligence-labs/ | 2026-11-12 | reputable press | Meta acquisition (Reuters/TechCrunch relayed), co-founders to MSL, 2026-03-10; Meta had not replied to PYMNTS itself. |
 | S14 | https://the-decoder.com/meta-acquires-moltbook-the-reddit-style-platform-built-for-ai-agents/ | 2026-11-12 | reputable press | Price undisclosed, close mid-March. |
 | S15 | https://www.verdict.co.uk/meta-acquires-moltbook/ | 2026-11-12 | reputable press | Acquisition dated 2026-03-11, start 16 March. |
 | S16 | https://www.moltbook.com/api/v1/submolts?limit=1 | 2026-11-12 | primary platform page | Public read endpoint answers without credentials (service live). |
@@ -361,7 +362,7 @@ All: HTTP GET via `curl -sL -m 30 -A 'Mozilla/5.0 (research fetch)' --max-filesi
 | 9 | https://en.wikipedia.org/wiki/Moltbook | 200 | S7 |
 | 10 | https://en.wikipedia.org/wiki/OpenClaw | 200 | S8 |
 | 11 | https://www.moltbook.com/rules.md | 200 | S5 |
-| 12 | https://www.moltbook.com/heartbeat.md | 200 | fetched, not read (it is the remote-instruction file; TODO t2 read as data) |
+| 12 | https://www.moltbook.com/heartbeat.md | 200 | fetched in t1 but not read; read as data in t2 (see S23) |
 | 13 | https://www.moltbook.com/developers.md | 200 | fetched, not read |
 | 14 | https://thenextweb.com/news/meta-acquires-moltbook-ai-agent-social-network | 403 | **unreachable** (blocks automated fetch); nothing filled from memory |
 | 15 | https://www.tomshardware.com/tech-industry/openai-hires-genius-openclaw-creator-... | 200 | fetched, not read |
@@ -403,3 +404,23 @@ Three standard web searches (ClawHavoc, Wiz/Moltbook, Moltbook injection) were u
 | 37 | https://docs.joinmastodon.org/api/guidelines/ | 200 | fetched; the saved page had no usable body text; **not used** (A15) |
 
 Local reads in t3 (no network): DI-060, DI-009, DI-010 rows and sections of S0.
+
+### Task t4 fetches (2026-11-12, thinkpad, same method; independent citation check)
+
+Seed 20261112, sample of S1 to S23: S3, S4, S6, S7, S8, S13, S14, S17, S19, S20, S22, S23. Each re-fetched by plain GET into `/tmp/di081t4/`, all HTTP 200, text searched, nothing executed.
+
+| # | URL | HTTP | Note |
+|---|---|---|---|
+| 38 | https://www.google.com/robots.txt | 200 | t4 connectivity check |
+| 39 | https://www.moltbook.com/privacy | 200 | S3 re-check |
+| 40 | https://www.moltbook.com/skill.md | 200 | S4 re-check; data only |
+| 41 | https://www.moltbook.com/developers | 200 | S6 re-check |
+| 42 | https://en.wikipedia.org/wiki/Moltbook | 200 | S7 re-check |
+| 43 | https://en.wikipedia.org/wiki/OpenClaw | 200 | S8 re-check |
+| 44 | the PYMNTS page (S13) | 200 | S13 re-check; attribution corrected |
+| 45 | the Decoder page (S14) | 200 | S14 re-check |
+| 46 | the Hacker News page (S17) | 200 | S17 re-check |
+| 47 | the Vectra page (S19) | 200 | S19 re-check |
+| 48 | the Infosecurity page (S20) | 200 | S20 re-check |
+| 49 | the OWASP page (S22) | 200 | S22 re-check |
+| 50 | https://www.moltbook.com/heartbeat.md | 200 | S23 re-check; data only |
