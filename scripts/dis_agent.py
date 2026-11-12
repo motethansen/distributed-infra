@@ -433,11 +433,17 @@ def cmd_go(a) -> None:
         if plan.get("sprint_number"):
             _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in progress", lambda: sf.sprint_mark(
                 viz_repo(), plan["project"], plan["sprint_number"], bid, "🏃 in progress", datetime.now(timezone.utc).date().isoformat()))
-    log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], sf.story_for_plan(plan), tasks, go=ok,
-                      approved=a.approved, cwd=a.cwd,
-                      # A story may build in another project's repo (Vantage stories that change the orchestrator):
-                      # `repo_project` in the plan names that project so the agents are told the right clone.
-                      project_cfg=(cfg["projects"] or {}).get(plan.get("repo_project") or plan["project"]))
+    try:
+        log = sf.dispatch(sc.client(), plan["project"], plan["sprint"], sf.story_for_plan(plan), tasks, go=ok,
+                          approved=a.approved, cwd=a.cwd,
+                          # A story may build in another project's repo (Vantage stories that change the orchestrator):
+                          # `repo_project` in the plan names that project so the agents are told the right clone.
+                          project_cfg=(cfg["projects"] or {}).get(plan.get("repo_project") or plan["project"]))
+    except Exception as e:      # noqa: BLE001 - classified below from the tasks' real state, not from the exception type
+        if not ok:
+            raise
+        _go_after_failure(a, path, plan, tasks, bid, e)
+        return
     if ok:
         out = path.with_suffix(".run.json")
         out.write_text(json.dumps(log, indent=2))
@@ -456,7 +462,59 @@ def cmd_go(a) -> None:
         print(f"\nrun log -> {out}\nNext: dis-agent review -p {plan['project']} -s {plan['sprint']}, then dis-agent close ...")
 
 
-_BADGE = {"in_progress": "🏃 in progress", "in_review": "🔍 in review", "blocked": "🚧 blocked", "planned": "🔵 planned",
+def _one_line(e: BaseException, n: int = 200) -> str:
+    return " ".join(f"{type(e).__name__}: {e}".split())[:n]
+
+
+def _go_after_failure(a, path: Path, plan: dict, tasks: list[dict], bid: str | None, err: BaseException) -> None:
+    """dispatch raised. Decide from the fleet's real task rows (not the exception type) whether every plan task
+    finished. If so the story goes to 'in review' (validation/review did not complete); else it stays 'in progress'."""
+    keys = [t["key"] for t in tasks]
+    try:
+        rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+    except Exception as e2:     # noqa: BLE001
+        print(f"\ngo stopped: {_one_line(err)}\ncould not check the fleet ({_one_line(e2)}): {bid or plan['story']['id']} stays "
+              f"'in progress'. Check the fleet, then `dis-agent go {path}` (redoes t1.. from the first task).")
+        sys.exit(1)
+    sid = plan["story"]["id"]
+    mine = [t for t in rows if (t.get("payload") or {}).get("project") == plan["project"]
+            and str((t.get("payload") or {}).get("sprint")) == str(plan["sprint"]) and (t.get("payload") or {}).get("story") == sid]
+    latest: dict[str, dict] = {}
+    for t in sorted(mine, key=lambda t: t.get("created_at") or ""):      # stable: later rows win
+        k = (t.get("payload") or {}).get("flow_key")
+        if k in keys:
+            latest[k] = t
+    open_keys = [k for k in keys if (latest.get(k) or {}).get("status") != "done"]
+    if open_keys:
+        print(f"\ngo stopped: {_one_line(err)}\n{bid or sid} stays 'in progress'. Development task(s) not done: {', '.join(open_keys)}.\n"
+              f"Re-run `dis-agent go {path}` — it redoes t1.. from the first task, so finished tasks run again.")
+        sys.exit(1)
+    try:
+        prs = ", ".join(sf.story_evidence(rows, plan["project"], plan["sprint"], sid)["pull_requests"]) or "none found"
+    except Exception:       # noqa: BLE001 - the evidence reader must not stop the row reaching review
+        prs = "unknown (could not read the task results)"
+    note = ("work finished; PRs " + prs
+            + "; validation: not run: " + _one_line(err) + "; awaiting sprint review")
+    out = path.with_suffix(".run.json")
+    try:
+        out.write_text(json.dumps([{"key": k, "role": (latest[k].get("payload") or {}).get("role"), "task_id": latest[k]["id"],
+                                    "status": "done", "agent": latest[k].get("agent")} for k in keys], indent=2))
+    except OSError as e3:
+        print(f"  run log NOT written: {e3}")
+    if bid:
+        try:
+            _report(f"{bid} in review", sf.mark_story(viz_repo(), plan["project"], bid, "🔍 in review", note))
+        except sf.PlanError as e4:
+            print(f"  backlog NOT updated: {e4}")
+        if plan.get("sprint_number"):
+            _sprint_step(f"sprint-{plan['sprint_number']:02d}.md: {bid} in review", lambda: sf.sprint_mark(
+                viz_repo(), plan["project"], plan["sprint_number"], bid, "🔍 in review", datetime.now(timezone.utc).date().isoformat()))
+    print(f"\ngo stopped after all {len(keys)} development task(s) finished: {_one_line(err)}\n{bid or sid} set to 'in review' "
+          f"with validation not run — validate and review it by hand before closing. Exiting non-zero so you notice.")
+    sys.exit(1)
+
+
+_BADGE = {"in_progress":"🏃 in progress", "in_review": "🔍 in review", "blocked": "🚧 blocked", "planned": "🔵 planned",
           "done": "✅ done", "superseded": "⛔ superseded", "cancelled": "❌ cancelled"}
 
 
