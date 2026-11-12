@@ -11,6 +11,8 @@ import tests.test_di_072 as di072
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMIT_BEFORE_FIX = "67ea0d953be068474a9b18c118c56c7b43723432"
+# Last commit of the DI-072/074 fix; later PRs may legitimately edit shared/backlog_edit.py (DI-082 did).
+COMMIT_AFTER_FIX = "400208e"
 
 
 def _commit_exists(rev: str) -> bool:
@@ -36,9 +38,9 @@ def test_criterion_3_backlog_edit_byte_identical_and_only_test_files_changed():
         text=True,
     ).stdout
 
-    if _commit_exists(COMMIT_BEFORE_FIX):
+    if _commit_exists(COMMIT_BEFORE_FIX) and _commit_exists(COMMIT_AFTER_FIX):
         diff_since_before_fix = subprocess.run(
-            ["git", "-C", str(ROOT), "diff", f"{COMMIT_BEFORE_FIX}..HEAD", "--", "shared/backlog_edit.py"],
+            ["git", "-C", str(ROOT), "diff", f"{COMMIT_BEFORE_FIX}..{COMMIT_AFTER_FIX}", "--", "shared/backlog_edit.py"],
             check=True,
             capture_output=True,
             text=True,
