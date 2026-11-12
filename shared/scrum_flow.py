@@ -720,11 +720,38 @@ def mark_story(repo: Path, project: str, bid: str, status: str, evidence: str | 
                         f"{project}: {bid} {status} (dis-agent)", run=run)
 
 
-def close_story(repo: Path, project: str, bid: str, who: str, day: str, evidence: str, run=subprocess.run) -> dict:
-    """Close a story. Only call this after the human confirmed at a sprint review."""
+FROM_IN_PROGRESS_PREFIX = "accepted from in progress, run never reached review: "
+
+
+def close_story(repo: Path, project: str, bid: str, who: str, day: str, evidence: str, run=subprocess.run,
+                *, from_in_progress: bool = False) -> dict:
+    """Close a story. Only call this after the human confirmed at a sprint review.
+    from_in_progress=True (owner states the work is finished although the run never reached review) also accepts an
+    'in progress' row, needs non-empty evidence and records that in the evidence line."""
     from shared import backlog_edit
-    if not backlog_edit.status_of((repo / project / "product-backlog.md").read_text(encoding="utf-8"), bid).startswith("🔍"):
-        raise PlanError(f"{bid} is not in review; only a story whose work is finished and under review can be closed")
+    status = backlog_edit.status_of((repo / project / "product-backlog.md").read_text(encoding="utf-8"), bid)
+    if not from_in_progress:
+        if not status.startswith("🔍"):
+            raise PlanError(f"{bid} is not in review; only a story whose work is finished and under review can be closed")
+    else:
+        low = backlog_edit.leading_status(status).lower()
+        if "in progress" in low:
+            pass
+        elif "in review" in low:
+            raise PlanError(f"{bid} is already in review; close it without --from-in-progress")
+        elif "planned" in low:
+            raise PlanError(f"{bid} is planned, not in progress; nothing has run for it, so it cannot be accepted from in progress")
+        elif "blocked" in low:
+            raise PlanError(f"{bid} is blocked, not in progress; unblock it first, it cannot be accepted from in progress")
+        elif "cancel" in low or low.startswith("❌"):
+            raise PlanError(f"{bid} is cancelled; a cancelled story cannot be accepted from in progress")
+        elif "done" in low or backlog_edit.is_closed_status(status):
+            raise PlanError(f"{bid} is already closed ({backlog_edit.leading_status(status)}); nothing to accept")
+        else:
+            raise PlanError(f"{bid} has status '{backlog_edit.leading_status(status)}', which is not 'in progress'; cannot accept it from in progress")
+        if not (evidence or "").strip():
+            raise PlanError(f"accepting {bid} from in progress needs evidence: a merged PR or what you verified")
+        evidence = FROM_IN_PROGRESS_PREFIX + evidence.strip()
     return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, f"✅ done {day}", f"{evidence}; closed after sprint review, confirmed by {who}", closing=True), None),
                         f"{project}: {bid} closed after sprint review, confirmed by {who}", run=run)
 

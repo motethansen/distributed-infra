@@ -774,12 +774,30 @@ def cmd_review_queue(a) -> None:
           "which closes it only on your say-so and, when you give a PR, only after GitHub confirms it is merged. Cancel one with `dis-agent cancel`.")
 
 
+def _warn_running_fleet_task(project: str, story_ids: set[str]) -> None:
+    """Best effort: warn when a fleet task for the story is still running or queued (accepting does not cancel it)."""
+    try:
+        rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
+    except Exception as e:                                   # the fleet may be down; that is exactly when this flag is used
+        print(f"  could not check the fleet for running tasks ({type(e).__name__}); continuing")
+        return
+    live = [t for t in rows if t.get("status") in ("running", "queued", "pending", "claimed")
+            and (t.get("payload") or {}).get("project") == project and (t.get("payload") or {}).get("story") in story_ids]
+    if live:
+        print(f"  WARNING: {len(live)} fleet task(s) for this story still running or queued: "
+              + ", ".join(f"{str(t.get('id'))[:8]} ({t.get('status')})" for t in live) + "; accepting does not stop them")
+
+
+FROM_IP_HELP = "owner states the work is finished although the run never reached review; needs --pr or --evidence"
+
+
 def cmd_accept(a) -> None:
     """Confirm, at a sprint review, a story the fleet did not build. Evidence is required: a merged PR or what you verified."""
     who = os.environ.get("USER", "human")
     day = datetime.now(timezone.utc).date().isoformat()
     if not a.pr and not (a.evidence or "").strip():
         sys.exit("accepting needs evidence: --pr <url of a MERGED pull request> or --evidence \"what you verified\"")
+    fip = bool(getattr(a, "from_in_progress", False))
     parts = []
     if a.pr:
         try:
@@ -790,6 +808,8 @@ def cmd_accept(a) -> None:
         print(f"  GitHub confirms: {a.pr} is merged ({m['merged_at']}): {m['title'][:80]}")
     if (a.evidence or "").strip():
         parts.append(a.evidence.strip())
+    if fip:
+        _warn_running_fleet_task(a.project, {a.story})
     if a.yes:
         ok = True
     elif sys.stdin.isatty():
@@ -800,7 +820,7 @@ def cmd_accept(a) -> None:
         print("left in review")
         return
     try:
-        _report(f"{a.story} ACCEPTED", sf.close_story(viz_repo(), a.project, a.story, who, day, "; ".join(parts)))
+        _report(f"{a.story} ACCEPTED", sf.close_story(viz_repo(), a.project, a.story, who, day, "; ".join(parts), from_in_progress=fip))
     except sf.PlanError as e:
         sys.exit(f"not accepted: {e}")
     n = sf.find_sprint_of(viz_repo(), a.project, a.story)
@@ -945,6 +965,23 @@ def cmd_close(a) -> None:
         sys.exit(f"no registered stories under {base}; approve a plan first")
     rows = sc.client()._call("GET", "/tasks", params={"limit": 500})
     who = os.environ.get("USER", "human")
+    fip = bool(getattr(a, "from_in_progress", False))
+    fip_ev = ""
+    if fip:
+        if not getattr(a, "pr", None) and not (getattr(a, "evidence", None) or "").strip():
+            sys.exit("--from-in-progress needs evidence: --pr <url of a MERGED pull request> or --evidence \"what you verified\"")
+        parts = []
+        if a.pr:
+            try:
+                m = sf.verify_pr_merged(a.pr)
+            except sf.PlanError as e:
+                sys.exit(f"not closed: {e}")
+            parts.append(f"{a.pr} merged {m['merged_at']}")
+            print(f"  GitHub confirms: {a.pr} is merged ({m['merged_at']}): {m['title'][:80]}")
+        if (a.evidence or "").strip():
+            parts.append(a.evidence.strip())
+        fip_ev = "; ".join(parts)
+        _warn_running_fleet_task(a.project, set(want))
     for sid in want:
         pl = plans.get(sid)
         if not pl:
@@ -971,6 +1008,8 @@ def cmd_close(a) -> None:
                                      (f"the review's verdict is {rv}; fix what it found and run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>`",
                                       rv in ("INCOMPLETE", "REQUEST_CHANGES")),
                                      (f"the review is stale; run `dis-agent review -p {a.project} -s {a.sprint} --story {bid} --rerun --where <path>` (add `--as claude` or `--as agy` if the reviewer cannot run the tests)", ev["review_stale"])) if bad]
+        if fip:
+            problems = []                                    # the owner states the work is finished; the review gates do not apply
         if problems and not a.force:
             print(f"  NOT closing: {', '.join(problems)} (use --force only if you have reviewed it yourself)")
             continue
@@ -987,7 +1026,8 @@ def cmd_close(a) -> None:
         if ok:
             try:
                 r = sf.close_story(viz_repo(), a.project, bid, who, datetime.now(timezone.utc).date().isoformat(),
-                                   "PRs " + (", ".join(ev["pull_requests"]) or "none"))
+                                   fip_ev if fip else "PRs " + (", ".join(ev["pull_requests"]) or "none"),
+                                   from_in_progress=fip)
                 _report(f"{bid} CLOSED", r)
                 day = datetime.now(timezone.utc).date().isoformat()
                 if pl.get("sprint_number"):
@@ -1029,6 +1069,9 @@ def main() -> None:
     cl.add_argument("-p", "--project", required=True); cl.add_argument("-s", "--sprint", required=True)
     cl.add_argument("--story", action="append"); cl.add_argument("--yes", action="store_true", help="you have read the review and confirm")
     cl.add_argument("--force", action="store_true")
+    cl.add_argument("--from-in-progress", action="store_true", help=FROM_IP_HELP)
+    cl.add_argument("--pr", help="with --from-in-progress: URL of a pull request that must be MERGED (checked with GitHub)")
+    cl.add_argument("--evidence", help="with --from-in-progress: what you verified, when there is no PR")
     cl.add_argument("--check", action="store_true", help="show the evidence and whether it would close; never closes and never prompts")
     vl = sub.add_parser("validate", parents=[common]); vl.set_defaults(fn=cmd_validate)
     vl.add_argument("-p", "--project", required=True); vl.add_argument("-s", "--sprint", required=True)
@@ -1054,6 +1097,7 @@ def main() -> None:
     ac.add_argument("-p", "--project", required=True); ac.add_argument("--story", required=True)
     ac.add_argument("--pr", help="URL of a pull request that must be MERGED (checked with GitHub)")
     ac.add_argument("--evidence", help="what you verified, when there is no PR"); ac.add_argument("--yes", action="store_true")
+    ac.add_argument("--from-in-progress", action="store_true", help=FROM_IP_HELP)
     qs = sub.add_parser("queue-story", help="register a team-addressed board suggestion as a planned story"); qs.set_defaults(fn=cmd_queue_story)
     qs.add_argument("-p", "--project", required=True); qs.add_argument("--text", required=True)
     qs.add_argument("--from", dest="source", help="the board item the owner confirmed, e.g. WD-283"); qs.add_argument("--response", type=int)
