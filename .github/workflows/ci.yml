@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1"      # weekly full-history scan of main
+  workflow_dispatch:
 
 jobs:
   test:
@@ -27,14 +30,38 @@ jobs:
 
   secret-scan:
     # This repository is public. Fail the build if a secret or a real tailnet address is committed.
+    # A pull request is judged on its own commits only. A bare `gitleaks detect` scans EVERY ref, so a finding on an
+    # unrelated branch (not part of this PR) turned every PR red. Pushes are scanned on main only (pull_request covers
+    # branches); the weekly schedule / manual run scans the whole history reachable from the checked-out commit.
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Scan the commits in this push / pull request
+      - name: Install gitleaks
         env:
           GITLEAKS_VERSION: "8.30.1"
         run: |
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz gitleaks
-          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+      - name: Scan the commits of this pull request
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null || git fetch --no-tags origin "${BASE_SHA}"
+          MERGE_BASE="$(git merge-base "${BASE_SHA}" "${HEAD_SHA}")"
+          COUNT="$(git rev-list --count "${MERGE_BASE}..${HEAD_SHA}")"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "No commits between ${MERGE_BASE} and ${HEAD_SHA}: nothing to scan."
+            exit 0
+          fi
+          echo "Scanning ${COUNT} commit(s): ${MERGE_BASE}..${HEAD_SHA}"
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts "${MERGE_BASE}..${HEAD_SHA}"
+      - name: Scan the history reachable from this commit
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts "--full-history HEAD"
