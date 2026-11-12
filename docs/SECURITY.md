@@ -63,6 +63,8 @@ value in each machine's `.env`, and keep the original in your password manager. 
 - A bare `gitleaks detect` scans *every ref* in the clone (all branches), so the job never uses it. Locally,
   `scripts/check-secrets.sh --history` scans HEAD's history and `--range origin/main..HEAD` reproduces the PR check.
 - If a branch you are not working on holds a finding, fix that branch (placeholders such as `<mac-mini-ip>`); do not allowlist real addresses.
+  When a finding appears, the fix is a placeholder; a real value is never added to the allowlist. Never rewrite public history
+  (no `git filter-repo`, no force-push) without the repository owner's decision.
 
 Also enable, in the repository's **Settings → Code security**: *Secret scanning* and *Push protection*. They block a push that
 contains a known provider token before it lands. The alternative local hook [`git-secrets`](https://github.com/awslabs/git-secrets) works too;
