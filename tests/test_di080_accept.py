@@ -20,6 +20,14 @@ STATUS = {"planned": "🔵 planned", "in progress": "🏃 in progress", "in revi
 EV = "https://github.com/o/r/pull/9 merged 2026-11-12"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_credentials(monkeypatch):
+    """Never depend on a developer's .env or the real environment: scrum_cli.client() reads SECRET_KEY from the
+    environment first (a .env only fills gaps), so a throwaway value here keeps these tests hermetic."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("ORCHESTRATOR_URLS", "http://localhost:1")
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     for k in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):

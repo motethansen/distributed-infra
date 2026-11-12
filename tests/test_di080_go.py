@@ -17,6 +17,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import dis_agent as da  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_real_credentials(monkeypatch):
+    """Never depend on a developer's .env or the real environment: scrum_cli.client() reads SECRET_KEY from the
+    environment first (a .env only fills gaps), so a throwaway value here keeps these tests hermetic."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("ORCHESTRATOR_URLS", "http://localhost:1")
+
+
 class FleetQueue(Queue):
     """The scrum-flow fake plus GET /tasks (the list), with switches for the failures DI-080 is about."""
 
