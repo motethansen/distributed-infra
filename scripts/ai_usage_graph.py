@@ -416,7 +416,7 @@ def store_session(con, s):
         put_edge(con, "repo:%s" % repo, "project:%s" % proj, "backs_project")
 
 
-GRAPH_VERSION = 2   # bump to force one full re-extract (e.g. after a labelling change)
+GRAPH_VERSION = 3   # bump to force one full re-extract (v3: merge no longer lets stale foreign rows win)
 
 
 def cmd_extract(args):
@@ -728,15 +728,32 @@ def cmd_pull(args):
 
 
 def cmd_merge(args):
+    """Union the other hosts' shards into graph.db.
+
+    A shard is authoritative only for ITS OWN host's sessions: every shard also carries copies of
+    the other hosts' rows as of the last merge, and letting those win would overwrite fresh data
+    with stale (that bug relabelled-then-reverted 2,800 sessions). So per shard we take:
+      - sessions whose props.host is the shard's host, replacing the session's old edges
+      - edges leaving those sessions
+      - archive rows of that host
+      - every other node only if we do not have it yet (projects, models, tools, files, lessons)
+    """
     con = db_open()
     n = 0
     for shard in sorted(glob.glob(os.path.join(STATE, "shards", "graph-*.db"))):
-        if shard.endswith("graph-%s.db" % HOST):
+        host = os.path.basename(shard)[len("graph-"):-len(".db")]
+        if host == HOST:
             continue
         con.execute("ATTACH DATABASE ? AS s", (shard,))
-        con.execute("INSERT OR REPLACE INTO nodes SELECT * FROM s.nodes")
-        con.execute("INSERT OR REPLACE INTO edges SELECT * FROM s.edges")
-        con.execute("INSERT OR REPLACE INTO archive SELECT * FROM s.archive")
+        own = "type='session' AND json_extract(props,'$.host')=?"
+        con.execute("DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE %s)" % own, (host,))
+        con.execute("INSERT OR REPLACE INTO nodes SELECT * FROM s.nodes WHERE %s" % own, (host,))
+        con.execute("INSERT OR REPLACE INTO edges SELECT e.* FROM s.edges e "
+                    "JOIN s.nodes n ON n.id=e.src WHERE n.type='session' AND json_extract(n.props,'$.host')=?", (host,))
+        con.execute("INSERT OR IGNORE INTO nodes SELECT * FROM s.nodes WHERE type!='session'")
+        con.execute("INSERT OR IGNORE INTO edges SELECT * FROM s.edges WHERE src NOT IN "
+                    "(SELECT id FROM s.nodes WHERE type='session')")
+        con.execute("INSERT OR REPLACE INTO archive SELECT * FROM s.archive WHERE host=?", (host,))
         con.commit()
         con.execute("DETACH DATABASE s")
         n += 1
