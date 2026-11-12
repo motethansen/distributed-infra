@@ -50,9 +50,21 @@ value in each machine's `.env`, and keep the original in your password manager. 
 |---|---|---|
 | `scripts/check-secrets.sh` | your machine | scans the staged (index) content, i.e. exactly what a commit would contain, with [gitleaks](https://github.com/gitleaks/gitleaks) and `.gitleaks.toml` |
 | `scripts/install-git-hooks.sh` | once per clone | runs that scan before every commit |
-| `secret-scan` job | `.github/workflows/ci.yml` | scans the commits of every push and pull request; the build fails on a finding |
+| `secret-scan` job | `.github/workflows/ci.yml` | scans a pull request's own commits (merge-base..head), pushes to `main`, and weekly / on demand the history reachable from the checked-out commit; the build fails on a finding. See below |
 | `.gitleaks.toml` | repo root | built-in rules plus: Tailscale auth keys, real tailnet addresses, `SECRET_KEY=<value>`-style assignments |
 | `.gitleaksignore` | repo root | exact fingerprints (commit:file:rule:line, no personal data) of findings already in old commits, so only *new* ones fail |
+
+### What the `secret-scan` job scans
+
+- **Pull request**: only the commits of the PR (`git merge-base <base> <head>` .. `<head>`). A finding on some other branch can no longer turn
+  an unrelated PR red; the PR that introduces a secret is the one that fails. An empty range passes with a message.
+- **Push**: only pushes to `main` (the `pull_request` event already covers every other branch).
+- **Weekly schedule and manual run** (`workflow_dispatch`): the whole history reachable from the checked-out commit (`--log-opts "--full-history HEAD"`).
+- A bare `gitleaks detect` scans *every ref* in the clone (all branches), so the job never uses it. Locally,
+  `scripts/check-secrets.sh --history` scans HEAD's history and `--range origin/main..HEAD` reproduces the PR check.
+- If a branch you are not working on holds a finding, fix that branch (placeholders such as `<mac-mini-ip>`); do not allowlist real addresses.
+  When a finding appears, the fix is a placeholder; a real value is never added to the allowlist. Never rewrite public history
+  (no `git filter-repo`, no force-push) without the repository owner's decision.
 
 Also enable, in the repository's **Settings → Code security**: *Secret scanning* and *Push protection*. They block a push that
 contains a known provider token before it lands. The alternative local hook [`git-secrets`](https://github.com/awslabs/git-secrets) works too;

@@ -4,7 +4,9 @@
 #   scripts/check-secrets.sh             scan what would be COMMITTED: the staged (index) content of every tracked file.
 #                                        This is what the pre-commit hook runs; an unstaged edit cannot hide a staged secret.
 #   scripts/check-secrets.sh --worktree  scan the working-tree files git would commit (tracked + new, not ignored), staged or not
-#   scripts/check-secrets.sh --history   scan every commit (slow on big repos, run before going public / after a rewrite)
+#   scripts/check-secrets.sh --history   scan the history reachable from the checked-out commit (HEAD), like the CI's weekly scan.
+#                                        Other branches and remote refs are NOT scanned (a bare `gitleaks detect` scans every ref).
+#   scripts/check-secrets.sh --range A..B  scan only the commits in A..B, e.g. origin/main..HEAD: what CI checks for a pull request
 #
 # Needs gitleaks:  brew install gitleaks   |  https://github.com/gitleaks/gitleaks/releases
 # Rules and allowlist: .gitleaks.toml (the staged copy when scanning the index). Findings are redacted in the output.
@@ -17,7 +19,10 @@ command -v gitleaks >/dev/null || { echo "gitleaks not found (brew install gitle
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 case "${1:-}" in
   --history)
-    gitleaks detect --source . --config .gitleaks.toml --redact --no-banner ;;
+    gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts "--full-history HEAD" ;;
+  --range)
+    [[ -n "${2:-}" ]] || { echo "usage: check-secrets.sh --range A..B" >&2; exit 2; }
+    gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --log-opts "$2" ;;
   --worktree)
     # Only files git would commit (tracked + new, not ignored): never .env, .venv or data/.
     git ls-files -z --cached --others --exclude-standard | while IFS= read -r -d '' f; do
@@ -30,6 +35,6 @@ case "${1:-}" in
     git checkout-index -a --prefix="$tmp/"
     cfg="$tmp/.gitleaks.toml"; [[ -f "$cfg" ]] || cfg="$PWD/.gitleaks.toml"
     gitleaks detect --source "$tmp" --no-git --config "$cfg" --redact --no-banner ;;
-  *) echo "usage: check-secrets.sh [--worktree | --history]" >&2; exit 2 ;;
+  *) echo "usage: check-secrets.sh [--worktree | --history | --range A..B]" >&2; exit 2 ;;
 esac
 echo "check-secrets: clean"
