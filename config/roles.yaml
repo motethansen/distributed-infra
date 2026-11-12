@@ -61,6 +61,7 @@ roles:
 # Projects DeepSeek may receive prompts about. urbanlife is isolated and deliberately absent. winedragons was removed
 # 2026-11-07 (Michael): its code now holds a food profile (health data), payments and the account-erasure engine, and
 # DeepSeek is a non-private provider; its backend tasks fall back to Claude Sonnet (private_fallback).
+# n-agents is deliberately absent: a customer-facing subscription product, so its backend tasks use the private fallback.
 deepseek_projects:
   - academictool
   - budgetapp
