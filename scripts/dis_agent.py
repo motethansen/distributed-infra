@@ -744,6 +744,8 @@ def cmd_next(a) -> None:
     if a.json:
         print(json.dumps(sugs, indent=2, ensure_ascii=False))
         return
+    stuck = _stuck_result(a.project)
+    sugs = scrum_next.add_stuck(sugs, stuck, a.limit)
     print(waiting + scrum_next.render(sugs))
     _print_responses(board, not getattr(a, "no_consume", False), getattr(a, "consume", None) is True)
 
@@ -814,11 +816,34 @@ def cmd_scrum(a) -> None:
     print(f"(saved {d / (b['digest']['as_of'] + '.md')})\nReview what is waiting:  dis-agent review")
 
 
+def _stuck_result(project: str | None) -> dict:
+    """Stories 'in progress' for more than 24 h with no fleet task running or queued (DI-080). Never fatal: an unreachable fleet
+    or an unreadable backlog is reported as 'could not check the fleet', never as 'nothing stuck'."""
+    from shared import scrum, stuck_stories
+    try:
+        names = [project] if project else sorted((projects_cfg().get("projects") or {}))
+        rows = []
+        for pn in names:
+            f = viz_repo() / pn / "product-backlog.md"
+            if f.exists():
+                rows += [{**r, "project": pn} for r in scrum.backlog_rows(f.read_text(encoding="utf-8")) if r["status"] == "in_progress"]
+        try:
+            tasks = sc.client()._call("GET", "/tasks", params={"limit": 500})
+        except (Exception, SystemExit):
+            return stuck_stories.stuck_in_progress(rows, None, datetime.now(timezone.utc), fleet_reachable=False)
+        return stuck_stories.stuck_in_progress(rows, tasks, datetime.now(timezone.utc), stuck_stories.git_age_fn(viz_repo()), _local_plans())
+    except Exception:                                   # noqa: BLE001
+        return {"fleet_checked": False, "could_not_check_fleet": True, "stuck": []}
+
+
 def cmd_review_queue(a) -> None:
-    from shared import scrum_next
+    from shared import scrum_next, stuck_stories
     items = scrum_next.review_items(_board(), _local_plans(), (projects_cfg().get("projects") or {}), a.project)
+    stuck_text = stuck_stories.render(_stuck_result(a.project))
     if not items:
         print("Nothing is waiting for your review.")
+        if stuck_text:
+            print("\n" + stuck_text)
         return
     print(f"{len(items)} stories wait for your sprint review:\n")
     for r in items:
@@ -828,6 +853,8 @@ def cmd_review_queue(a) -> None:
         if r["prs"]:
             print(f"      PRs:      {', '.join(r['prs'])}")
         print(f"      confirm:  {r['command']}")
+    if stuck_text:
+        print("\n" + stuck_text)
     print("\nA story the fleet built has validation and review evidence (`/close` shows it). Any other story is confirmed with `dis-agent accept`,\n"
           "which closes it only on your say-so and, when you give a PR, only after GitHub confirms it is merged. Cancel one with `dis-agent cancel`.")
 

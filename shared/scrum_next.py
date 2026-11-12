@@ -261,3 +261,21 @@ def render_pending(p: dict, ready: list[dict] | None = None) -> str:
         for it in ready:
             L.append(f"    {it['id']} ({it['project']}) {it['title'][:70]}")
     return "\n".join(L) + "\n\n"
+
+
+def add_stuck(sugs: list[dict], stuck: dict, limit: int = 6) -> list[dict]:
+    """DI-080: one ranked suggestion 'N stories look stuck in progress', with the three exact commands for the first few of them.
+    Ranked just under the finished-and-waiting items (priority 1); a ranked list is cut to `limit` after adding it."""
+    from shared import stuck_stories
+    items = stuck.get("stuck") or []
+    if not items:
+        return sugs
+    cmds = []
+    for it in items[:5]:
+        c = stuck_stories.commands(it)
+        cmds.append(f"{it['project']} {it['id']} ({it['age']}):\n      accept: {c['accept']}\n      re-run: {c['rerun'] or '(no plan file)'}\n      cancel: {c['cancel']}")
+    s = _s(items[0]["project"], 1, f"{_n(len(items), 'story looks', 'stories look')} stuck in progress",
+           "in progress for more than 24 hours and no fleet task is running or queued; the run probably died. Check whether the work is merged, then accept, re-run or cancel",
+           "\n   ".join(cmds), CHANGES)
+    out = sorted(list(sugs) + [s], key=lambda x: x["priority"])      # stable: ties keep their order, this one goes last among priority 1
+    return out[:limit] if limit else out

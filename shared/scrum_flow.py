@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -714,8 +715,13 @@ def register_story(repo: Path, project: str, story: dict, who: str, day: str, pl
     return r
 
 
-def mark_story(repo: Path, project: str, bid: str, status: str, evidence: str | None, run=subprocess.run) -> dict:
+def mark_story(repo: Path, project: str, bid: str, status: str, evidence: str | None, run=subprocess.run,
+               day: str | None = None) -> dict:
+    """Set a row's status. 'in progress' gets the date like the done rows ('🏃 in progress 2026-11-12'), so the desk can
+    tell how long a story has been in progress (DI-080)."""
     from shared import backlog_edit
+    if "in progress" in status.lower() and not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", status):
+        status = f"{status} {day or datetime.now(timezone.utc).date().isoformat()}"
     return edit_backlog(repo, project, lambda t: (backlog_edit.set_status(t, bid, status, evidence), None),
                         f"{project}: {bid} {status} (dis-agent)", run=run)
 
