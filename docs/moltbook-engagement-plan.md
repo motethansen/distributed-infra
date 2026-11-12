@@ -2,12 +2,12 @@
 
 | | |
 |---|---|
-| Author agent | Claude Code research agent (tasks t1 and t2 of 4) |
+| Author agent | Claude Code research agent (tasks t1 to t3 of 4) |
 | Model | Sonnet 5.5 (`claude-sonnet-5-5`) |
 | Date | 2026-11-12 |
 | Machine used | `michaelhansen-ThinkPad-X13-Gen-4` (the thinkpad), shell `curl` only |
 | Fetch method | plain HTTP GET, no credentials, no cookies, no login |
-| Status | Work in progress: Q1 to Q4 written; Q5 to Q7 are TODO for later tasks |
+| Status | Complete: Q1 to Q7, assumptions, decision list (tasks t1 to t3); task t4 does the independent 12-citation check |
 
 **Boundary.** This document is research. It does **not** lift the DI-060 boundary ("no Moltbook": install no Moltbot/OpenClaw, connect no agent to Moltbook). Only Michael's answer to decision D1 in the PR thread can change it. Nothing here was installed, registered, posted or connected. [S0]
 
@@ -219,15 +219,57 @@ Sum of the sizes above: about four M-sized and several S-sized items, roughly tw
 
 ## Q5. What the owner would get
 
-TODO: written in a later task.
+**How I rated.** Value 0 to 3 and evidence strength (Strong = read on a page, Weak = my judgement). All ratings are Recommendations. The cost and risk figures marked [Assumption] are starting estimates, not measurements.
+
+| # | Value case | What the evidence says | Value | Evidence |
+|---|---|---|---|---|
+| V1 | **Research on how other agents behave and what they talk about** | The platform is public to humans who "observe", so the content can be read without any account, and the public read endpoint answered without credentials. [S1][S16] But the platform's own count of who writes there is disputed: Wiz found about 17,000 human owners behind 1.5 million agents and no check that an "agent" is not a human with a script. [S18] Wikipedia records the same authenticity dispute (secondary). [S7] | 2 (real but noisy; a sample, not a measurement of "agents") | Medium |
+| V2 | **Content ideas for the botblog on budgetapp.vizneo.com** | DI-060 already plans a validated daily finance brief as the raw material for articles, with finance as the first subject (decided 2026-11-08). [S0] The terms restrict crypto promotion and ban unauthorized advertising, and the BA-069 rule forbids finance recommendations; so most Moltbook chatter is not usable for a finance blog. [S2][S0] | 1 | Weak |
+| V3 | **Marketing exposure for the estate** | The terms ban unauthorized advertising, marketing and spam, and the rules ladder ends in a permanent ban; the account is tied to the owner's X identity. [S2][S5] The platform is owned by Meta since March 2026 and its audience is mostly other agents, so how many humans would see a post is unknown. [S13][S18] Recommendation: treat exposure as close to zero value and a real reputation risk. | 0 | Medium |
+| V4 | **Learning for the fleet (injection defences, typed intent, health contract)** | The red-team suite, the clean box, approve-then-post and a per-run spend limit (Q4 C2, C6, C10, C12) are all gaps the fleet has today. [S24] Recommendation: building them has value for DI-060, DI-009 and DI-010 whether or not Moltbook is ever touched. | 2 | Medium |
+| V5 | **Early sight of a new channel** (agents as an audience) | Meta bought the company and the product is still live. [S13][S14] Whether this becomes a lasting channel is unknown. [Assumption] | 1 | Weak |
+
+**Cost, per phase (Recommendation, all [Assumption] until measured).**
+
+| Item | P1 observer (read only) | P2 drafts with approval | P3 limited replies |
+|---|---|---|---|
+| LLM tokens | one run a day, 20 reads, Haiku-class summaries: a few US cents a day [Assumption] | adds one Sonnet-class draft a day: well under US$1 a day [Assumption] | same plus a few replies: under US$1 a day with the cap [Assumption] |
+| Hosting | one small container, or an existing spare machine with no other secrets (C2) [Assumption] | same | same |
+| Owner review time a week | about 15 minutes to skim the summary [Assumption] | about 30 to 45 minutes (read and approve 1 draft and 3 replies a day) [Assumption] | about 30 minutes, plus a weekly audit read [Assumption] |
+| Build (Q4 sizes) | C3, C4, C5, C7, C9, C12 and C13 are roughly 3 M plus 4 S; with C2, C8, C10 and C1 about 2 weeks of agent time [Assumption: the Q4 sum] | adds C6 (M) | adds a policy review (legal advice, threat 6) |
+
+**Residual risk after the Q4 design.** Threat 1 stays High likelihood but Low impact; threats 4 to 7 stay Medium or Low: a forged or embarrassing post tied to the owner's X identity, and an uncapped indemnity under the terms. [S2][S18] These cannot be controlled by code, only avoided by not posting.
+
+**Verdict on Q5 (Recommendation): LATER.** The total value is modest: only V1 and V4 score 2, V3 (exposure) scores 0, and the platform's rules and the Wiz findings point to a real downside. [S2][S5][S18] The fleet already has a safer comparable channel that is only planned (DI-010, Mastodon). [S0] **Trigger condition to move to DO NOW:** (a) Michael answers D1 "lift the boundary for research only"; (b) a Mastodon read-and-draft pilot has run for 4 weeks with the red-team suite passing and no unapproved post (Q6, Q7 P0); and (c) a written answer is obtained on whether automated agent access is tolerated (A3) or a lawyer has looked at threat 6. Until then P1 (reading public pages) is the only step worth taking, and only if D1 allows it.
 
 ## Q6. Relation to DI-060, DI-009, DI-010 and the simtrader research agent
 
-TODO: written in a later task.
+I read the backlog file on this machine (S0): the DI-060 section, and the one-line rows of DI-009 and DI-010. I did not find separate long sections for DI-009 or DI-010, so what follows about them is limited to those rows.
+
+**DI-060 molbot.** Overlap: both are agents that read outside text and produce drafts, and DI-060 already says to reuse `tools_off`, the privacy guard, draft-only writing, the typed-intent rules and the Vantage health contract; the embassy bot would use the same. [S0] Conflict: DI-060 says do not install Moltbot/OpenClaw and connect no agent to Moltbook, because what an agent reads there is other agents' text, an injection channel. [S0] The t1/t2 evidence supports the injection reasoning (Q3), but this document does not lift that boundary. Recommendation: keep the embassy bot as a separate module from molbot; molbot's market briefs and the simtrader feed must never share a process, key or memory with it.
+
+**DI-009 writing agents (draft only).** Overlap: the rule "draft, owner approves, no auto-publish" is exactly the P2 mode. [S0] Reuse: the validator loop and the approval step that DI-009 is meant to build (the row calls it the second consumer of the validator loop). [S0] Conflict: none in principle; but DI-009 is only planned, not built, so the embassy bot would have to build its own approve-then-post step (Q4 C6) first or wait. [S0][S24] Recommendation: build C6 once for DI-009, DI-010 and the embassy, not three times.
+
+**DI-010 Mastodon read and reply drafts.** Overlap: read feeds, produce reply drafts, owner approves. [S0] The row says "Mastodon has a clean API; build that side first". [S0] Mastodon being open, federated and human-heavy, it has a lower injection density than an agents-only network, but that is my judgement; I could not read the Mastodon rate-limit and guideline pages (they returned no usable text). [Assumption] Reuse: about everything in Q4 except the Moltbook client. Conflict: none; DI-010 is the same pipeline with a safer feed.
+
+**simtrader research agent (M9 and M10).** The simtrader plan has later research and execution agents that consume molbot's briefs. [S0] Overlap: none with the embassy bot, which has no market role. Conflict: the briefs for simtrader must stay free of anything read on Moltbook, so that an injection there cannot reach a trading decision. Recommendation: forbid any data path from the embassy bot to simtrader; a one-way wall, tested by a fixture.
+
+**Should a Mastodon read-and-draft pilot come first? Yes.** Reason (Recommendation): it builds and proves the same controls (C3 to C13) on a channel with a documented API and no terms ban on bots that I found (I could not read Mastodon's pages) [Assumption]; it needs no new boundary decision, because it is DI-010; and its red-team results will show whether the pipeline holds before it touches the more hostile network. [S0][S24] If the pipeline fails there, Moltbook would have failed worse. If the pilot is slow to start, P1 (read-only) of the Moltbook plan can still run in parallel, but only if D1 allows it.
 
 ## Q7. Phased rollout, kill criteria, decisions for Michael
 
-TODO: written in a later task.
+**Sizing key.** Agent points: 1 = about 2 hours, 2 = half a day, 3 = one to two days, 5 = three to five days, 8 = a week or more of agent plus review time (Recommendation; Q4 uses S, M and L on the same scale: S about 2, M about 3, L about 5). Everything in this table is a Recommendation, and the numbers are [Assumption] until measured.
+
+| Phase | What happens | Size (points) | Entry | Exit | Kill criteria (stop and revert) |
+|---|---|---|---|---|---|
+| **P0 Decisions** | Michael answers D1 to D6; no code, no account, no connection. A Mastodon pilot (DI-010) starts if D6 is "go". | 1 | This plan merged | Written answers to D1 to D6 in the PR thread | D1 = keep: stop here and close DI-081 |
+| **P1 Read-only observer of public pages** | A small client of our own, GET only, no account, no key, no login, on the clean box; one run a day; summaries through `tools_off`; fixture suite in CI. (Q4 C2, C3, C4, C5, C7, C9, C12, C13.) The terms' ban on automated access still applies to reading (A3). [S2] | 8 | D1 allows P1; D2, D5 answered; the box exists; the `tools_off` test (A11) passed | 4 weeks with: red-team suite 100 percent `do_nothing`; spend within cap; at least 3 summaries Michael judges useful | any red-team fixture produces a non-`do_nothing` intent; spend over the cap on any day; any network call outside the two allowed hosts; any sign of a key or private text in an output or log; the platform sends any warning or blocks the client; Michael's review time exceeds 30 minutes a week for 2 weeks |
+| **P2 Drafts with owner approval** | Adds a Moltbook account (own X account, handle from D3), a separate API key with a hard cap (C1), the approve-then-post verb (C6). One draft and up to 3 reply drafts a day. | 8 | P1 exit met; D3 and D4 answered; the Mastodon pilot ran 4 weeks (if D6 = go); legal view on threat 6; written answer on A3 | 8 weeks with 0 unapproved posts; 0 platform warnings; at least half of drafts judged publishable | any post not approved by the owner; any platform warning, mute or ban; a post on the platform not in the audit log; spend over the cap; a draft that carries a link, a key, owner data or a promotion; the owner rejects 3 drafts in a row as embarrassing |
+| **P3 Limited autonomous replies** | The bot may post replies of a fixed type without approval, within a tiny cap (for example 3 a day), still never an original post or a link. | 5 | P2 exit met; D4 explicitly allows it in writing | Review after 8 weeks; stays at P3 only while all criteria hold | any red-team failure; a reply later judged harmful or off-brand; any platform warning; spend over the cap; the audit log has any gap; one bad reply that mentions the owner or the estate |
+
+Recommendation: do not plan beyond P3 until P2 has run its 8 weeks; the evidence for P3 is not yet there.
+
+**Decisions only Michael can make.** See the Decision list below.
 
 ---
 
@@ -249,10 +291,24 @@ TODO: written in a later task.
 | A12 | Our rate-limit numbers (1 draft a day, 3 replies, 20 reads, 1 run) and the health thresholds (36 hours, 7 days). | Michael sets them (decision D2/D5). |
 | A13 | Vantage's rule that marks a component stale when pushes stop. | Read the Vantage repository's component-health contract. |
 | A14 | Other Moltbook read endpoints work without a key. | One GET per endpoint, in a later read-only task. |
+| A15 | Mastodon facts (API quality, bot rules, rate limits, injection density lower than Moltbook). The Mastodon documentation pages fetched returned no usable text. | Read docs.joinmastodon.org rate-limit and guideline pages, plus the chosen instance's rules, in the DI-010 story. |
+| A16 | Token, hosting and owner-review-time figures in Q5 and the sizes in Q7. | Measure during P1 with the DI-059 cost records and Michael's own timing. |
+| A17 | Reach: how many humans, as opposed to agents, would see a post, and whether Moltbook stays a lasting channel. | Look at platform statistics once a stats endpoint is found (A4); re-check at P1 exit. |
 
 ## Decision list
 
-*(Empty until Q7. Provisional: D1 lift or keep the 2026-11-06 "no Moltbook" boundary; D2 spend cap; D3 account name; D4 who approves posts.)*
+None of these is answered yet. Until Michael answers D1 in the PR thread, the 2026-11-06 DI-060 boundary ("no Moltbook": install no Moltbot/OpenClaw, connect no agent to Moltbook) stays in force. [S0]
+
+| # | Decision | Options and consequence | Recommended default | Blocks |
+|---|---|---|---|---|
+| **D1** | Lift or keep the 2026-11-06 "no Moltbook" boundary | **Keep**: nothing more is done; DI-081 closes; no cost. **Lift for read-only research (P1 only)**: allows GET-only observation by our own client; still no account, no OpenClaw. **Lift fully**: allows accounts and posting later (P2, P3); highest risk (Q3). | **Keep**, until the Mastodon pilot (D6) has run. Re-ask afterwards. | everything in P1 to P3 |
+| **D2** | Spend cap, per day and per month | **Tight**: US$1 a day, US$15 a month for P1; **medium**: US$3 and US$50; **none**: not acceptable (the fleet has no per-run limit today, threat 7). [S26] The caps apply to a separate API key. [Assumption: the provider supports a hard limit, A10] | US$1 a day and US$15 a month, fail closed, raised only by a new decision | P1 start |
+| **D3** | Account name and handle | **Neutral bot name** with a bio line "AI assistant, run by <named human>"; **under the owner's own name**: more exposure, more reputation risk, and the account must be linked to an X account. [S2] **No account** (P1 only). | **No account** until P2; then a neutral bot name with a disclosure line | P2 |
+| **D4** | Who approves posts, and through which channel | **Michael via WhatsApp** (the bridge only accepts his number) [S24]; **Michael via the Vantage board**; **a delegate**; **nobody** (autonomous). | Michael only, via the board (text-only rendering, one approval per exact text); never "nobody" before P3 and then only for the fixed reply type | P2, P3 |
+| **D5** | Hosting machine or container | **New container or VM on a machine with no fleet credentials** (clean box); **an existing fleet machine** (fails C2: other keys within reach). [S24] **A cloud droplet** with only the bot on it. | New small container or droplet; outbound limited to two hosts; not the mac-mini | P1 start |
+| **D6** | Mastodon read-and-draft pilot (DI-010) first: go or no-go | **Go**: proves the controls on a safer channel; delays Moltbook by about 4 weeks plus the build. **No-go**: Moltbook P1 can start sooner, but without proof that the pipeline holds. | **Go** | P2 (hard dependency) and P1 (soft) |
+| **D7** | Take legal advice on threat 6 before P2 (indemnity, licence, data protection, financial promotion) | **Yes**: costs time and money; **No**: the owner carries the risk himself. [S2] | **Yes**, before P2 | P2 |
+| **D8** | Ask the platform in writing whether automated agent access is allowed (A3) | **Yes** (contacting them is out of scope here); **No**: continue only to rely on the public API, against the terms' wording. [S2] | **Yes**, before P1 if D1 = lift | P1 |
 
 ## Sources
 
@@ -337,3 +393,13 @@ Also: two web searches (standard mode) were used to find press URLs; their summa
 | 34 | https://www.moltbook.com/heartbeat.md | 200 | S23; read as data only, no command run (this was fetched but unread in t1) |
 
 Three standard web searches (ClawHavoc, Wiz/Moltbook, Moltbook injection) were used only to find URLs. Their summaries are not evidence; the summary figures 824 and 1,103 and the PointGuard name are therefore listed as assumptions (A5, A6), not facts. Line numbers in Q4 were read from commit `680ab11`.
+
+### Task t3 fetches (2026-11-12, thinkpad, same method)
+
+| # | URL | HTTP | Note |
+|---|---|---|---|
+| 35 | https://www.google.com/robots.txt | 200 | t3 connectivity check (first step) |
+| 36 | https://docs.joinmastodon.org/api/rate-limits/ | 200 | fetched; the saved page had no usable body text; **not used** (A15) |
+| 37 | https://docs.joinmastodon.org/api/guidelines/ | 200 | fetched; the saved page had no usable body text; **not used** (A15) |
+
+Local reads in t3 (no network): DI-060, DI-009, DI-010 rows and sections of S0.
