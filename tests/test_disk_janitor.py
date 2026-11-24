@@ -612,3 +612,259 @@ def test_push_includes_details_only_when_given(monkeypatch):
     dj.push_vantage("http://v", "", "c", "up", [], {})
     dj.push_vantage("http://v", "", "c", "up", [], {}, {"a": "b"})
     assert "details" not in sent[0] and sent[1]["details"] == {"a": "b"}
+
+
+# --------------------------------------------------------------------------- regular cleanup: orphan volumes, merged worktrees, pressure tier
+
+HEX_OLD = "a" * 64
+HEX_OLD2 = "b" * 64
+HEX_NEW = "c" * 64
+
+
+def _iso(epoch, offset=False):
+    if offset:                                                    # Go prints local time with an offset on Linux
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(epoch + 8 * 3600)) + "+08:00"
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def volume_runner(volumes, calls, remove_rc=0, remove_out=None):
+    """A fake docker: `volumes` maps name -> created epoch. Every listed volume is dangling (the filter is asserted separately)."""
+    def runner(cmd, timeout):
+        calls.append(cmd)
+        if cmd[1:3] == ["volume", "ls"]:
+            return 0, "\n".join(volumes)
+        if cmd[1:3] == ["volume", "inspect"]:
+            names = cmd[5:]
+            return 0, "\n".join(f"{n} {_iso(volumes[n], offset=(i % 2 == 1))}" for i, n in enumerate(names))
+        if cmd[1:3] == ["volume", "rm"]:
+            return remove_rc, ("\n".join(cmd[3:]) if remove_out is None else remove_out)
+        return 0, ""
+    return runner
+
+
+def test_orphan_volumes_only_the_old_anonymous_dangling_ones_go():
+    calls = []
+    vols = {HEX_OLD: NOW - 3 * DAY, HEX_OLD2: NOW - 2 * DAY, HEX_NEW: NOW - 2 * 3600,
+            "winedragons_redis_data": NOW - 90 * DAY, "cheersfriends_cc_media_volume": NOW - 90 * DAY}
+    removed, errors = dj.docker_orphan_volumes(False, now=NOW, runner=volume_runner(vols, calls), docker="docker")
+    rm = [c for c in calls if c[1:3] == ["volume", "rm"]]
+    assert errors == [] and len(rm) == 1
+    assert sorted(rm[0][3:]) == sorted([HEX_OLD, HEX_OLD2])              # not the young one, not the named ones
+    assert removed[0]["rule"] == "docker-orphan-volumes-1d" and removed[0]["path"].startswith("2 ")
+
+
+def test_orphan_volumes_ask_docker_for_dangling_ones_only_and_never_use_prune():
+    calls = []
+    dj.docker_orphan_volumes(False, now=NOW, runner=volume_runner({HEX_OLD: NOW - 3 * DAY}, calls), docker="docker")
+    ls = [c for c in calls if c[1:3] == ["volume", "ls"]][0]
+    assert "dangling=true" in ls and "-q" in ls
+    assert not any(c[1:3] == ["volume", "prune"] or "--all" in c or "-a" in c for c in calls)
+
+
+def test_orphan_volumes_dry_run_removes_nothing():
+    calls = []
+    removed, _ = dj.docker_orphan_volumes(True, now=NOW, runner=volume_runner({HEX_OLD: NOW - 3 * DAY}, calls), docker="docker")
+    assert not any(c[1:3] == ["volume", "rm"] for c in calls)
+    assert removed and all(r.get("dry") for r in removed)
+
+
+def test_orphan_volumes_engine_down_or_no_docker_is_quiet():
+    assert dj.docker_orphan_volumes(False, now=NOW, runner=lambda c, t: (124, ""), docker="docker") == ([], [])
+    assert dj.docker_orphan_volumes(False, now=NOW, runner=lambda c, t: (0, ""), docker=None) in (([], []),)
+
+
+def test_orphan_volumes_a_volume_that_became_used_is_not_an_error_and_not_counted():
+    calls = []
+    removed, errors = dj.docker_orphan_volumes(
+        False, now=NOW, runner=volume_runner({HEX_OLD: NOW - 3 * DAY, HEX_OLD2: NOW - 3 * DAY}, calls,
+                                             remove_rc=1, remove_out=HEX_OLD2), docker="docker")
+    assert errors == []                                                   # docker refused one in-use volume: that is its job
+    assert removed[0]["path"].startswith("1 ")
+
+
+def test_orphan_volumes_are_removed_in_chunks():
+    calls = []
+    vols = {f"{i:064x}": NOW - 5 * DAY for i in range(250)}
+    dj.docker_orphan_volumes(False, now=NOW, runner=volume_runner(vols, calls), docker="docker")
+    rm = [c for c in calls if c[1:3] == ["volume", "rm"]]
+    assert len(rm) == 3 and sum(len(c) - 3 for c in rm) == 250 and max(len(c) - 3 for c in rm) <= 100
+
+
+@pytest.fixture
+def wt_home(repo, tmp_path):
+    """A fake home with linked worktrees under wt-*: old merged, young merged, dirty, and ahead of main."""
+    home = tmp_path / "home"
+    home.mkdir()
+    made = {}
+    for name in ("old-merged", "young-merged", "dirty", "ahead"):
+        p = home / f"wt-{name}"
+        git("worktree", "add", "-b", name, str(p), cwd=repo)
+        made[name] = p
+    (made["dirty"] / "wip.txt").write_text("unsaved")
+    (made["ahead"] / "n.txt").write_text("n")
+    git("add", ".", cwd=made["ahead"])
+    git("commit", "-m", "work", cwd=made["ahead"])
+    for name, days in (("old-merged", 4), ("young-merged", 1), ("dirty", 9), ("ahead", 9)):
+        os.utime(made[name] / ".git", (NOW - days * DAY, NOW - days * DAY))
+    return home, made
+
+
+def test_merged_clean_worktrees_older_than_three_days_are_removed_and_nothing_else(wt_home):
+    home, made = wt_home
+    removed, errors = dj.worktree_clean(False, now=NOW, home=str(home), ps_lines=[])
+    assert errors == []
+    assert not made["old-merged"].exists()
+    assert made["young-merged"].exists() and made["dirty"].exists() and made["ahead"].exists()
+    assert [r["rule"] for r in removed] == ["worktree-merged-3d"]
+
+
+def test_worktree_cleanup_dry_run_removes_nothing(wt_home):
+    home, made = wt_home
+    removed, _ = dj.worktree_clean(True, now=NOW, home=str(home), ps_lines=[])
+    assert all(p.exists() for p in made.values())
+    assert removed and all(r.get("dry") for r in removed)
+
+
+def test_worktree_cleanup_never_forces_and_waits_for_running_tests(wt_home, repo):
+    home, made = wt_home
+    seen = []
+
+    def runner(cmd, timeout):
+        seen.append(cmd)
+        return dj.run(cmd, timeout)
+
+    dj.worktree_clean(False, now=NOW, home=str(home), ps_lines=[], runner=runner)
+    assert not any("--force" in c or "-f" in c[3:] for c in seen if "remove" in c)
+    # a test run is active: nothing is removed, however old
+    git("worktree", "add", "-b", "again", str(home / "wt-again"), cwd=repo)
+    os.utime(home / "wt-again" / ".git", (NOW - 5 * DAY, NOW - 5 * DAY))
+    removed, _ = dj.worktree_clean(False, now=NOW, home=str(home), ps_lines=["python -m pytest tests"])
+    assert (home / "wt-again").exists() and removed == []
+
+
+def test_worktree_cleanup_ignores_folders_outside_the_worktree_patterns(repo, tmp_path):
+    home = tmp_path / "home2"
+    home.mkdir()
+    other = home / "projects" / "feature"
+    other.parent.mkdir()
+    git("worktree", "add", "-b", "elsewhere", str(other), cwd=repo)
+    os.utime(other / ".git", (NOW - 9 * DAY, NOW - 9 * DAY))
+    removed, _ = dj.worktree_clean(False, now=NOW, home=str(home), ps_lines=[])
+    assert other.exists() and removed == []
+
+
+def test_pressure_tier_lists_only_regenerable_caches(tmp_path, monkeypatch):
+    monkeypatch.setattr(dj, "IS_MAC", True)
+    for rel in (".npm/_cacache", "Library/Caches/Yarn", ".gradle/caches", "Library/Developer/Xcode/DerivedData",
+                "flutter/bin/cache", ".pub-cache", "Library/Caches/restic", "Library/Caches/dev.kdrag0n.MacVirt"):
+        mk(tmp_path / rel)
+    cands = dj.pressure_candidates(home=str(tmp_path), ps_lines=[])
+    rels = sorted(os.path.relpath(c.path, tmp_path) for c in cands)
+    assert rels == sorted([".npm/_cacache", "Library/Caches/Yarn", ".gradle/caches", "Library/Developer/Xcode/DerivedData"])
+    assert all(c.rule.startswith("pressure-") for c in cands)               # flutter, pub, restic and OrbStack caches are never touched
+
+
+def test_pressure_tier_skips_gradle_and_xcode_while_they_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(dj, "IS_MAC", True)
+    mk(tmp_path / ".gradle/caches")
+    mk(tmp_path / "Library/Developer/Xcode/DerivedData")
+    mk(tmp_path / ".npm/_cacache")
+    cands = dj.pressure_candidates(home=str(tmp_path), ps_lines=[
+        "/usr/bin/java -Dorg.gradle.appname=GradleDaemon org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.5",
+        "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -scheme App build"])
+    assert [os.path.relpath(c.path, tmp_path) for c in cands] == [".npm/_cacache"]
+
+
+def test_pressure_candidates_pass_the_safety_check_and_really_delete(tmp_path):
+    mk(tmp_path / ".npm/_cacache", size=1000)
+    res = dj.clean(False, now=NOW, candidates=dj.pressure_candidates(home=str(tmp_path), ps_lines=[]), with_docker=False)
+    assert not (tmp_path / ".npm" / "_cacache").exists() and (tmp_path / ".npm").exists()
+    assert res.freed >= 1000 and res.errors == []
+
+
+def tm_runner(calls, snapshots=("com.apple.TimeMachine.2026-11-19-125334.local",), status="Running = 0;"):
+    def runner(cmd, timeout):
+        calls.append(cmd)
+        if cmd[1] == "listlocalsnapshots":
+            return 0, "Snapshots for disk /System/Volumes/Data:\n" + "\n".join(snapshots)
+        if cmd[1] == "status":
+            return 0, "Backup session status:\n{\n    " + status + "\n}"
+        return 0, "Thinned local snapshots"
+    return runner
+
+
+def test_local_snapshots_are_thinned_only_on_a_mac_under_pressure_when_no_backup_runs():
+    calls = []
+    out, errs = dj.thin_local_snapshots(False, 20 * dj.GB, runner=tm_runner(calls), is_mac=True, tmutil="tmutil",
+                                         mount="/System/Volumes/Data")      # the default depends on the machine running the test
+    thin = [c for c in calls if c[1] == "thinlocalsnapshots"]
+    assert errs == [] and len(thin) == 1 and thin[0][2] == "/System/Volumes/Data" and thin[0][3] == str(20 * dj.GB) and thin[0][4] == "1"
+    assert out and out[0]["rule"] == "mac-local-snapshots"
+
+
+def test_local_snapshots_skipped_on_linux_with_no_snapshots_or_while_backing_up():
+    for kw, runner_kw in ((dict(is_mac=False), {}), (dict(is_mac=True), {"snapshots": ()}),
+                          (dict(is_mac=True), {"status": "Running = 1;"})):
+        calls = []
+        out, errs = dj.thin_local_snapshots(False, dj.GB, runner=tm_runner(calls, **runner_kw), tmutil="tmutil", **kw)
+        assert out == [] and errs == [] and not any(c[1] == "thinlocalsnapshots" for c in calls)
+
+
+def test_local_snapshots_dry_run_thins_nothing():
+    calls = []
+    out, _ = dj.thin_local_snapshots(True, dj.GB, runner=tm_runner(calls), is_mac=True, tmutil="tmutil")
+    assert out and out[0].get("dry") and not any(c[1] == "thinlocalsnapshots" for c in calls)
+
+
+def _wire(monkeypatch, calls):
+    monkeypatch.setattr(dj, "collect_candidates", lambda now, running=None: [])
+    monkeypatch.setattr(dj, "docker_clean", lambda dry: ([], []))
+    monkeypatch.setattr(dj, "docker_orphan_volumes", lambda dry, **k: calls.append("volumes") or ([], []))
+    monkeypatch.setattr(dj, "worktree_clean", lambda dry, **k: calls.append("worktrees") or ([], []))
+    monkeypatch.setattr(dj, "pressure_candidates", lambda **k: calls.append("pressure-caches") or [])
+    monkeypatch.setattr(dj, "thin_local_snapshots", lambda dry, need, **k: calls.append("snapshots") or ([], []))
+
+
+def test_regular_cleanup_always_runs_volumes_and_worktrees_but_pressure_rules_only_under_pressure(monkeypatch):
+    calls = []
+    _wire(monkeypatch, calls)
+    dj.clean(False, now=NOW)
+    assert calls == ["volumes", "worktrees"]
+    calls.clear()
+    dj.clean(False, now=NOW, pressure=True, need_bytes=5 * dj.GB)
+    assert calls == ["pressure-caches", "volumes", "worktrees", "snapshots"]
+
+
+def test_the_kill_switch_turns_the_new_rules_off(monkeypatch):
+    calls = []
+    _wire(monkeypatch, calls)
+    monkeypatch.setenv("JANITOR_EXTRA_CLEAN", "0")
+    dj.clean(False, now=NOW, pressure=True)
+    assert calls == []
+
+
+def test_tick_passes_pressure_and_the_space_needed_to_clean(tmp_path, monkeypatch):
+    monkeypatch.setenv("JANITOR_STATE_DIR", str(tmp_path / "state"))
+    mon = {"status": "critical", "errors": ["x"], "mounts": [
+        {"path": "/", "label": "root", "total": 100 * dj.GB, "used": 96 * dj.GB, "free": 4 * dj.GB, "pct": 96.0, "status": "critical"}]}
+    monkeypatch.setattr(dj, "monitor", lambda: mon)
+    monkeypatch.setattr(dj, "recommend", lambda: {"ts": 1, "errors": [], "sections": {}})
+    got = {}
+    monkeypatch.setattr(dj, "clean", lambda dry, *a, **k: got.update(k) or dj.CleanResult())
+    dj.tick(dry=True)
+    assert got["pressure"] is True and got["need_bytes"] == 16 * dj.GB       # back down to 80% used
+    mon.update(status="up", mounts=[{**mon["mounts"][0], "pct": 50.0, "used": 50 * dj.GB, "free": 50 * dj.GB, "status": "up"}])
+    got.clear()
+    dj.tick(dry=True)
+    assert got["pressure"] is False
+
+
+def test_manual_clean_runs_the_pressure_rules_only_when_asked_or_when_the_disk_needs_it(monkeypatch, capsys):
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "up", "errors": [], "mounts": []})
+    got = []
+    monkeypatch.setattr(dj, "clean", lambda dry, *a, **k: got.append(k["pressure"]) or dj.CleanResult())
+    dj.main(["clean", "--dry-run"])
+    dj.main(["clean", "--dry-run", "--pressure"])
+    monkeypatch.setattr(dj, "monitor", lambda: {"status": "degraded", "errors": ["x"], "mounts": []})
+    dj.main(["clean", "--dry-run"])
+    assert got == [False, True, True]

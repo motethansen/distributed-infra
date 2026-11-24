@@ -6,7 +6,11 @@ One script, three jobs, run every 30 minutes by launchd (mac) or a systemd user 
   monitor    How full is the disk? Reports one status to Vantage (up / degraded / critical).
   clean      Deletes a SHORT list of things that regenerate on their own and are provably idle:
              stale /tmp scratch, test-run leftovers, old runner temp files and logs, old pip/npm
-             logs, dangling docker images and old build cache. Nothing else, ever.
+             logs, dangling docker images and old build cache, anonymous docker volumes nothing
+             uses (older than a day), and git worktrees that are clean and fully merged (older
+             than 3 days). Only while the disk is under pressure (degraded or critical) it also
+             drops the npm, Yarn, Gradle and Xcode DerivedData caches and, on a Mac, thins the
+             local Time Machine snapshots. Nothing else, ever.
   recommend  Lists what a human should look at: big caches, worktrees that are merged and
              clean, dormant node_modules/.venv/build dirs, huge old files, unused applications,
              and the sudo-only commands (journal, old snaps, apt). It NEVER deletes any of it.
@@ -15,13 +19,14 @@ Usage:
   disk_janitor.py [run]           monitor + clean, and recommend once a day  (the scheduled tick)
   disk_janitor.py monitor         just the disk numbers
   disk_janitor.py heartbeat       monitor + push to Vantage only (run every minute so it never goes stale)
-  disk_janitor.py clean [--dry-run]
+  disk_janitor.py clean [--dry-run] [--pressure]   (--pressure also runs the under-pressure rules now)
   disk_janitor.py recommend       fresh scan, prints the Markdown report, writes the files
   add --json for machine-readable output, --dry-run to delete nothing, --verbose to list every item.
 
 Settings (environment; nothing secret lives in this file):
   JANITOR_STATE_DIR      default ~/.local/state/disk-janitor (log, report.json, recommendations.md)
   JANITOR_COMPONENT      Vantage component id, default "<hostname>-disk"
+  JANITOR_EXTRA_CLEAN    set to 0 to switch off the volume, worktree and pressure-tier rules
   JANITOR_WARN_PCT / JANITOR_CRIT_PCT          default 85 / 92   (percent used)
   JANITOR_WARN_FREE_GB / JANITOR_CRIT_FREE_GB  default 50 / 20   (GB free)
   VANTAGE_URL, VANTAGE_INGEST_KEY              reporting is skipped if VANTAGE_URL is unset
@@ -44,6 +49,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable, Iterable, Optional
 
 GB = 1024 ** 3
@@ -475,6 +481,147 @@ def docker_clean(dry: bool, runner: Callable = run, docker: Optional[str] = None
     return removed, errors
 
 
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+ORPHAN_VOLUME_MIN_AGE_S = DAY
+WORKTREE_MIN_AGE_DAYS = 3
+
+
+def _chunks(seq: list, n: int) -> Iterable[list]:
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def parse_docker_time(text: str) -> Optional[float]:
+    """Docker's CreatedAt (RFC 3339, 'Z' or an offset, sometimes nanoseconds) as epoch seconds; None if unreadable."""
+    t = re.sub(r"(\.\d{6})\d+", r"\1", text.strip()).replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(t).timestamp()
+    except ValueError:
+        return None
+
+
+def docker_orphan_volumes(dry: bool, now: Optional[float] = None, runner: Callable = run,
+                          docker: Optional[str] = None, min_age: float = ORPHAN_VOLUME_MIN_AGE_S) -> tuple[list, list]:
+    """Anonymous volumes (64-character hex names) that no container, running or stopped, refers to and that
+    are more than a day old. Test runs leave one behind per throwaway Postgres (226 GB on the thinkpad in
+    November 2026). A named volume is never touched, and Docker itself refuses a volume that became used."""
+    now = time.time() if now is None else now
+    docker = docker or find_docker()
+    if not docker:
+        return [], []
+    rc, out = runner([docker, "volume", "ls", "-q", "-f", "dangling=true"], 120)
+    if rc != 0:
+        return [], []                                   # engine down: docker_clean already says so
+    names = [n for n in out.split() if HEX64.match(n)]
+    old: list[str] = []
+    for chunk in _chunks(names, 100):
+        rc, out = runner([docker, "volume", "inspect", "--format", "{{.Name}} {{.CreatedAt}}", *chunk], 120)
+        if rc != 0:
+            continue
+        for line in out.splitlines():
+            name, _, created = line.partition(" ")
+            ts = parse_docker_time(created)
+            if name in chunk and ts is not None and now - ts >= min_age:
+                old.append(name)
+    if not old:
+        return [], []
+    if dry:
+        return [{"rule": "docker-orphan-volumes-1d", "path": f"{len(old)} anonymous volumes", "bytes": 0, "dry": True}], []
+    gone, errors = 0, []
+    for chunk in _chunks(old, 100):
+        rc, out = runner([docker, "volume", "rm", *chunk], 300)
+        gone += sum(1 for line in out.splitlines() if line.strip() in chunk)
+        if rc in (124, 127):
+            errors.append(f"docker-orphan-volumes-1d failed (rc={rc})")
+    if not gone:
+        return [], errors
+    return [{"rule": "docker-orphan-volumes-1d", "path": f"{gone} anonymous volumes (over a day old)", "bytes": 0}], errors
+
+
+def worktree_clean(dry: bool, now: Optional[float] = None, home: str = HOME, runner: Callable = run,
+                   ps_lines: Optional[list] = None, min_age_days: float = WORKTREE_MIN_AGE_DAYS) -> tuple[list, list]:
+    """Linked worktrees under ~/wt, ~/wt-* and ~/worktrees that are clean and fully merged (the same test
+    `recommend` calls safe) AND were created more than 3 days ago, removed with a plain `git worktree remove`:
+    never --force, so git itself refuses anything with uncommitted work. Waits while tests run."""
+    now = time.time() if now is None else now
+    if tests_running(ps_lines):
+        return [], []
+    removed, errors = [], []
+    for p in worktree_paths(home):
+        gitfile = os.path.join(p, ".git")
+        try:
+            age = now - os.lstat(gitfile).st_mtime
+        except OSError:
+            continue
+        if os.path.islink(p) or not os.path.isfile(gitfile) or age < min_age_days * DAY:
+            continue
+        rec = classify_worktree(p, with_size=False)
+        if rec is None or rec.confidence != "safe":
+            continue
+        rc, common = git_out(p, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        main_repo = os.path.dirname(common.rstrip("/")) if rc == 0 else ""
+        if not main_repo or os.path.realpath(main_repo) == os.path.realpath(p):
+            continue
+        if dry:
+            removed.append({"rule": "worktree-merged-3d", "path": p, "bytes": 0, "dry": True})
+            continue
+        size = du_bytes(p, 60) or 0
+        rc, _ = runner(["git", "-C", main_repo, "worktree", "remove", p], 120)
+        if rc == 0:
+            removed.append({"rule": "worktree-merged-3d", "path": p, "bytes": size})
+        elif rc in (124, 127):
+            errors.append(f"worktree-merged-3d: {p}: git did not finish (rc={rc})")
+    return removed, errors
+
+
+def pressure_candidates(home: str = HOME, ps_lines: Optional[list] = None, is_mac: Optional[bool] = None) -> list[Candidate]:
+    """Caches that rebuild themselves but cost a download or a rebuild next time, so they go only while the disk
+    is degraded or critical: npm, Yarn, Gradle (not while a daemon runs) and Xcode DerivedData (not while Xcode
+    builds). Flutter, pub, restic, OrbStack and the Android SDK are deliberately not on the list."""
+    is_mac = IS_MAC if is_mac is None else is_mac
+    if ps_lines is None:
+        rc, out = run(["ps", "-U", str(os.getuid()), "-o", "args="], 15)
+        ps_lines = out.splitlines() if rc == 0 else []
+    busy = "\n".join(ps_lines).lower()
+    cands = [Candidate("pressure-npm-cache", os.path.join(home, ".npm", "_cacache"), os.path.join(home, ".npm"))]
+    if is_mac:
+        cands.append(Candidate("pressure-yarn-cache", os.path.join(home, "Library", "Caches", "Yarn"),
+                               os.path.join(home, "Library", "Caches")))
+    else:
+        cands.append(Candidate("pressure-yarn-cache", os.path.join(home, ".cache", "yarn"), os.path.join(home, ".cache")))
+    if "gradle" not in busy:
+        cands.append(Candidate("pressure-gradle-caches", os.path.join(home, ".gradle", "caches"), os.path.join(home, ".gradle")))
+    if is_mac and "xcodebuild" not in busy and "/xcode.app/contents/macos/xcode" not in busy:
+        cands.append(Candidate("pressure-xcode-derived-data", os.path.join(home, "Library", "Developer", "Xcode", "DerivedData"),
+                               os.path.join(home, "Library", "Developer", "Xcode")))
+    return [c for c in cands if os.path.isdir(c.path)]
+
+
+def thin_local_snapshots(dry: bool, need_bytes: int, runner: Callable = run, mount: Optional[str] = None,
+                         is_mac: Optional[bool] = None, tmutil: Optional[str] = None) -> tuple[list, list]:
+    """macOS keeps hourly local Time Machine snapshots; while they exist, deleted files do not give their space
+    back (the mini sat at 97% after 18 GB of cleanup until 25 snapshots were thinned). They are purgeable by
+    definition, so under pressure ask macOS to thin them. Skipped while a backup runs."""
+    is_mac = IS_MAC if is_mac is None else is_mac
+    if not is_mac:
+        return [], []
+    tmutil = tmutil or shutil.which("tmutil") or "/usr/bin/tmutil"
+    mount = mount or ("/System/Volumes/Data" if os.path.isdir("/System/Volumes/Data") else "/")
+    rc, out = runner([tmutil, "status"], 15)
+    if rc == 0 and re.search(r"Running\s*=\s*1", out):
+        return [], []
+    rc, out = runner([tmutil, "listlocalsnapshots", mount], 30)
+    count = sum(1 for line in out.splitlines() if "com.apple.TimeMachine" in line) if rc == 0 else 0
+    if not count:
+        return [], []
+    if dry:
+        return [{"rule": "mac-local-snapshots", "path": f"{count} local snapshots", "bytes": 0, "dry": True}], []
+    rc, _ = runner([tmutil, "thinlocalsnapshots", mount, str(max(int(need_bytes), GB)), "1"], 300)
+    if rc != 0:
+        return [], [f"mac-local-snapshots failed (rc={rc})"]
+    return [{"rule": "mac-local-snapshots", "path": f"{count} local snapshots thinned", "bytes": 0}], []
+
+
 def collect_candidates(now: float, running: Optional[bool] = None) -> list[Candidate]:
     running = tests_running() if running is None else running
     cands = tmp_candidates(now, running, ["/tmp"])
@@ -488,10 +635,13 @@ def collect_candidates(now: float, running: Optional[bool] = None) -> list[Candi
 
 
 def clean(dry: bool, now: Optional[float] = None, candidates: Optional[list[Candidate]] = None,
-          with_docker: bool = True) -> CleanResult:
+          with_docker: bool = True, pressure: bool = False, need_bytes: int = 0) -> CleanResult:
     now = time.time() if now is None else now
     res = CleanResult()
+    extra = candidates is None and os.environ.get("JANITOR_EXTRA_CLEAN", "1") != "0"
     cands = candidates if candidates is not None else collect_candidates(now)
+    if extra and pressure:
+        cands = cands + pressure_candidates()
     for c in cands:
         if not safe_to_delete(c.path, c.root):
             res.skipped.append(f"{c.path}: refused by safety check")
@@ -509,8 +659,17 @@ def clean(dry: bool, now: Optional[float] = None, candidates: Optional[list[Cand
             res.errors.append(f"{c.rule}: {c.path}: {e.strerror or e}")
         res.removed.append({"rule": c.rule, "path": c.path, "bytes": size})
         res.freed += size
+    steps: list[Callable[[], tuple[list, list]]] = []
     if with_docker:
-        removed, errors = docker_clean(dry)
+        steps.append(lambda: docker_clean(dry))
+        if extra:
+            steps.append(lambda: docker_orphan_volumes(dry))
+    if extra:
+        steps.append(lambda: worktree_clean(dry))
+        if pressure:
+            steps.append(lambda: thin_local_snapshots(dry, need_bytes))
+    for step in steps:
+        removed, errors = step()
         res.removed += removed
         res.errors += errors
         res.freed += sum(r["bytes"] for r in removed)
@@ -625,14 +784,20 @@ def git_out(path: str, *args: str, timeout: float = 30) -> tuple[int, str]:
     return run(["git", "-C", path, *args], timeout)
 
 
-def classify_worktree(path: str) -> Optional[Rec]:
+def worktree_paths(home: str = HOME) -> list[str]:
+    import glob
+    pats = [os.path.join(home, "wt", "*"), os.path.join(home, "wt-*"), os.path.join(home, "worktrees", "*")]
+    return [p for pat in pats for p in sorted(glob.glob(pat)) if os.path.isdir(p)]
+
+
+def classify_worktree(path: str, with_size: bool = True) -> Optional[Rec]:
     if not os.path.isfile(os.path.join(path, ".git")):          # a linked worktree has a .git FILE
         return None
     rc, common = git_out(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if rc != 0 or not common:
         return None
     main_repo = os.path.dirname(common.rstrip("/"))
-    size = du_bytes(path, 60)
+    size = du_bytes(path, 60) if with_size else None
     rc, dirty = git_out(path, "status", "--porcelain")
     rc2, _ = git_out(path, "merge-base", "--is-ancestor", "HEAD", "origin/main")
     squashed = False
@@ -661,15 +826,11 @@ def classify_worktree(path: str) -> Optional[Rec]:
 
 
 def rec_worktrees() -> list[Rec]:
-    import glob
-    pats = [os.path.join(HOME, "wt", "*"), os.path.join(HOME, "wt-*"), os.path.join(HOME, "worktrees", "*")]
     out = []
-    for pat in pats:
-        for p in sorted(glob.glob(pat)):
-            if os.path.isdir(p):
-                r = classify_worktree(p)
-                if r:
-                    out.append(r)
+    for p in worktree_paths():
+        r = classify_worktree(p)
+        if r:
+            out.append(r)
     out.sort(key=lambda r: -(r.bytes or 0))
     return out
 
@@ -1027,11 +1188,19 @@ def load_report() -> dict:
         return {}
 
 
+def pressure_state(mon: dict, force: bool = False) -> tuple[bool, int]:
+    """(is the disk under pressure, bytes to free to get a stressed mount back to 80% used)."""
+    need = max([int(m["used"] - m["total"] * 80 // 100) for m in mon["mounts"]
+                if m.get("status") != "up" and "used" in m and "total" in m] or [0])
+    return (force or mon["status"] != "up"), max(need, 0)
+
+
 def tick(dry: bool, force_recommend: bool = False, with_recommend: bool = True) -> dict:
     """The scheduled run: monitor, clean, push to Vantage, and refresh the recommendations daily."""
     sd = state_dir()
     mon = monitor()
-    cl = clean(dry)
+    pressure, need = pressure_state(mon)
+    cl = clean(dry, pressure=pressure, need_bytes=need)
     for r in cl.removed:
         log_line(f"{'[dry] would remove' if r.get('dry') else 'removed'} {r['rule']}: {r['path']} ({fmt(r['bytes'])})", echo=False)
     for e in cl.errors:
@@ -1119,7 +1288,8 @@ def main(argv: Optional[list[str]] = None) -> int:
               "\n".join(f"{m['label']}: {m['pct']}% used, {fmt(m['free'])} free ({m['status']})" for m in out["mounts"]))
         return 0 if out["status"] == "up" else 1
     if cmd == "clean":
-        res = clean(dry)
+        pressure, need = pressure_state(monitor(), force="--pressure" in args)
+        res = clean(dry, pressure=pressure, need_bytes=need)
         if as_json:
             print(json.dumps(res.__dict__, indent=1))
         else:
