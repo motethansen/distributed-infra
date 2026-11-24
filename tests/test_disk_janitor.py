@@ -795,7 +795,8 @@ def tm_runner(calls, snapshots=("com.apple.TimeMachine.2026-11-19-125334.local",
 
 def test_local_snapshots_are_thinned_only_on_a_mac_under_pressure_when_no_backup_runs():
     calls = []
-    out, errs = dj.thin_local_snapshots(False, 20 * dj.GB, runner=tm_runner(calls), is_mac=True, tmutil="tmutil")
+    out, errs = dj.thin_local_snapshots(False, 20 * dj.GB, runner=tm_runner(calls), is_mac=True, tmutil="tmutil",
+                                         mount="/System/Volumes/Data")      # the default depends on the machine running the test
     thin = [c for c in calls if c[1] == "thinlocalsnapshots"]
     assert errs == [] and len(thin) == 1 and thin[0][2] == "/System/Volumes/Data" and thin[0][3] == str(20 * dj.GB) and thin[0][4] == "1"
     assert out and out[0]["rule"] == "mac-local-snapshots"
