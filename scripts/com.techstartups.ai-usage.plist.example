@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd agent: nightly AI usage graph + redacted transcript archive to the PRIVATE Wasabi prefix
+     vizneo-backups/ai-archive (scripts/ai_usage_graph.py nightly). Reports once a night to Vantage.
+     Install: copy to ~/Library/LaunchAgents/com.techstartups.ai-usage.plist, replace __REPO__ and
+     __COMPONENT__ (mbp-ai-usage | mm-ai-usage), then
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.techstartups.ai-usage.plist
+     Holds no secrets: VANTAGE_INGEST_KEY comes from the repo .env via run-with-env.sh and the Wasabi key
+     from ~/.config/mh-backup/wasabi.env (or an rclone remote named wasabi:). A laptop that is asleep at
+     03:30 runs it at the next wake. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.techstartups.ai-usage</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO__/scripts/run-with-env.sh</string>
+        <string>--</string>
+        <string>/usr/bin/python3</string>
+        <string>__REPO__/scripts/ai_usage_graph.py</string>
+        <string>nightly</string>
+    </array>
+    <key>WorkingDirectory</key><string>__REPO__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>AI_COMPONENT</key><string>__COMPONENT__</string>
+        <key>VANTAGE_URL</key><string>http://100.76.214.54:8055</string>
+        <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
+    <key>Nice</key><integer>10</integer>
+    <key>LowPriorityIO</key><true/>
+    <key>ProcessType</key><string>Background</string>
+    <key>RunAtLoad</key><false/>
+    <key>StandardOutPath</key><string>__REPO__/logs/ai-usage.out.log</string>
+    <key>StandardErrorPath</key><string>__REPO__/logs/ai-usage.err.log</string>
+</dict>
+</plist>
