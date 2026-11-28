@@ -100,6 +100,8 @@ class Queue:
         if p.get("role") == "tester":
             n = p["prompt"].count("\n1. ") and 1
             return 'ran it.\n{"validation":{"suite":"3 passed, 0 failed","criteria":[{"n":1,"status":"pass","evidence":"test_x"}]}}'
+        if p.get("role") == "dev_backend":
+            return f"output of {p.get('flow_key')}\nFILE: app/{p.get('flow_key')}.py\n```python\nx = 1\n```"
         return f"output of {p.get('flow_key') or p['role']}"
 
     def client(self, urls=("http://a:1",)):
@@ -109,8 +111,21 @@ class Queue:
         return [self.tasks[i]["payload"] for i in self.order]
 
 
+class FakeRemote:
+    """remote_head stand-in: each read returns the next SHA, so the head moves after the integrator unless told to stay."""
+
+    def __init__(self, shas=("aaa", "bbb")):
+        self.shas, self.calls = list(shas), []
+
+    def __call__(self, remote, branch):
+        self.calls.append((remote, branch))
+        return self.shas[min(len(self.calls) - 1, len(self.shas) - 1)]
+
+
 def _run(q, tasks, **kw):
     log = []
+    kw.setdefault("remote_head", FakeRemote())
+    kw.setdefault("project_cfg", {"repo": "git@github.com:x/y.git", "dir": "y"})
     out = sf.dispatch(q.client(), "budgetapp", "S6", STORY, sf.parse_plan(_plan(*tasks), ROLES),
                       go=kw.pop("go", True), sleep=lambda s: None, say=log.append, **kw)
     return out, log
@@ -134,7 +149,7 @@ def test_every_queued_task_carries_project_sprint_story_and_role():
 
 def test_dependency_results_are_handed_to_the_next_task_and_waves_run_in_order():
     q = Queue(agent_for=lambda p: "claude")
-    _run(q, [_t("api", "dev_frontend"), _t("ui", "dev_frontend", ["api"], prompt="build ui")])
+    _run(q, [_t("api", "dev_frontend"), _t("ui", "dev_frontend", ["api"], prompt="build ui")], project_cfg=None)
     ui = next(p for p in q.payloads() if p.get("flow_key") == "ui")
     assert "output of api" in ui["prompt"] and ui["prompt"].startswith("build ui")
     keys = [p.get("flow_key") for p in q.payloads() if p.get("flow_key")]
@@ -790,3 +805,97 @@ def test_a_story_level_branch_does_void_the_approval_which_is_why_the_branch_liv
     approved["story"]["branch"] = "dis/S-1"
     assert not sf.is_approved(approved)
 
+
+
+# ── the remote branch proves the integrator worked ───────────────────────────
+
+def test_integrator_that_pushed_nothing_fails_the_step_and_stops_the_flow():
+    q = Queue()
+    out = []
+    rh = FakeRemote(("aaa", "aaa"))
+    with pytest.raises(sf.PlanError, match=r"integrate:t1\+t2 applied nothing to .* \(agent claude\)"):
+        sf.dispatch(q.client(), "budgetapp", "S6", STORY, sf.parse_plan(_plan(_t("t1", "dev_backend"), _t("t2", "dev_backend")), ROLES),
+                    go=True, sleep=lambda s: None, say=out.append, project_cfg={"repo": "r", "dir": "y"}, remote_head=rh)
+    assert [p["role"] for p in q.payloads()] == ["dev_backend", "dev_backend", "integrator"]     # no tester, no reviewer
+
+
+def test_no_ref_before_and_none_after_is_nothing_applied_but_no_ref_then_a_ref_is_applied():
+    with pytest.raises(sf.PlanError, match="applied nothing"):
+        _run(Queue(), [_t("t1", "dev_backend")], remote_head=FakeRemote((None, None)))
+    out, _ = _run(Queue(), [_t("t1", "dev_backend")], remote_head=FakeRemote((None, "abc")))
+    assert [e["role"] for e in out][-2:] == ["tester", "reviewer"]
+
+
+def test_failed_integrator_step_is_reported_as_failed():
+    q, said = Queue(), []
+    with pytest.raises(sf.PlanError):
+        sf.dispatch(q.client(), "budgetapp", "S6", STORY, sf.parse_plan(_plan(_t("t1", "dev_backend")), ROLES), go=True,
+                    sleep=lambda s: None, say=said.append, project_cfg={"repo": "r", "dir": "y"}, remote_head=FakeRemote(("a", "a")))
+    assert any(m.startswith("integrate:t1 [integrator] failed") for m in said)
+
+
+def test_unreadable_remote_fails_with_the_reason_and_no_remote_url_is_an_error():
+    def boom(remote, branch):
+        raise RuntimeError("auth denied")
+    with pytest.raises(sf.PlanError, match="could not verify integrator push: auth denied"):
+        _run(Queue(), [_t("t1", "dev_backend")], remote_head=boom)
+    with pytest.raises(sf.PlanError, match="no remote URL"):
+        _run(Queue(), [_t("t1", "dev_backend")], project_cfg=None)
+
+
+def test_dry_run_does_not_read_the_remote():
+    rh = FakeRemote()
+    _run(Queue(), [_t("t1", "dev_backend")], go=False, remote_head=rh)
+    assert rh.calls == []
+
+
+def test_integrator_is_queued_with_the_integrate_timeout_and_waited_on_longer(monkeypatch):
+    monkeypatch.setenv("INTEGRATE_TIMEOUT_SECS", "321")
+    q = Queue()
+    waits = []
+    orig = sf.FleetClient.wait
+    monkeypatch.setattr(sf.FleetClient, "wait", lambda self, ids, timeout=1800, **kw: (waits.append(timeout), orig(self, ids, timeout=timeout, **kw))[1])
+    _run(q, [_t("t1", "dev_backend")])
+    assert next(p for p in q.payloads() if p["role"] == "integrator")["timeout"] == 321
+    assert 441 in waits and waits.count(1800) >= 1
+
+
+def test_integrator_timeout_message_says_whether_a_commit_reached_the_branch(monkeypatch):
+    monkeypatch.setenv("INTEGRATE_TIMEOUT_SECS", "60")
+    for shas, phrase in ((("a", "a"), "no commit on"), (("a", "b"), "a commit reached")):
+        q = Queue()
+        orig = q.handler
+
+        def handler(req, q=q, orig=orig):
+            r = orig(req)
+            if req.method == "GET" and q.tasks and q.tasks[q.order[-1]]["payload"]["role"] == "integrator":
+                t = q.tasks[q.order[-1]]
+                t["status"], t["notes"] = "failed", "timed out"
+                return httpx.Response(200, json=t)
+            return r
+        q.handler = handler
+        with pytest.raises(sf.PlanError) as e:
+            _run(q, [_t("t1", "dev_backend"), _t("t2", "dev_backend")], remote_head=FakeRemote(shas))
+        msg = str(e.value)
+        assert msg.startswith("integrate:t1+t2 timed out after 60 s on claude@") and phrase in msg
+        assert "--rerun --as claude" in msg and "INTEGRATE_TIMEOUT_SECS" in msg
+
+
+# ── DeepSeek answers must be code and must fit ───────────────────────────────
+
+def test_deepseek_answer_without_a_FILE_block_fails_before_anything_is_queued_or_read():
+    q = Queue()
+    q.reply = lambda p: "I would write a function that ..."
+    rh = FakeRemote()
+    with pytest.raises(sf.PlanError, match="deepseek task t1 returned no code"):
+        _run(q, [_t("t1", "dev_backend")], remote_head=rh)
+    assert rh.calls == [] and "integrator" not in [p["role"] for p in q.payloads()]
+
+
+def test_deepseek_answer_over_the_cutoff_is_refused_not_truncated():
+    q = Queue()
+    q.reply = lambda p: "FILE: a.py\n" + "x" * 12001
+    with pytest.raises(sf.PlanError, match=r"deepseek task t1 answer is 12012 chars, over the 12000 cut-off"):
+        _run(q, [_t("t1", "dev_backend")])
+    with pytest.raises(sf.PlanError, match="t1"):
+        sf.integrate_prompt(STORY, [({"key": "t1", "title": "T"}, "FILE: a\n" + "x" * 12000)])
